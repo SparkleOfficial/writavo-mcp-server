@@ -1,6 +1,6 @@
 {
   "name": "@writavo/mcp-server",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "mcpName": "com.writavo/cms",
   "description": "MCP server for the Writavo Content API. Draft, edit, organise, schedule and publish a Site's content from any AI assistant, with tools generated from the published OpenAPI specification.",
   "keywords": [
@@ -12,7 +12,7 @@
     "headless-cms",
     "blogging"
   ],
-  "license": "SEE LICENSE IN LICENSE",
+  "license": "MIT",
   "author": "Writavo",
   "homepage": "https://writavo.com/docs/mcp",
   "repository": {

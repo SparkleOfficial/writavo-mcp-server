@@ -103,4 +103,13 @@ anything under `src/generated/` fails CI.
 
 ## Licence
 
-Proprietary. See LICENSE.
+**MIT** ([LICENSE](LICENSE)). Fork it, modify it, vendor it, ship it inside something else.
+
+The MIT grant covers **this client package only**. It is not a licence to the Writavo Content API
+that the package calls, or to any other part of Writavo. Using the API still requires your own
+credentials and is governed by the terms at <https://writavo.com/terms>, and `openapi.yaml` (the
+specification this package is compiled from) remains the proprietary contract it always was.
+
+That split is deliberate. This package is a thin, generated client: there is nothing in it worth
+restricting, and an MIT client is easier to trust, audit, package and list in a registry. The
+product is the API behind it.
