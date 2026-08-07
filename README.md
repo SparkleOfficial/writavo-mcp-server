@@ -93,9 +93,9 @@ This package lives in the Writavo monorepo. Its tool schemas, descriptions and r
 generated, not written:
 
 ```
-pnpm mcp:gen        regenerate from openapi.yaml
-pnpm mcp:smoke      build, then run the offline smoke test
-pnpm docs:check     rule 12 fails if the committed tool surface is stale
+npm run gen         regenerate from the vendored openapi.yaml
+npm test            run the 44 offline smoke checks
+npm run gen:check   fails if the committed tool surface is stale
 ```
 
 Adding an endpoint to `openapi.yaml` and regenerating is the whole of adding a tool. Editing

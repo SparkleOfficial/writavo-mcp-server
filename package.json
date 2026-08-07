@@ -42,8 +42,8 @@
     "typecheck": "tsc -p tsconfig.scripts.json",
     "smoke": "tsx scripts/smoke.ts",
     "integration": "tsx scripts/integration.ts",
-    "test": "pnpm smoke",
-    "prepublishOnly": "pnpm build && pnpm smoke",
+    "test": "npm run smoke",
+    "prepublishOnly": "npm run build && npm run smoke",
     "gen": "node scripts/gen-mcp-tools.mjs",
     "gen:check": "node scripts/gen-mcp-tools.mjs --check"
   },

@@ -56,8 +56,8 @@ Full detail in [SECURITY.md](SECURITY.md).
 ## Verification
 
 ```bash
-pnpm install
-pnpm mcp:smoke
+npm install
+npm test
 ```
 
 Forty four checks, all offline. They include a real MCP client handshake over stdio asserting that
