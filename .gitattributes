@@ -1,0 +1,14 @@
+# Normalize line endings to LF in the repo (Windows checkouts may use CRLF locally).
+# Keeps SQL migrations, Deno edge functions, and shell scripts portable.
+* text=auto eol=lf
+
+# Binary assets — never normalize.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+*.pdf binary

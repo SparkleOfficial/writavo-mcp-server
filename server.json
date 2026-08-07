@@ -1,0 +1,29 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "com.writavo/cms",
+  "description": "Draft, edit, organise, schedule and publish a Writavo Site's content. Tools generated from the published OpenAPI specification.",
+  "repository": {
+    "url": "https://github.com/SparkleOfficial/writavo-mcp-server",
+    "source": "github"
+  },
+  "version": "0.1.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@writavo/mcp-server",
+      "version": "0.1.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "WRITAVO_API_KEY",
+          "description": "A Writavo API key (wv_sk_ or wv_pub_) from https://app.writavo.com/settings/api-keys. Without one, only the offline API reference tool works.",
+          "isRequired": false,
+          "isSecret": true,
+          "format": "string"
+        }
+      ]
+    }
+  ]
+}

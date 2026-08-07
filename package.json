@@ -1,0 +1,66 @@
+{
+  "name": "@writavo/mcp-server",
+  "version": "0.1.0",
+  "mcpName": "com.writavo/cms",
+  "description": "MCP server for the Writavo Content API. Draft, edit, organise, schedule and publish a Site's content from any AI assistant, with tools generated from the published OpenAPI specification.",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "cms",
+    "writavo",
+    "content-api",
+    "headless-cms",
+    "blogging"
+  ],
+  "license": "SEE LICENSE IN LICENSE",
+  "author": "Writavo",
+  "homepage": "https://writavo.com/docs/mcp",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/SparkleOfficial/writavo-mcp-server.git"
+  },
+  "bugs": {
+    "url": "https://writavo.com/support"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "bin": {
+    "writavo-mcp": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "SECURITY.md",
+    "smithery.yaml",
+    "server.json"
+  ],
+  "scripts": {
+    "build": "node scripts/gen-mcp-tools.mjs --check && tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/index.js",
+    "typecheck": "tsc -p tsconfig.scripts.json",
+    "smoke": "tsx scripts/smoke.ts",
+    "integration": "tsx scripts/integration.ts",
+    "test": "pnpm smoke",
+    "prepublishOnly": "pnpm build && pnpm smoke",
+    "gen": "node scripts/gen-mcp-tools.mjs",
+    "gen:check": "node scripts/gen-mcp-tools.mjs --check"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.7.2",
+    "yaml": "^2.6.0"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

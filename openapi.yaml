@@ -1,0 +1,3655 @@
+openapi: 3.1.0
+
+info:
+  title: Writavo Content API
+  version: "1.0.0"
+  summary: The CMS control plane for a Writavo Site.
+  description: |
+    The Writavo Content API is the programmable half of the CMS. It lets you create, edit,
+    organise, publish and schedule content without opening the dashboard, and it is the same
+    surface the dashboard itself is built on.
+
+    ## The Site is resolved from your key, never from your request
+
+    Every key belongs to exactly one Site. The API resolves the owning Site from the key on
+    every request, so there is no site or tenant parameter anywhere in this specification.
+    An object belonging to a different Site is not visible to you at all: it returns 404,
+    never 403, so the API never discloses that it exists.
+
+    ## Draft by default: what happens if you create an article and never publish it
+
+    `POST /articles` always creates the article at `status: draft`. A draft is private. It is
+    not readable on your public blog, it is not in your sitemap, it is not in any feed, and no
+    part of the AI pipeline will ever pick it up, rewrite it or publish it. It simply sits
+    there, editable, until you call `POST /articles/{id}/publish` or delete it.
+
+    There is no way to create an article that is public in one call. Publishing is always a
+    separate, explicit request. That is the safety property this whole API rests on: nothing
+    you send us becomes public by accident.
+
+    ## Statuses you may set, and statuses you may only read
+
+    Three statuses are yours: `draft`, `scheduled` and `published`. You move between them with
+    the lifecycle endpoints (`/publish`, `/unpublish`, `/schedule`, `/cancel-schedule`), not by
+    PATCHing `status`.
+
+    The remaining ten statuses belong to the AI pipeline. You can read them, so you can see
+    what the engine is doing, but you cannot set them. A `PATCH` that tries to move an article
+    into a pipeline status is rejected with `422 VALIDATION_FAILED`. This prevents an API
+    client from injecting work into the generation engine, and therefore into your bill.
+
+    ## What happens if you run out of credits mid-pipeline
+
+    `POST /pipeline/runs` is the only billable operation in this API. Everything else, including
+    publishing, is free: publishing an article you already have makes no external call.
+
+    A pipeline run is gated by four independent checks, in this order:
+
+    1. **Scope.** Your key must carry `pipeline:run`, or you get `403 INSUFFICIENT_SCOPE`.
+    2. **Entitlement.** Your plan must include the capability, or you get `402 NOT_ENTITLED`.
+       Note this applies to the AI pipeline only. The CMS half of this API - content, media,
+       taxonomy, webhooks, reads and writes - is included on every plan, and is billed by usage
+       rather than gated by tier.
+    3. **Credits.** Your organisation must be able to afford the next unit of work, or you get
+       `402 INSUFFICIENT_CREDITS`.
+    4. **Spend cap.** Your Site's own monthly cap must not be reached, or you get
+       `402 SPEND_CAP_REACHED`.
+
+    These are four distinct error codes on purpose, because the fix differs: buy credits, raise
+    your cap, or upgrade your plan.
+
+    A run is a request to the engine, not a transaction. If credits run out part way through a
+    run that has already started, the engine stops cleanly at the next stage boundary. Work
+    already completed is kept and already charged. Nothing is rolled back, no article is left
+    half written, and every article stays at whatever status it legitimately reached. The run
+    finishes with `status: partial` and a reason you can read from `GET /pipeline/runs/{id}`.
+    Top up and request another run and the engine resumes from where it stopped.
+
+    ## Versioning promise
+
+    `/v1` is additive only. We may add new endpoints, new optional request fields and new
+    response fields, and you must tolerate unknown response fields. We will not, within `/v1`,
+    remove a field, remove or narrow an enum value, rename anything, make an optional request
+    field required, or change the HTTP status code of an existing outcome. Any of those would
+    ship as `/v2`, with `/v1` supported alongside it.
+
+    New values may be added to read-only enums (for example `article.status`, if the pipeline
+    grows a stage). Treat every read-only enum as open and fall through gracefully on a value
+    you do not recognise.
+  contact:
+    name: Writavo Support
+    url: https://writavo.com/support
+  license:
+    name: Proprietary
+    url: https://writavo.com/terms
+
+servers:
+  - url: https://api.writavo.com/v1
+    description: Production
+
+externalDocs:
+  description: Guides, quickstarts and the rendered reference
+  url: https://writavo.com/docs
+
+tags:
+  - name: Meta
+    description: Connectivity, Site information, content types, limits and usage.
+  - name: Articles
+    description: The content spine. Create, edit, organise, publish and schedule.
+  - name: Categories
+    description: The closed taxonomy. Exactly one category per article.
+  - name: Tags
+    description: The cross cutting taxonomy. Many tags per article.
+  - name: Authors
+    description: The byline roster for a Site.
+  - name: Media
+    description: The media library. Two step upload, then registration.
+  - name: Pipeline
+    description: The AI generation engine. The only billable surface in this API.
+  - name: API keys
+    description: Key management. Specified here, implemented in API-2.
+  - name: Webhooks
+    description: |
+      Outbound event delivery. Register an HTTPS endpoint, subscribe it to events, and receive a
+      signed POST whenever your content changes, from this API or from the dashboard.
+
+security:
+  - apiKey: []
+
+paths:
+  # ==========================================================================
+  # META
+  # ==========================================================================
+  /ping:
+    get:
+      operationId: ping
+      tags: [Meta]
+      summary: Verify a key
+      description: |
+        The cheapest possible authenticated call. Returns the kind of key you presented and the
+        scopes it carries. Use it to confirm credentials during setup, and as a liveness probe.
+        It touches no content, so it is exempt from the write rate limit.
+      x-scope: none
+      x-permission: none
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: true
+      responses:
+        "200":
+          description: The key is valid.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [pong, key_kind, scopes]
+                        properties:
+                          pong:
+                            type: boolean
+                            const: true
+                          key_kind:
+                            $ref: "#/components/schemas/KeyKind"
+                          scopes:
+                            type: array
+                            items: { $ref: "#/components/schemas/Scope" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /site:
+    get:
+      operationId: getSite
+      tags: [Meta]
+      summary: Read Site information
+      description: |
+        Public facing information about the Site your key belongs to: its display name, the
+        domain its blog is served from, its locale and its timezone. Scheduling times are
+        interpreted against this timezone when no offset is supplied.
+      x-scope: meta:read
+      x-permission: none
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: true
+      responses:
+        "200":
+          description: Site information.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Site" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /content-types:
+    get:
+      operationId: listContentTypes
+      tags: [Meta]
+      summary: List content types
+      description: |
+        The article formats available to this Site. A format is an SEO blueprint (How-To,
+        Listicle, Versus and so on) that shapes how the generator structures an article, and
+        that you may set on any article via `format_id`.
+
+        The list merges the platform defaults with any formats defined for your Site. A Site
+        format with the same `key` as a platform default overrides it, and only the override is
+        returned. Formats are read only in v1: defining your own is a dashboard action.
+      x-scope: meta:read
+      x-permission: none
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: true
+      responses:
+        "200":
+          description: The available content types.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [items]
+                        properties:
+                          items:
+                            type: array
+                            items: { $ref: "#/components/schemas/ContentType" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /usage:
+    get:
+      operationId: getUsage
+      tags: [Meta]
+      summary: Read plan limits, usage and balances
+      description: |
+        What your plan allows, what you have used in the current period, and what you can still
+        spend. Read this before a pipeline run if you want to fail fast rather than handle a
+        402, and read it after a run to see the balance move.
+
+        `credits.balance` is the organisation wide credit balance shared by every Site under the
+        account. `spend_cap` is this Site's own monthly ceiling and is independent of it: a Site
+        can be capped while the organisation still has credits, which is the point of a cap.
+      x-scope: meta:read
+      x-permission: none
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: false
+      responses:
+        "200":
+          description: Limits, usage and balances.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Usage" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  # ==========================================================================
+  # ARTICLES
+  # ==========================================================================
+  /articles:
+    get:
+      operationId: listArticles
+      tags: [Articles]
+      summary: List articles
+      description: |
+        Cursor paginated, newest updated first.
+
+        The default projection deliberately omits `content`. Article bodies are large, and a
+        list endpoint that returns every body is the classic way to make a content API slow and
+        expensive. Fetch bodies one at a time with `GET /articles/{id}`, or ask for them
+        explicitly with `fields=id,title,content` and a small `limit`.
+
+        There is no way to ask for every field. `fields` is an allow list, not a wildcard.
+
+        A publishable key (`wv_pub_`) sees only articles at `status: published`. A secret key
+        sees everything, including drafts.
+      x-scope: articles:read
+      x-permission: articles.read
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: true
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+        - name: fields
+          in: query
+          description: |
+            Comma separated field allow list. Any field of the Article schema may be named.
+            Omit for the default projection, which is:
+            `id, status, title, slug, excerpt, featured_image_url, category_id, author_id,
+            format_id, published_at, scheduled_publish_at, created_at, updated_at`.
+            `id` is always returned whether or not you name it.
+          required: false
+          schema:
+            type: string
+            example: id,title,slug,status,published_at
+        - name: status
+          in: query
+          description: |
+            Filter by status. Repeat the parameter to match several. A publishable key may only
+            ask for `published`, and any other value is rejected with `403 INSUFFICIENT_SCOPE`.
+          required: false
+          schema:
+            type: array
+            items: { $ref: "#/components/schemas/ArticleStatus" }
+          style: form
+          explode: true
+        - name: category_id
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+        - name: author_id
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+        - name: tag_id
+          in: query
+          description: Return only articles carrying this tag.
+          required: false
+          schema: { type: string, format: uuid }
+        - name: slug
+          in: query
+          description: Exact slug match. Slugs are unique within a Site, so this returns at most one article.
+          required: false
+          schema: { type: string }
+        - name: updated_since
+          in: query
+          description: |
+            Return only articles updated at or after this instant. This is the incremental sync
+            parameter: store the greatest `updated_at` you have seen and pass it back next time.
+          required: false
+          schema: { type: string, format: date-time }
+        - name: order
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [updated_at.desc, updated_at.asc, published_at.desc, published_at.asc, created_at.desc]
+            default: updated_at.desc
+      responses:
+        "200":
+          description: A page of articles.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        allOf:
+                          - $ref: "#/components/schemas/Page"
+                          - type: object
+                            properties:
+                              items:
+                                type: array
+                                items: { $ref: "#/components/schemas/Article" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+    post:
+      operationId: createArticle
+      tags: [Articles]
+      summary: Create an article
+      description: |
+        Creates an article at `status: draft`. Always. There is no request field that can make
+        it public, and supplying `status` is a validation error rather than a silent ignore, so
+        a client written against a different CMS fails loudly instead of quietly leaving content
+        unpublished.
+
+        Nothing here is required. An empty body creates an untitled, unslugged draft you can
+        fill in later. `title`, `slug` and `content` do become required at publish time, and
+        `POST /articles/{id}/publish` returns `422` with a field level breakdown if any is
+        missing.
+
+        If you supply a `title` and no `slug`, a slug is derived from the title. Supply `slug`
+        explicitly if the URL matters to you, because a derived slug is not guaranteed stable
+        across versions.
+      x-scope: articles:write
+      x-permission: articles.write
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyRequired"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ArticleCreate" }
+            examples:
+              minimal:
+                summary: An empty draft to fill in later
+                value: {}
+              typical:
+                summary: A complete draft, ready to publish
+                value:
+                  title: How to choose a headless CMS
+                  slug: how-to-choose-a-headless-cms
+                  content: "## Start with your delivery model\n\nThe first question is not which CMS..."
+                  excerpt: A practical framework for picking a headless CMS without regretting it.
+                  seo_title: How to choose a headless CMS (2026 guide)
+                  seo_description: A practical framework for picking a headless CMS.
+                  seo_keywords: [headless cms, content api, jamstack]
+                  category_id: 0f5f1f4e-9c2a-4f7b-9a11-3b5c9d8e7a01
+                  author_id: 6a1c8b22-0d4e-4a9f-8c33-77e2f1a4b5c6
+                  tag_ids: [9d3e2c11-5b6a-4d8e-9f01-2a3b4c5d6e7f]
+      responses:
+        "201":
+          description: The draft was created.
+          headers:
+            Location:
+              description: The canonical URL of the new article.
+              schema: { type: string }
+            ETag:
+              description: The concurrency token. Pass it as `If-Match` on your first PATCH.
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Article" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /articles/{id}:
+    parameters:
+      - $ref: "#/components/parameters/ArticleId"
+    get:
+      operationId: getArticle
+      tags: [Articles]
+      summary: Read one article
+      description: |
+        Returns the full article including `content`. A publishable key may only read an article
+        at `status: published`; anything else returns 404, for the same no disclosure reason that
+        governs cross Site access.
+      x-scope: articles:read
+      x-permission: articles.read
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: true
+      x-cross-tenant: 404
+      parameters:
+        - name: fields
+          in: query
+          description: Comma separated field allow list. Omit to receive every readable field.
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: The article.
+          headers:
+            ETag:
+              description: The concurrency token for this version of the row.
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Article" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+    patch:
+      operationId: updateArticle
+      tags: [Articles]
+      summary: Update an article
+      description: |
+        A partial update. Only the fields you send are touched. Send `null` to clear a nullable
+        field; omit it to leave it alone.
+
+        `status` is not updatable here. Use the lifecycle endpoints. Sending `status` returns
+        `422 VALIDATION_FAILED`, which is what stops an API client from pushing an article into
+        the generation engine.
+
+        You may edit a published article. The edit goes live on your blog as soon as the CDN
+        cache for that post is purged, which happens as part of this request.
+
+        **Send `If-Match`.** Pass the `ETag` you received from your last read. If someone else
+        changed the article since then you get `412 PRECONDITION_FAILED` instead of silently
+        overwriting their work. `If-Match` is optional in v1 for compatibility, and omitting it
+        means last write wins, which is almost never what you want on shared content.
+      x-scope: articles:write
+      x-permission: articles.write
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-cross-tenant: 404
+      parameters:
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ArticleUpdate" }
+      responses:
+        "200":
+          description: The updated article.
+          headers:
+            ETag:
+              description: The new concurrency token.
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Article" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "412": { $ref: "#/components/responses/PreconditionFailed" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+    delete:
+      operationId: deleteArticle
+      tags: [Articles]
+      summary: Delete an article
+      description: |
+        Permanent. The row and its tag assignments are removed, and if the article was published
+        its URL starts returning 404 on your blog once the cache is purged.
+
+        There is no trash and no undo in v1. If you only want to take a post off the web, use
+        `POST /articles/{id}/unpublish`, which keeps everything and is reversible.
+
+        Deleting an article that does not exist returns 404 rather than succeeding, so a
+        double delete is visible to you rather than silent.
+      x-scope: articles:write
+      x-permission: articles.write
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-cross-tenant: 404
+      parameters:
+        - $ref: "#/components/parameters/IfMatch"
+      responses:
+        "204":
+          description: Deleted. No body.
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "412": { $ref: "#/components/responses/PreconditionFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /articles/{id}/publish:
+    parameters:
+      - $ref: "#/components/parameters/ArticleId"
+    post:
+      operationId: publishArticle
+      tags: [Articles]
+      summary: Publish an article
+      description: |
+        Makes the article public immediately, at `status: published`.
+
+        Requires a non empty `title`, `slug` and `content`. If any is missing you get
+        `422 VALIDATION_FAILED` with a `fields` map naming each one, so you can point a user at
+        the exact problem rather than showing a generic failure.
+
+        `published_at` is set to now only if it was not already set. It records when the article
+        was **first** made public and is the ordering key for your blog, so republishing after an
+        unpublish does not move the post to the top of the feed.
+
+        Publishing clears any pending schedule.
+
+        This is free. It makes no external call, so it passes no entitlement check, spends no
+        credits and is unaffected by your spend cap. An editor who is not allowed to run the AI
+        pipeline can still publish their own writing.
+
+        Safe to repeat: publishing an already published article is a no-op that returns the
+        current state.
+      x-scope: articles:write
+      x-permission: articles.write
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-cross-tenant: 404
+      x-makes-public: true
+      responses:
+        "200":
+          description: The article is public.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/ArticleLifecycleState" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /articles/{id}/unpublish:
+    parameters:
+      - $ref: "#/components/parameters/ArticleId"
+    post:
+      operationId: unpublishArticle
+      tags: [Articles]
+      summary: Unpublish an article
+      description: |
+        Takes the article off the web and returns it to `status: draft`. The URL starts
+        returning 404 on your blog once the cache is purged.
+
+        `published_at` is deliberately left intact. It is the original publication date and your
+        blog's ordering key, so a post that goes back up keeps its place in the archive.
+
+        Nothing is deleted and the operation is fully reversible with `POST /articles/{id}/publish`.
+      x-scope: articles:write
+      x-permission: articles.write
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-cross-tenant: 404
+      responses:
+        "200":
+          description: The article is no longer public.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/ArticleLifecycleState" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /articles/{id}/schedule:
+    parameters:
+      - $ref: "#/components/parameters/ArticleId"
+    post:
+      operationId: scheduleArticle
+      tags: [Articles]
+      summary: Schedule an article
+      description: |
+        Moves the article to `status: scheduled` and records when it should go live. A cron
+        publishes it within a few minutes of that time, whether or not the AI pipeline is
+        switched on for your Site.
+
+        `scheduled_publish_at` must be in the future. A past or present timestamp is rejected
+        with `422 VALIDATION_FAILED`, because silently publishing immediately is the wrong
+        answer to a clock skew bug.
+
+        The same `title`, `slug` and `content` requirements as publishing apply, and are checked
+        now rather than at the scheduled moment, so a scheduled post cannot fail silently at
+        two in the morning.
+
+        Rescheduling is just another call to this endpoint. Calling it on an already scheduled
+        article replaces the time.
+      x-scope: articles:write
+      x-permission: articles.write
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-cross-tenant: 404
+      x-makes-public: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [scheduled_publish_at]
+              additionalProperties: false
+              properties:
+                scheduled_publish_at:
+                  type: string
+                  format: date-time
+                  description: |
+                    ISO 8601. Include an offset. If you omit one it is read in the Site's
+                    timezone, which you can get from `GET /site`.
+                  examples: ["2026-09-01T09:00:00Z"]
+      responses:
+        "200":
+          description: The article is scheduled.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/ArticleLifecycleState" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /articles/{id}/cancel-schedule:
+    parameters:
+      - $ref: "#/components/parameters/ArticleId"
+    post:
+      operationId: cancelArticleSchedule
+      tags: [Articles]
+      summary: Cancel a scheduled publish
+      description: |
+        Returns the article to `status: draft` and clears `scheduled_publish_at`. The content is
+        untouched. Calling this on an article that is not scheduled is a no-op that returns the
+        current state.
+      x-scope: articles:write
+      x-permission: articles.write
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-cross-tenant: 404
+      responses:
+        "200":
+          description: The schedule was cancelled.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/ArticleLifecycleState" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  # ==========================================================================
+  # CATEGORIES
+  # ==========================================================================
+  /categories:
+    get:
+      operationId: listCategories
+      tags: [Categories]
+      summary: List categories
+      description: |
+        Every category on the Site, alphabetically. Categories are a closed taxonomy: an article
+        has exactly one, or none.
+      x-scope: taxonomy:read
+      x-permission: taxonomy.read
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: true
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+        - name: fields
+          in: query
+          description: |
+            Comma separated field allow list. Default projection: `id, name, slug, article_count`.
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: A page of categories.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        allOf:
+                          - $ref: "#/components/schemas/Page"
+                          - type: object
+                            properties:
+                              items:
+                                type: array
+                                items: { $ref: "#/components/schemas/Category" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    post:
+      operationId: createCategory
+      tags: [Categories]
+      summary: Create a category
+      description: |
+        `slug` is unique within the Site. A collision returns `409 SLUG_CONFLICT` rather than
+        silently appending a suffix, so your URLs are never a surprise.
+      x-scope: taxonomy:write
+      x-permission: taxonomy.manage
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyRequired"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TaxonomyTermWrite" }
+      responses:
+        "201":
+          description: The category was created.
+          headers:
+            Location: { schema: { type: string }, description: The canonical URL of the new category. }
+            ETag: { schema: { type: string }, description: The concurrency token. }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Category" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /categories/{id}:
+    parameters:
+      - $ref: "#/components/parameters/CategoryId"
+    get:
+      operationId: getCategory
+      tags: [Categories]
+      summary: Read one category
+      x-scope: taxonomy:read
+      x-permission: taxonomy.read
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: true
+      x-cross-tenant: 404
+      responses:
+        "200":
+          description: The category.
+          headers:
+            ETag: { schema: { type: string }, description: The concurrency token. }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Category" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    patch:
+      operationId: updateCategory
+      tags: [Categories]
+      summary: Update a category
+      description: |
+        Renaming is safe. Changing `slug` changes the category archive URL on your blog, and
+        nothing is redirected for you, so change it only if you accept the broken link.
+      x-scope: taxonomy:write
+      x-permission: taxonomy.manage
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-cross-tenant: 404
+      parameters:
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TaxonomyTermUpdate" }
+      responses:
+        "200":
+          description: The updated category.
+          headers:
+            ETag: { schema: { type: string }, description: The new concurrency token. }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Category" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "412": { $ref: "#/components/responses/PreconditionFailed" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    delete:
+      operationId: deleteCategory
+      tags: [Categories]
+      summary: Delete a category
+      description: |
+        Articles in this category are **not** deleted. Their `category_id` becomes `null`, so
+        they stay published and simply lose their category. Removing a category never removes
+        content.
+      x-scope: taxonomy:write
+      x-permission: taxonomy.manage
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-cross-tenant: 404
+      responses:
+        "204":
+          description: Deleted. No body.
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  # ==========================================================================
+  # TAGS
+  # ==========================================================================
+  /tags:
+    get:
+      operationId: listTags
+      tags: [Tags]
+      summary: List tags
+      description: "Every tag on the Site, alphabetically. Tags are cross cutting: an article may carry many."
+      x-scope: taxonomy:read
+      x-permission: taxonomy.read
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: true
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+        - name: fields
+          in: query
+          description: |
+            Comma separated field allow list. Default projection: `id, name, slug, article_count`.
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: A page of tags.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        allOf:
+                          - $ref: "#/components/schemas/Page"
+                          - type: object
+                            properties:
+                              items:
+                                type: array
+                                items: { $ref: "#/components/schemas/Tag" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    post:
+      operationId: createTag
+      tags: [Tags]
+      summary: Create a tag
+      description: "`slug` is unique within the Site. A collision returns `409 SLUG_CONFLICT`."
+      x-scope: taxonomy:write
+      x-permission: taxonomy.manage
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyRequired"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TaxonomyTermWrite" }
+      responses:
+        "201":
+          description: The tag was created.
+          headers:
+            Location: { schema: { type: string }, description: The canonical URL of the new tag. }
+            ETag: { schema: { type: string }, description: The concurrency token. }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Tag" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /tags/{id}:
+    parameters:
+      - $ref: "#/components/parameters/TagId"
+    get:
+      operationId: getTag
+      tags: [Tags]
+      summary: Read one tag
+      x-scope: taxonomy:read
+      x-permission: taxonomy.read
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: true
+      x-cross-tenant: 404
+      responses:
+        "200":
+          description: The tag.
+          headers:
+            ETag: { schema: { type: string }, description: The concurrency token. }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Tag" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    patch:
+      operationId: updateTag
+      tags: [Tags]
+      summary: Update a tag
+      x-scope: taxonomy:write
+      x-permission: taxonomy.manage
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-cross-tenant: 404
+      parameters:
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TaxonomyTermUpdate" }
+      responses:
+        "200":
+          description: The updated tag.
+          headers:
+            ETag: { schema: { type: string }, description: The new concurrency token. }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Tag" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "412": { $ref: "#/components/responses/PreconditionFailed" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    delete:
+      operationId: deleteTag
+      tags: [Tags]
+      summary: Delete a tag
+      description: |
+        The tag is removed from every article that carried it. No article is deleted.
+      x-scope: taxonomy:write
+      x-permission: taxonomy.manage
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-cross-tenant: 404
+      responses:
+        "204":
+          description: Deleted. No body.
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  # ==========================================================================
+  # AUTHORS
+  # ==========================================================================
+  /authors:
+    get:
+      operationId: listAuthors
+      tags: [Authors]
+      summary: List authors
+      description: The byline roster for the Site.
+      x-scope: authors:read
+      x-permission: taxonomy.read
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: true
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+        - name: fields
+          in: query
+          description: |
+            Comma separated field allow list. Default projection:
+            `id, name, bio, avatar_url, is_ai_generated, is_default, created_at`.
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: A page of authors.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        allOf:
+                          - $ref: "#/components/schemas/Page"
+                          - type: object
+                            properties:
+                              items:
+                                type: array
+                                items: { $ref: "#/components/schemas/Author" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    post:
+      operationId: createAuthor
+      tags: [Authors]
+      summary: Create an author
+      description: |
+        `is_ai_generated` marks a persona rather than a real person. It defaults to `true`
+        because that is what the generation pipeline creates. Set it to `false` for a human
+        byline, and be accurate about it: it is what your disclosure copy keys off.
+      x-scope: authors:write
+      x-permission: taxonomy.manage
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyRequired"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AuthorWrite" }
+      responses:
+        "201":
+          description: The author was created.
+          headers:
+            Location: { schema: { type: string }, description: The canonical URL of the new author. }
+            ETag: { schema: { type: string }, description: The concurrency token. }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Author" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /authors/{id}:
+    parameters:
+      - $ref: "#/components/parameters/AuthorId"
+    get:
+      operationId: getAuthor
+      tags: [Authors]
+      summary: Read one author
+      x-scope: authors:read
+      x-permission: taxonomy.read
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: true
+      x-cross-tenant: 404
+      responses:
+        "200":
+          description: The author.
+          headers:
+            ETag: { schema: { type: string }, description: The concurrency token. }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Author" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    patch:
+      operationId: updateAuthor
+      tags: [Authors]
+      summary: Update an author
+      description: |
+        Setting `is_default: true` clears the flag on whichever author held it, because a Site
+        has at most one default byline. Setting it to `false` on the current default leaves the
+        Site with none.
+      x-scope: authors:write
+      x-permission: taxonomy.manage
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-cross-tenant: 404
+      parameters:
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AuthorUpdate" }
+      responses:
+        "200":
+          description: The updated author.
+          headers:
+            ETag: { schema: { type: string }, description: The new concurrency token. }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Author" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "412": { $ref: "#/components/responses/PreconditionFailed" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    delete:
+      operationId: deleteAuthor
+      tags: [Authors]
+      summary: Delete an author
+      description: |
+        Articles by this author are **not** deleted. Their `author_id` becomes `null`, so they
+        stay published and lose their byline.
+      x-scope: authors:write
+      x-permission: taxonomy.manage
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-cross-tenant: 404
+      responses:
+        "204":
+          description: Deleted. No body.
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  # ==========================================================================
+  # MEDIA
+  # ==========================================================================
+  /media:
+    get:
+      operationId: listMedia
+      tags: [Media]
+      summary: List media assets
+      description: The media library, newest first.
+      x-scope: media:read
+      x-permission: media.manage
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: false
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+        - name: bucket
+          in: query
+          required: false
+          schema: { $ref: "#/components/schemas/MediaBucket" }
+        - name: fields
+          in: query
+          description: |
+            Comma separated field allow list. Default projection:
+            `id, bucket, url, file_name, mime_type, size_bytes, width, height, alt_text, created_at`.
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: A page of media assets.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        allOf:
+                          - $ref: "#/components/schemas/Page"
+                          - type: object
+                            properties:
+                              items:
+                                type: array
+                                items: { $ref: "#/components/schemas/MediaAsset" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    post:
+      operationId: registerMedia
+      tags: [Media]
+      summary: Register an uploaded file
+      description: |
+        Step three of the upload. Call this after your `PUT` to the presigned URL succeeds.
+
+        You send the `upload_id` you were given, not a path. The server already knows where the
+        file went, which is what stops a client naming an arbitrary storage location.
+
+        The server inspects the stored bytes here: it reads the real content type from the file
+        itself and checks the size and image dimensions. A file whose actual type is not an
+        allowed image is rejected with `422 VALIDATION_FAILED` and deleted from storage, so a
+        rejected upload leaves nothing behind. The declared type you sent to `/media/upload-url`
+        is treated as a hint only and never trusted.
+
+        If you never call this, the uploaded object is swept and the reservation expires. A file
+        with no `media_assets` row is not part of your library.
+      x-scope: media:write
+      x-permission: media.manage
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-cross-tenant: 404
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyRequired"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [upload_id]
+              additionalProperties: false
+              properties:
+                upload_id:
+                  type: string
+                  format: uuid
+                  description: From `POST /media/upload-url`.
+                alt_text:
+                  type: [string, "null"]
+                  maxLength: 500
+                  description: |
+                    Accessibility text. Worth sending. It is what screen readers announce and
+                    what search engines read, and there is no way to generate it for you.
+      responses:
+        "201":
+          description: The asset is registered and in your library.
+          headers:
+            Location: { schema: { type: string }, description: The canonical URL of the new asset. }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/MediaAsset" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /media/upload-url:
+    post:
+      operationId: createMediaUploadUrl
+      tags: [Media]
+      summary: Request an upload URL
+      description: |
+        Step one of the upload. Returns a short lived presigned URL and an `upload_id`.
+
+        The upload is a three step handshake:
+
+        1. `POST /media/upload-url` with the filename and declared content type.
+        2. `PUT` the raw bytes to `upload_url`. Send no authorization header; the signature in
+           the URL is the credential.
+        3. `POST /media` with the `upload_id` to register the asset.
+
+        The storage location is chosen by the server and namespaced to your Site. You cannot
+        influence it, and no other Site's key can produce a URL that writes into your namespace.
+
+        The URL expires. If your `PUT` is slow or fails, request a new one; do not retry an
+        expired signature.
+
+        `upload_url` is a bearer credential, so it is **not replayed**: a retry with the same
+        `Idempotency-Key` returns the same `upload_id` with `upload_url: null` and
+        `upload_url_replayable: false`. Request a fresh reservation instead.
+      x-scope: media:write
+      x-permission: media.manage
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: upload
+      x-publishable: false
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyRequired"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [file_name, content_type]
+              additionalProperties: false
+              properties:
+                file_name:
+                  type: string
+                  minLength: 1
+                  maxLength: 255
+                  description: |
+                    The original filename. It is sanitised before use and never becomes a path
+                    on its own, so traversal sequences are stripped rather than rejected.
+                  examples: ["hero.webp"]
+                content_type:
+                  type: string
+                  description: |
+                    The MIME type you believe you are uploading. A hint only. The real type is
+                    read from the bytes at registration and it is that check, not this field,
+                    that decides whether the file is accepted.
+                  enum: [image/webp, image/png, image/jpeg, image/gif, image/avif]
+                size_bytes:
+                  type: integer
+                  minimum: 1
+                  description: |
+                    Declared size, so an over limit upload can be refused before the bytes move.
+                    Also verified after the fact.
+                bucket:
+                  $ref: "#/components/schemas/MediaBucket"
+      responses:
+        "201":
+          description: The upload was reserved.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [upload_id, upload_url, method, expires_at]
+                        properties:
+                          upload_id: { type: string, format: uuid }
+                          upload_url:
+                            type: string
+                            format: uri
+                            description: Presigned. Do not log it; it is a bearer credential until it expires.
+                          method: { type: string, const: PUT }
+                          headers:
+                            type: object
+                            additionalProperties: { type: string }
+                            description: Headers you must send with the PUT, if any.
+                          expires_at: { type: string, format: date-time }
+                          max_size_bytes:
+                            type: integer
+                            description: The hard byte ceiling for this upload.
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /media/{id}:
+    parameters:
+      - $ref: "#/components/parameters/MediaId"
+    get:
+      operationId: getMediaAsset
+      tags: [Media]
+      summary: Read one media asset
+      x-scope: media:read
+      x-permission: media.manage
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: false
+      x-cross-tenant: 404
+      responses:
+        "200":
+          description: The media asset.
+          headers:
+            ETag: { schema: { type: string }, description: The concurrency token. }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/MediaAsset" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    patch:
+      operationId: updateMediaAsset
+      tags: [Media]
+      summary: Update a media asset
+      description: |
+        Only `alt_text` is editable. The bytes are immutable: to replace an image, upload a new
+        one and repoint whatever referenced the old one.
+      x-scope: media:write
+      x-permission: media.manage
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-cross-tenant: 404
+      parameters:
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                alt_text:
+                  type: [string, "null"]
+                  maxLength: 500
+      responses:
+        "200":
+          description: The updated media asset.
+          headers:
+            ETag: { schema: { type: string }, description: The new concurrency token. }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/MediaAsset" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "412": { $ref: "#/components/responses/PreconditionFailed" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    delete:
+      operationId: deleteMediaAsset
+      tags: [Media]
+      summary: Delete a media asset
+      description: |
+        Removes the catalog row and the stored bytes.
+
+        **Articles are not rewritten.** If a published article embeds this image, or uses it as
+        its `featured_image_url`, that reference becomes a broken image on your live blog. Check
+        before you delete: `GET /articles?fields=id,featured_image_url` finds featured uses, and
+        in body content the URL is plain text you can search for.
+      x-scope: media:write
+      x-permission: media.manage
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-cross-tenant: 404
+      responses:
+        "204":
+          description: Deleted. No body.
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  # ==========================================================================
+  # PIPELINE
+  # ==========================================================================
+  /pipeline/runs:
+    get:
+      operationId: listPipelineRuns
+      tags: [Pipeline]
+      summary: List pipeline runs
+      description: |
+        Recent engine activity for the Site, newest first. One row per stage invocation, so a
+        single logical run appears as several rows as work moves through the stages.
+      x-scope: pipeline:read
+      x-permission: pipeline.run
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: false
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+        - name: status
+          in: query
+          required: false
+          schema: { $ref: "#/components/schemas/PipelineRunStatus" }
+        - name: stage
+          in: query
+          required: false
+          schema: { $ref: "#/components/schemas/PipelineStage" }
+      responses:
+        "200":
+          description: A page of pipeline runs.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        allOf:
+                          - $ref: "#/components/schemas/Page"
+                          - type: object
+                            properties:
+                              items:
+                                type: array
+                                items: { $ref: "#/components/schemas/PipelineRun" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    post:
+      operationId: createPipelineRun
+      tags: [Pipeline]
+      summary: Request a pipeline run
+      description: |
+        **This is the only billable operation in this API.**
+
+        It asks the engine to work on your Site at the next opportunity, rather than waiting for
+        the normal cadence. It returns `202` immediately. It does not wait for articles to be
+        written, and it does not tell you how many will be: what the engine does depends on what
+        is in your queue and how far the credits go.
+
+        Four gates, checked in this order, each with its own error code:
+
+        | Gate | Failure | Meaning |
+        |---|---|---|
+        | Scope | `403 INSUFFICIENT_SCOPE` | This key does not carry `pipeline:run`. |
+        | Entitlement | `402 NOT_ENTITLED` | Your plan does not include AI generation. Upgrade. |
+        | Credits | `402 INSUFFICIENT_CREDITS` | The organisation cannot afford the next unit of work. Top up. |
+        | Spend cap | `402 SPEND_CAP_REACHED` | This Site hit its own monthly ceiling. Raise it or wait for the reset. |
+
+        The order matters: an entitlement failure is answered before a credits failure, so a
+        caller who is not on the right plan never learns anything about the balance.
+
+        Charging happens per unit of work, after that work succeeds, not up front. A run that
+        exhausts the balance part way through stops at the next stage boundary and finishes as
+        `partial`. Nothing is rolled back and no article is left half written. Poll
+        `GET /pipeline/runs/{id}` for the outcome, or subscribe to `pipeline.run.completed`
+        once webhooks are available.
+
+        `Idempotency-Key` is required. Two identical requests within the retention window
+        produce one run, which is what stops a retried network timeout from spending twice.
+      x-scope: pipeline:run
+      x-permission: pipeline.run
+      x-entitlement: ai.article_generation
+      x-spends-credits: true
+      x-rate-limit-class: pipeline
+      x-publishable: false
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyRequired"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                max_articles:
+                  type: integer
+                  minimum: 1
+                  maximum: 50
+                  description: |
+                    An upper bound on how many articles this run may produce. Your own safety
+                    valve on top of the platform spend cap. Omit to use the Site's configured
+                    batch size.
+      responses:
+        "202":
+          description: The run was accepted and queued.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [id, status, requested_at]
+                        properties:
+                          id: { type: string, format: uuid }
+                          status: { type: string, const: queued }
+                          requested_at: { type: string, format: date-time }
+                          estimated_start_at:
+                            type: [string, "null"]
+                            format: date-time
+                            description: When the engine expects to pick this up. Advisory.
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "402": { $ref: "#/components/responses/PaymentRequired" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /pipeline/runs/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PipelineRunId"
+    get:
+      operationId: getPipelineRun
+      tags: [Pipeline]
+      summary: Read one pipeline run
+      description: |
+        The outcome of a run. `status: partial` with an `error_summary` is what you see when a
+        run stopped early, whether because credits ran out, the spend cap was reached, or a
+        vendor call failed. `items_succeeded` tells you what you did get.
+      x-scope: pipeline:read
+      x-permission: pipeline.run
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: false
+      x-cross-tenant: 404
+      responses:
+        "200":
+          description: The pipeline run.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/PipelineRun" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /pipeline/queue:
+    get:
+      operationId: listPipelineQueue
+      tags: [Pipeline]
+      summary: Read the content queue
+      description: |
+        What the engine plans to write, highest priority first. Each item is a topic or keyword
+        with a source: `manual` if a person added it, `content_gap` if gap analysis found it,
+        `competitor_seed` if it came from a competitor page.
+
+        Read only in v1. Adding topics is a dashboard action.
+
+        `signal` carries the structured research behind a `competitor_seed` item: the angle, the
+        hook, the data points and the gaps. It is extracted signal, never copied prose, which is
+        the firewall that keeps generated output original.
+      x-scope: pipeline:read
+      x-permission: pipeline.run
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: false
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+        - name: status
+          in: query
+          required: false
+          schema: { $ref: "#/components/schemas/PlanItemStatus" }
+        - name: source
+          in: query
+          required: false
+          schema: { $ref: "#/components/schemas/PlanItemSource" }
+      responses:
+        "200":
+          description: A page of queue items.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        allOf:
+                          - $ref: "#/components/schemas/Page"
+                          - type: object
+                            properties:
+                              items:
+                                type: array
+                                items: { $ref: "#/components/schemas/QueueItem" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  # ==========================================================================
+  # API KEYS  (specified here; implemented in API-2)
+  # ==========================================================================
+  /keys:
+    get:
+      operationId: listApiKeys
+      tags: [API keys]
+      summary: List API keys
+      description: |
+        Metadata only. The secret itself is shown once, at creation, and is never retrievable
+        afterwards because only a hash is stored. `key_prefix` is the displayable fragment you
+        use to tell keys apart.
+
+        Requires a secret key carrying `keys:read`. A publishable key can never read this.
+      x-scope: keys:read
+      x-permission: api_keys.manage
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: false
+      responses:
+        "200":
+          description: A page of keys.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        allOf:
+                          - $ref: "#/components/schemas/Page"
+                          - type: object
+                            properties:
+                              items:
+                                type: array
+                                items: { $ref: "#/components/schemas/ApiKey" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+    post:
+      operationId: createApiKey
+      tags: [API keys]
+      summary: Create an API key
+      description: |
+        Returns the secret exactly once, in `data.secret`. Store it immediately. There is no way
+        to recover it later, and support cannot retrieve it for you.
+
+        A key can never be created with more authority than its creator has. The scopes you
+        request are intersected with the creator's own permissions, and the granted set comes
+        back in `data.scopes`. If you asked for something you do not hold, the key is still
+        created, without it. Compare what you asked for against what you got.
+
+        A secret key's authority is also re-evaluated on every request against its creator's
+        live permissions, so revoking a person's access immediately narrows every key they made.
+
+        **A retry does not give you the secret again.** `Idempotency-Key` guarantees you created
+        one key rather than two, and a replayed response returns the key's `id`, `kind`,
+        `key_prefix` and `scopes` with `secret: null` and `secret_replayable: false`. The secret
+        is never stored anywhere, including in the idempotency record, because storing it would
+        put a live credential in a database backup. If you lost it, rotate the key.
+      x-scope: keys:write
+      x-permission: api_keys.manage
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyRequired"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, kind, scopes]
+              additionalProperties: false
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                  maxLength: 120
+                  description: A label for humans. Say where the key lives, so you know what breaks if you revoke it.
+                kind: { $ref: "#/components/schemas/KeyKind" }
+                scopes:
+                  type: array
+                  minItems: 1
+                  items: { $ref: "#/components/schemas/Scope" }
+                expires_at:
+                  type: [string, "null"]
+                  format: date-time
+                  description: Optional expiry. After it passes the key returns `401 API_KEY_EXPIRED`.
+      responses:
+        "201":
+          description: The key was created. This is the only time the secret is returned.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        allOf:
+                          - $ref: "#/components/schemas/ApiKey"
+                          - type: object
+                            required: [secret]
+                            properties:
+                              secret:
+                                type: string
+                                description: The full key. Shown once. Never retrievable again.
+                                # API-2: the issued shape is prefix + 32 base64url chars from 24
+                                # random bytes. No `live_` segment: environment is a column, not
+                                # part of the string (there is no test mode in v1).
+                                examples: ["wv_sk_EXAMPLE0000000000000000000000000000"]
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /keys/{id}/rotate:
+    parameters:
+      - $ref: "#/components/parameters/KeyId"
+    post:
+      operationId: rotateApiKey
+      tags: [API keys]
+      summary: Rotate an API key
+      description: |
+        Issues a new secret for the same key record, keeping its name and scopes, and returns it
+        once.
+
+        As with creation, a replayed retry returns `secret: null` and `secret_replayable: false`
+        rather than handing out the credential a second time. Rotate again if you lost it.
+
+        Set `grace_seconds` to keep the old secret working while you deploy the new one. During
+        the grace window both work. After it, the old one returns `401 API_KEY_REVOKED`. A grace
+        of `0` cuts the old secret off immediately, which is the right choice if you are rotating
+        because it leaked.
+      x-scope: keys:write
+      x-permission: api_keys.manage
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-cross-tenant: 404
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyRequired"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                grace_seconds:
+                  type: integer
+                  minimum: 0
+                  maximum: 86400
+                  default: 0
+      responses:
+        "200":
+          description: Rotated. The new secret is returned once.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        allOf:
+                          - $ref: "#/components/schemas/ApiKey"
+                          - type: object
+                            required: [secret]
+                            properties:
+                              secret: { type: string, description: The new key. Shown once. }
+                              previous_valid_until:
+                                type: [string, "null"]
+                                format: date-time
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /keys/{id}:
+    parameters:
+      - $ref: "#/components/parameters/KeyId"
+    delete:
+      operationId: revokeApiKey
+      tags: [API keys]
+      summary: Revoke an API key
+      description: |
+        Immediate and permanent. The key record is kept, marked revoked, so the audit trail
+        survives, but the secret stops working at once and returns `401 API_KEY_REVOKED`.
+
+        Revoking the key you are calling with is allowed. It is the last request that key makes.
+      x-scope: keys:write
+      x-permission: api_keys.manage
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-cross-tenant: 404
+      responses:
+        "204":
+          description: Revoked. No body.
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  # ==========================================================================
+  # WEBHOOKS
+  #
+  # VERIFYING A DELIVERY. Do this before you parse the body; an unverified webhook endpoint is
+  # an unauthenticated write path into your system.
+  #
+  #   1. read the raw request body as BYTES, before any JSON parse
+  #   2. signed   = `${Writavo-Timestamp}.${rawBody}`
+  #   3. expected = hex(HMAC_SHA256(your_signing_secret, signed))
+  #   4. compare the `Writavo-Signature` header, which is `v1=<hex>`, to `v1=<expected>`,
+  #      using a constant-time comparison
+  #   5. reject if |now - Writavo-Timestamp| > 300 seconds
+  #
+  # The timestamp is inside the signed material, which is the whole reason it is sent: a captured
+  # payload cannot be replayed later, because its signature only validates against the timestamp
+  # it was signed with.
+  #
+  # Headers on every delivery: Writavo-Signature, Writavo-Timestamp, Writavo-Event,
+  # Writavo-Delivery (this attempt) and Writavo-Attempt (1 to 6).
+  #
+  # DELIVERY IS AT LEAST ONCE. Retries use exponential backoff at roughly 1m, 5m, 15m, 1h and 6h,
+  # six attempts in all. Answer 2xx as soon as you have durably accepted the event, and do the
+  # work afterwards: a handler that finishes its work before answering will be retried while it
+  # is still running. Deduplicate on the payload's `id`.
+  # ==========================================================================
+  /webhooks:
+    get:
+      operationId: listWebhooks
+      tags: [Webhooks]
+      summary: List webhook endpoints
+      x-scope: webhooks:read
+      x-permission: integrations.manage
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: false
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: A page of webhook endpoints.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        allOf:
+                          - $ref: "#/components/schemas/Page"
+                          - type: object
+                            properties:
+                              items:
+                                type: array
+                                items: { $ref: "#/components/schemas/Webhook" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    post:
+      operationId: createWebhook
+      tags: [Webhooks]
+      summary: Create a webhook endpoint
+      description: |
+        Registers a URL to receive signed event deliveries. The signing secret is returned once,
+        at creation, and never again: record it before you close the response. If you lose it,
+        `POST /webhooks/{id}/rotate-secret` issues a new one.
+
+        Verify every delivery, using the recipe at the top of this section, before you parse the
+        body.
+
+        The URL must be public HTTPS. Private, loopback, link-local and metadata addresses are
+        refused, and so is a hostname that resolves to one, at save time and again at delivery
+        time. A webhook cannot be pointed at internal infrastructure.
+
+        Delivery is at least once. Retries use exponential backoff, and an endpoint that keeps
+        failing is disabled automatically and reported to you. Deduplicate on the payload's `id`
+        and make your handler idempotent.
+
+        A Site may register at most ten endpoints.
+      x-scope: webhooks:write
+      x-permission: integrations.manage
+      x-entitlement: cms.webhooks
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyRequired"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url, events]
+              additionalProperties: false
+              properties:
+                url: { type: string, format: uri, examples: ["https://example.com/hooks/writavo"] }
+                events:
+                  type: array
+                  minItems: 1
+                  items: { $ref: "#/components/schemas/WebhookEvent" }
+                description: { type: [string, "null"], maxLength: 200 }
+      responses:
+        "201":
+          description: The endpoint was created. The signing secret is returned once.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        allOf:
+                          - $ref: "#/components/schemas/Webhook"
+                          - type: object
+                            required: [signing_secret]
+                            properties:
+                              signing_secret: { type: string, description: Shown once. Never retrievable again. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "402": { $ref: "#/components/responses/PaymentRequired" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /webhooks/{id}:
+    parameters:
+      - $ref: "#/components/parameters/WebhookId"
+    get:
+      operationId: getWebhook
+      tags: [Webhooks]
+      summary: Read one webhook endpoint
+      x-scope: webhooks:read
+      x-permission: integrations.manage
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: false
+      x-cross-tenant: 404
+      responses:
+        "200":
+          description: The webhook endpoint.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Webhook" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    patch:
+      operationId: updateWebhook
+      tags: [Webhooks]
+      summary: Update a webhook endpoint
+      description: |
+        Change the URL, the subscribed events, or re-enable an endpoint that was auto-disabled
+        after repeated failures. Re-enabling does not replay what you missed.
+      x-scope: webhooks:write
+      x-permission: integrations.manage
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-cross-tenant: 404
+      parameters:
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                url: { type: string, format: uri }
+                events:
+                  type: array
+                  minItems: 1
+                  items: { $ref: "#/components/schemas/WebhookEvent" }
+                description: { type: [string, "null"], maxLength: 200 }
+                enabled: { type: boolean }
+      responses:
+        "200":
+          description: The updated webhook endpoint.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Webhook" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "412": { $ref: "#/components/responses/PreconditionFailed" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    delete:
+      operationId: deleteWebhook
+      tags: [Webhooks]
+      summary: Delete a webhook endpoint
+      description: Deliveries stop at once. Queued retries for this endpoint are dropped.
+      x-scope: webhooks:write
+      x-permission: integrations.manage
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-cross-tenant: 404
+      responses:
+        "204":
+          description: Deleted. No body.
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /webhooks/{id}/rotate-secret:
+    parameters:
+      - $ref: "#/components/parameters/WebhookId"
+    post:
+      operationId: rotateWebhookSecret
+      tags: [Webhooks]
+      summary: Rotate the signing secret
+      description: |
+        Issues a new signing secret and returns it once. The old secret stops working
+        immediately: there is no grace window, because a window in which two secrets both
+        validate is a window in which a leaked secret still works.
+
+        Deliveries sent between the rotation and your receiver being updated will fail
+        verification. They are retried on the normal backoff, so update the receiver promptly and
+        the queue drains itself.
+      x-scope: webhooks:write
+      x-permission: integrations.manage
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-cross-tenant: 404
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyRequired"
+      responses:
+        "200":
+          description: The new signing secret. Shown once.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [id, signing_secret]
+                        properties:
+                          id: { type: string, format: uuid }
+                          signing_secret: { type: string, description: Shown once. Never retrievable again. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /webhooks/{id}/deliveries:
+    parameters:
+      - $ref: "#/components/parameters/WebhookId"
+    get:
+      operationId: listWebhookDeliveries
+      tags: [Webhooks]
+      summary: List deliveries for an endpoint
+      description: |
+        The delivery log, newest first. Use it to answer "did you send it and did we accept it".
+        `response_status` is what your server returned; `attempt` counts from 1 to 6.
+
+        There is one row per ATTEMPT, and every attempt of one event shares its `event_id`. A row
+        with `status: failed` and `exhausted: false` will be retried; `exhausted: true` means the
+        ladder gave up.
+      x-scope: webhooks:read
+      x-permission: integrations.manage
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: false
+      x-cross-tenant: 404
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [pending, delivered, failed]
+        - name: event
+          in: query
+          required: false
+          description: Return only attempts for this event type.
+          schema: { $ref: "#/components/schemas/WebhookEvent" }
+      responses:
+        "200":
+          description: A page of deliveries.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        allOf:
+                          - $ref: "#/components/schemas/Page"
+                          - type: object
+                            properties:
+                              items:
+                                type: array
+                                items: { $ref: "#/components/schemas/WebhookDelivery" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /webhooks/{id}/deliveries/{delivery_id}/redeliver:
+    parameters:
+      - $ref: "#/components/parameters/WebhookId"
+      - $ref: "#/components/parameters/WebhookDeliveryId"
+    post:
+      operationId: redeliverWebhookDelivery
+      tags: [Webhooks]
+      summary: Send one delivery again
+      description: |
+        Queues the same event for delivery again, with the same `event_id` and byte-identical
+        body, so your handler sees it as the event it already knows how to deduplicate rather
+        than as a second, different fact. Use it after fixing a receiver that was down.
+
+        The attempt counter starts again at 1: this is a fresh ladder you asked for, not a
+        continuation of the one that failed. The endpoint must be enabled.
+      x-scope: webhooks:write
+      x-permission: integrations.manage
+      x-entitlement: cms.webhooks
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-cross-tenant: 404
+      responses:
+        "202":
+          description: Queued. It will be attempted within the minute.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [id, status, attempt]
+                        properties:
+                          id:
+                            type: string
+                            format: uuid
+                            description: The id of the NEW attempt, not of the one you asked to repeat.
+                          status: { type: string, const: pending }
+                          attempt: { type: integer, const: 1 }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "402": { $ref: "#/components/responses/PaymentRequired" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+# ============================================================================
+# COMPONENTS
+# ============================================================================
+components:
+  securitySchemes:
+    apiKey:
+      type: http
+      scheme: bearer
+      description: |
+        `Authorization: Bearer <key>`.
+
+        Two kinds of key, distinguished by their prefix:
+
+        - **`wv_pub_`, publishable.** Safe in a browser or a mobile app. Read only, and it can
+          only see content at `status: published`. It cannot read drafts, cannot write, and
+          cannot see keys, usage, media, the pipeline queue or webhooks. The operations it may
+          reach are marked `x-publishable: true`; everything else is `403 INSUFFICIENT_SCOPE`
+          for a publishable key regardless of its scopes.
+        - **`wv_sk_`, secret.** Server side only. Never ship one to a client, and never commit
+          one. It can carry any scope.
+
+        A secret key's authority is its creator's live permissions intersected with the scopes
+        it was given. Narrowing or removing that person's access narrows every key they created,
+        on the next request. A key never outranks the person who made it.
+
+        Only a hash is stored. A lost key cannot be recovered, only rotated.
+
+  parameters:
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: |
+        The opaque cursor from `data.next_cursor` on the previous page. Do not parse it or
+        construct one; its encoding is not part of this contract and will change.
+      schema: { type: string }
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: |
+        Page size. Values above the maximum are clamped rather than rejected, so a client asking
+        for a thousand rows gets a hundred and a `next_cursor`.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    IdempotencyKeyRequired:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: |
+        A unique key you generate per logical operation, 1 to 255 printable ASCII characters. A
+        UUID is the obvious choice.
+
+        Retry with the **same** key and the same body and you get the original response replayed
+        rather than a second object. This is what makes a network timeout safe: you never know
+        whether the first request landed, so you retry with the same key and find out.
+
+        Same key with a **different** body is `409 IDEMPOTENCY_KEY_CONFLICT`, because reusing a
+        key for different work is a bug in your client rather than a retry. Same key while the
+        first request is still running is `409 IDEMPOTENCY_KEY_IN_FLIGHT`; wait and retry.
+
+        Keys are scoped to the Site and the endpoint, and are retained for 24 hours. After that
+        the same key is a new operation.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 255
+    IfMatch:
+      name: If-Match
+      in: header
+      required: false
+      description: |
+        The `ETag` from your last read of this object. If it has changed since then you get
+        `412 PRECONDITION_FAILED` and your write is not applied, so two people editing the same
+        article cannot silently overwrite each other.
+
+        Optional in v1 for compatibility. Omitting it means last write wins. Send it.
+      schema: { type: string }
+    ArticleId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    CategoryId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    TagId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    AuthorId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    MediaId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    PipelineRunId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    KeyId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    WebhookId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    WebhookDeliveryId:
+      name: delivery_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+  headers:
+    RateLimitLimit:
+      description: Requests permitted in the current window for this endpoint class.
+      schema: { type: integer }
+    RateLimitRemaining:
+      description: Requests left in the current window.
+      schema: { type: integer }
+    RateLimitReset:
+      description: Unix seconds at which the window resets.
+      schema: { type: integer }
+    RetryAfter:
+      description: Seconds to wait before retrying.
+      schema: { type: integer }
+
+  schemas:
+    # ---- envelopes -------------------------------------------------------
+    SuccessEnvelope:
+      type: object
+      required: [ok, data]
+      properties:
+        ok: { type: boolean, const: true }
+        data: {}
+      description: |
+        Every successful response has this shape. Check `ok` before reading `data`.
+
+    ErrorEnvelope:
+      type: object
+      required: [ok, error]
+      additionalProperties: false
+      properties:
+        ok: { type: boolean, const: false }
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { $ref: "#/components/schemas/ErrorCode" }
+            message:
+              type: string
+              description: |
+                A short, safe for display sentence. It never contains a stack trace, SQL, an
+                internal identifier, or anything belonging to another customer. Branch on `code`,
+                not on this string: wording may change within v1.
+            fields:
+              type: object
+              additionalProperties: { type: string }
+              description: |
+                Present on `VALIDATION_FAILED`. Maps each offending field to a message you can
+                show next to the input.
+            request_id:
+              type: string
+              description: Quote this when contacting support. It identifies the exact request in our logs.
+      description: Every failed response has this shape.
+
+    ErrorCode:
+      type: string
+      description: |
+        Stable machine readable codes. New codes may be added within v1, so treat an unknown
+        code as a generic failure of its HTTP status class rather than crashing.
+
+        | Code | HTTP | What it means |
+        |---|---|---|
+        | `INVALID_REQUEST` | 400 | Malformed JSON, a bad parameter, or a missing required header. |
+        | `INVALID_API_KEY` | 401 | No key, an unparseable key, or one that does not exist. |
+        | `API_KEY_REVOKED` | 401 | The key was revoked or rotated past its grace window. |
+        | `API_KEY_EXPIRED` | 401 | The key passed its `expires_at`. |
+        | `INSUFFICIENT_SCOPE` | 403 | The key is valid but lacks the scope this operation needs. The only 403 in the API. |
+        | `NOT_ENTITLED` | 402 | Your plan does not include this AI pipeline capability. Upgrade. CMS capabilities are on every plan and never return this. |
+        | `INSUFFICIENT_CREDITS` | 402 | The organisation cannot afford the next unit of work. Top up. |
+        | `SPEND_CAP_REACHED` | 402 | This Site hit its own monthly ceiling. Raise it or wait. |
+        | `PAYMENT_METHOD_REQUIRED` | 402 | This would go past your included CMS allowance and there is no payment method on file. Not a plan limit and not an upgrade: CMS resources are pay-as-you-go on every plan. Add a card and retry. Nothing already published stops serving. |
+        | `NOT_FOUND` | 404 | No such object, or it belongs to another Site. Deliberately indistinguishable. |
+        | `SLUG_CONFLICT` | 409 | Another object on this Site already uses that slug. |
+        | `IDEMPOTENCY_KEY_CONFLICT` | 409 | The key was reused with a different request body. |
+        | `IDEMPOTENCY_KEY_IN_FLIGHT` | 409 | The first request with this key is still running. Retry shortly. |
+        | `CONFLICT` | 409 | The object changed under you mid request. Re-read and retry. |
+        | `PRECONDITION_FAILED` | 412 | Your `If-Match` did not match. Someone else edited it. Re-read and retry. |
+        | `VALIDATION_FAILED` | 422 | The request parsed but the values are not acceptable. See `fields`. |
+        | `RATE_LIMIT_EXCEEDED` | 429 | Too many requests. Back off and honour `Retry-After`. |
+        | `MAINTENANCE` | 503 | Writes are paused for maintenance. Retry later. |
+        | `INTERNAL_ERROR` | 500 | Our fault. Safe to retry an idempotent request. |
+      enum:
+        - INVALID_REQUEST
+        - INVALID_API_KEY
+        - API_KEY_REVOKED
+        - API_KEY_EXPIRED
+        - INSUFFICIENT_SCOPE
+        - NOT_ENTITLED
+        - INSUFFICIENT_CREDITS
+        - SPEND_CAP_REACHED
+        - PAYMENT_METHOD_REQUIRED
+        - NOT_FOUND
+        - SLUG_CONFLICT
+        - IDEMPOTENCY_KEY_CONFLICT
+        - IDEMPOTENCY_KEY_IN_FLIGHT
+        - CONFLICT
+        - PRECONDITION_FAILED
+        - VALIDATION_FAILED
+        - RATE_LIMIT_EXCEEDED
+        - MAINTENANCE
+        - INTERNAL_ERROR
+
+    Page:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          items: {}
+        next_cursor:
+          type: [string, "null"]
+          description: |
+            Pass it back as `?cursor=` for the next page. `null` means you have reached the end.
+            There is no total count: counting a growing table on every list request is the kind
+            of query that gets slower exactly as a customer succeeds.
+      description: |
+        The shape of `data` on every list endpoint. Paging is cursor based rather than offset
+        based, so rows are never skipped or repeated when content changes mid pagination.
+
+    # ---- enums -----------------------------------------------------------
+    ArticleStatus:
+      type: string
+      description: |
+        The article state machine. Thirteen values, in two groups.
+
+        **Yours, settable through the lifecycle endpoints:**
+
+        - `draft` - private and editable. Where every article starts. Never touched by the AI.
+        - `scheduled` - has a future `scheduled_publish_at`. A cron publishes it at that time.
+        - `published` - public on your blog.
+
+        **The pipeline's, readable but not settable.** A `PATCH` naming any of these is rejected
+        with `422 VALIDATION_FAILED`:
+
+        - `discovered`, `scored`, `skipped` - a candidate source found and triaged.
+        - `scraped` - source fetched, research signal extracted.
+        - `generated` - a draft the engine wrote, awaiting quality review.
+        - `needs_improvement` - failed quality review; queued for a rewrite.
+        - `needs_images` - text is final, images are being generated.
+        - `queued` - finished and waiting for its publishing slot.
+        - `rejected`, `failed` - abandoned, or errored past retry.
+
+        More pipeline values may be added within v1 as the engine grows. Handle unknown values
+        gracefully.
+      enum:
+        - discovered
+        - scored
+        - skipped
+        - scraped
+        - generated
+        - needs_improvement
+        - needs_images
+        - queued
+        - published
+        - rejected
+        - failed
+        - draft
+        - scheduled
+
+    MediaBucket:
+      type: string
+      description: |
+        Which library the asset belongs to. `blog-images` for article imagery, `author-avatars`
+        for byline portraits.
+      enum: [blog-images, author-avatars]
+      default: blog-images
+
+    PipelineStage:
+      type: string
+      description: The engine stage a run belongs to.
+      enum: [dispatch, discover, scrape, extract, plan, generate, improve, classify, images, publish]
+
+    PipelineRunStatus:
+      type: string
+      description: |
+        `partial` means the run did useful work and then stopped early. That is the normal
+        outcome when credits or a spend cap run out mid run, and it is not an error: what was
+        produced is kept.
+      enum: [running, success, failed, partial]
+
+    PlanItemStatus:
+      type: string
+      enum: [planned, in_progress, done, skipped]
+
+    PlanItemSource:
+      type: string
+      description: |
+        Where the topic came from. `manual` if a person added it, `content_gap` if gap analysis
+        found it, `competitor_seed` if it came from a competitor page.
+      enum: [content_gap, manual, competitor_seed]
+
+    KeyKind:
+      type: string
+      description: |
+        `publishable` keys are prefixed `wv_pub_` and are safe in client code: read only, limited
+        to published content, and admitted only to the operations marked `x-publishable: true`.
+        Anything else returns `403 INSUFFICIENT_SCOPE`, whatever scopes the key carries.
+
+        `secret` keys are prefixed `wv_sk_` and are server side only.
+      enum: [publishable, secret]
+
+    Scope:
+      type: string
+      description: |
+        What a key is permitted to do. A key carries a set of these, and every operation names
+        the one it needs.
+
+        Scope is the outer bound, not the whole answer. A request must also pass the creator's
+        live permissions, the plan entitlement, and, for a pipeline run, credits and the spend
+        cap. A scope you hold can still be refused by the gate behind it.
+
+        A publishable key may only carry `:read` scopes, and only ever sees published content.
+        Three of them are deliberately NOT available to a publishable key, because the endpoints
+        behind them return things a browser bundle must not carry: `media:read` lists the whole
+        library including assets attached only to drafts, `pipeline:read` returns the Site's
+        unpublished editorial queue, and `webhooks:read` is account configuration.
+
+        `meta:read` IS publishable, but `GET /usage` within it is not: it returns the
+        organisation's credit balance and plan, and a publishable key presenting it gets
+        `403 INSUFFICIENT_SCOPE`. Every operation states which side of that line it is on in
+        `x-publishable`.
+      enum:
+        - articles:read
+        - articles:write
+        - taxonomy:read
+        - taxonomy:write
+        - authors:read
+        - authors:write
+        - media:read
+        - media:write
+        - pipeline:read
+        - pipeline:run
+        - keys:read
+        - keys:write
+        - webhooks:read
+        - webhooks:write
+        - meta:read
+
+    WebhookEvent:
+      type: string
+      description: |
+        Events you can subscribe to. Every one of them corresponds to a mutation this API can
+        perform, and each fires whether the change came from this API or from the dashboard.
+
+        More may be added within v1, so ignore an event type you do not recognise rather than
+        failing the delivery.
+
+        `article.published` is the one most integrations want: it is the signal to rebuild a
+        statically generated site. `article.unpublished` and `article.deleted` are the ones people
+        forget, and forgetting them leaves content live on your site after it is gone from ours.
+      enum:
+        - article.created
+        - article.updated
+        - article.deleted
+        - article.published
+        - article.unpublished
+        - article.scheduled
+        - article.unscheduled
+        - category.created
+        - category.updated
+        - category.deleted
+        - tag.created
+        - tag.updated
+        - tag.deleted
+        - author.created
+        - author.updated
+        - author.deleted
+        - media.created
+        - media.updated
+        - media.deleted
+        - pipeline.run.completed
+        - pipeline.run.failed
+
+    WebhookPayload:
+      type: object
+      description: |
+        The body of every delivery. It is JSON, it is what the signature is computed over, and it
+        is byte-identical across retries and redeliveries of the same event.
+
+        `data` is the resource in the same shape the REST API returns it, so a handler for
+        `article.published` can use the same parser as `GET /articles/{id}`. The one exception is
+        a `*.deleted` event, where the object no longer exists and `data` carries only its `id`.
+
+        `website_id` deliberately appears nowhere: you already know which Site you configured.
+      required: [id, event, created_at, data]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: |
+            The EVENT id. Stable across every retry and across a manual redelivery, and this is
+            what you deduplicate on. The id of the individual HTTP attempt is in the
+            `Writavo-Delivery` header instead, because it identifies the request rather than the
+            fact.
+        event: { $ref: "#/components/schemas/WebhookEvent" }
+        created_at:
+          type: string
+          format: date-time
+          description: When the event was queued, not when this attempt was sent.
+        data:
+          type: object
+          additionalProperties: true
+          description: 'The resource, as the REST API returns it. `{ "id": "..." }` for a delete.'
+
+    # ---- resources -------------------------------------------------------
+    Article:
+      type: object
+      description: |
+        An article. `content` is **markdown**, not HTML, in both directions: what you send is
+        what is stored, and it is rendered at publish time. Send markdown.
+
+        Several pipeline columns are deliberately absent from this schema rather than exposed as
+        read only, because they describe the engine's internal working rather than your content:
+        the source URL and competitor a draft was researched from (provenance about a third
+        party page, not about your article), the image job handle and image ladder stage (vendor
+        job state that changes shape when we change provider), the raw quality critique (an
+        unstable model output), the source page's SEO score (a number about someone else's page),
+        the dispatcher's priority ordering knob, and the rewrite attempt counter. Exposing any of
+        them would freeze an internal detail into a contract we have promised not to break.
+
+        `quality_score` **is** exposed, read only, because it is a stable, meaningful number
+        about your own article.
+      required: [id, status]
+      properties:
+        id: { type: string, format: uuid, readOnly: true }
+        status:
+          allOf: [{ $ref: "#/components/schemas/ArticleStatus" }]
+          readOnly: true
+          description: Read only here. Change it with the lifecycle endpoints.
+        title: { type: [string, "null"], maxLength: 300 }
+        slug:
+          type: [string, "null"]
+          maxLength: 200
+          pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+          description: |
+            The URL segment on your blog. Unique within the Site; a collision is
+            `409 SLUG_CONFLICT`. May be null on a draft, and is required to publish.
+        content:
+          type: [string, "null"]
+          description: |
+            The body, in markdown. Not returned in the list default projection; ask for it by
+            name or fetch the article individually.
+        excerpt: { type: [string, "null"], maxLength: 1000 }
+        featured_image_url: { type: [string, "null"], format: uri }
+        seo_title: { type: [string, "null"], maxLength: 200 }
+        seo_description: { type: [string, "null"], maxLength: 400 }
+        seo_keywords:
+          type: [array, "null"]
+          items: { type: string }
+        faqs:
+          type: [array, "null"]
+          description: Question and answer pairs, rendered as FAQ structured data on your blog.
+          items:
+            type: object
+            required: [question, answer]
+            properties:
+              question: { type: string }
+              answer: { type: string }
+        key_takeaways:
+          type: [array, "null"]
+          description: Short summary bullets rendered above the body.
+          items: { type: string }
+        howto_steps:
+          type: [array, "null"]
+          description: Ordered steps, rendered as HowTo structured data.
+          items:
+            type: object
+            required: [name]
+            properties:
+              name: { type: string }
+              text: { type: string }
+              image_url: { type: string, format: uri }
+        comparison:
+          type: [object, "null"]
+          description: A comparison table, rendered as a table in the body.
+          properties:
+            headers:
+              type: array
+              items: { type: string }
+            rows:
+              type: array
+              items:
+                type: array
+                items: { type: string }
+        category_id: { type: [string, "null"], format: uuid }
+        author_id: { type: [string, "null"], format: uuid }
+        format_id:
+          type: [string, "null"]
+          format: uuid
+          description: The content type. See `GET /content-types`.
+        tag_ids:
+          type: array
+          items: { type: string, format: uuid }
+          description: |
+            Every tag on this article. On `PATCH` this is a full replacement, not a merge: send
+            the complete set you want, and send `[]` to clear.
+        quality_score:
+          type: [number, "null"]
+          readOnly: true
+          description: |
+            The engine's quality rating out of 100 for an article it wrote. Null for anything
+            written by hand.
+        published_at:
+          type: [string, "null"]
+          format: date-time
+          readOnly: true
+          description: |
+            When the article was **first** made public. Set by the first publish and never
+            changed after, including across an unpublish and republish, because it is your blog's
+            ordering key.
+        scheduled_publish_at:
+          type: [string, "null"]
+          format: date-time
+          readOnly: true
+          description: Set through `POST /articles/{id}/schedule`.
+        created_at: { type: string, format: date-time, readOnly: true }
+        updated_at: { type: string, format: date-time, readOnly: true }
+
+    ArticleCreate:
+      type: object
+      additionalProperties: false
+      description: |
+        Every field is optional. The article is created at `status: draft` regardless of what you
+        send. `status`, `published_at` and `scheduled_publish_at` are not accepted: naming any of
+        them is `422 VALIDATION_FAILED`, so a client that assumed it could create published
+        content fails loudly rather than leaving a post silently offline.
+      properties:
+        title: { type: [string, "null"], maxLength: 300 }
+        slug:
+          type: [string, "null"]
+          maxLength: 200
+          pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+          description: Derived from `title` when omitted. Supply it if the URL matters.
+        content: { type: [string, "null"], description: Markdown. }
+        excerpt: { type: [string, "null"], maxLength: 1000 }
+        featured_image_url: { type: [string, "null"], format: uri }
+        seo_title: { type: [string, "null"], maxLength: 200 }
+        seo_description: { type: [string, "null"], maxLength: 400 }
+        seo_keywords: { type: [array, "null"], items: { type: string } }
+        faqs: { type: [array, "null"], items: { type: object } }
+        key_takeaways: { type: [array, "null"], items: { type: string } }
+        howto_steps: { type: [array, "null"], items: { type: object } }
+        comparison: { type: [object, "null"] }
+        category_id: { type: [string, "null"], format: uuid }
+        author_id: { type: [string, "null"], format: uuid }
+        format_id: { type: [string, "null"], format: uuid }
+        tag_ids: { type: array, items: { type: string, format: uuid } }
+
+    ArticleUpdate:
+      type: object
+      additionalProperties: false
+      description: |
+        A partial update. Omitted fields are left alone; `null` clears a nullable field.
+        `status`, `published_at` and `scheduled_publish_at` are rejected with
+        `422 VALIDATION_FAILED`.
+      properties:
+        title: { type: [string, "null"], maxLength: 300 }
+        slug:
+          type: [string, "null"]
+          maxLength: 200
+          pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+          description: |
+            Changing the slug of a published article changes its live URL and nothing is
+            redirected for you. The old URL starts returning 404.
+        content: { type: [string, "null"], description: Markdown. }
+        excerpt: { type: [string, "null"], maxLength: 1000 }
+        featured_image_url: { type: [string, "null"], format: uri }
+        seo_title: { type: [string, "null"], maxLength: 200 }
+        seo_description: { type: [string, "null"], maxLength: 400 }
+        seo_keywords: { type: [array, "null"], items: { type: string } }
+        faqs: { type: [array, "null"], items: { type: object } }
+        key_takeaways: { type: [array, "null"], items: { type: string } }
+        howto_steps: { type: [array, "null"], items: { type: object } }
+        comparison: { type: [object, "null"] }
+        category_id: { type: [string, "null"], format: uuid }
+        author_id: { type: [string, "null"], format: uuid }
+        format_id: { type: [string, "null"], format: uuid }
+        tag_ids:
+          type: array
+          items: { type: string, format: uuid }
+          description: Full replacement, not a merge. Send `[]` to clear.
+
+    ArticleLifecycleState:
+      type: object
+      description: What every lifecycle endpoint returns. Enough to update your UI without a re-read.
+      required: [id, status]
+      properties:
+        id: { type: string, format: uuid }
+        status: { $ref: "#/components/schemas/ArticleStatus" }
+        published_at: { type: [string, "null"], format: date-time }
+        scheduled_publish_at: { type: [string, "null"], format: date-time }
+        url:
+          type: [string, "null"]
+          format: uri
+          description: The live URL, when the article is published and the Site has a delivery route configured.
+
+    Category:
+      type: object
+      required: [id, name, slug]
+      properties:
+        id: { type: string, format: uuid, readOnly: true }
+        name: { type: string, maxLength: 120 }
+        slug:
+          type: string
+          maxLength: 120
+          pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+        article_count:
+          type: integer
+          readOnly: true
+          description: How many articles carry this category. Counted server side.
+
+    Tag:
+      type: object
+      required: [id, name, slug]
+      properties:
+        id: { type: string, format: uuid, readOnly: true }
+        name: { type: string, maxLength: 120 }
+        slug:
+          type: string
+          maxLength: 120
+          pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+        article_count:
+          type: integer
+          readOnly: true
+          description: How many articles carry this tag. Counted server side.
+
+    TaxonomyTermWrite:
+      type: object
+      required: [name]
+      additionalProperties: false
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+        slug:
+          type: string
+          maxLength: 120
+          pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+          description: Derived from `name` when omitted.
+
+    TaxonomyTermUpdate:
+      type: object
+      additionalProperties: false
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+        slug:
+          type: string
+          maxLength: 120
+          pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+
+    Author:
+      type: object
+      required: [id, name]
+      properties:
+        id: { type: string, format: uuid, readOnly: true }
+        name: { type: string, maxLength: 160 }
+        bio: { type: [string, "null"], maxLength: 2000 }
+        avatar_url: { type: [string, "null"], format: uri }
+        is_ai_generated:
+          type: boolean
+          description: True for a persona the engine created, false for a real person.
+        is_default:
+          type: boolean
+          description: The byline used when an article names no author. At most one per Site.
+        created_at: { type: string, format: date-time, readOnly: true }
+
+    AuthorWrite:
+      type: object
+      required: [name]
+      additionalProperties: false
+      properties:
+        name: { type: string, minLength: 1, maxLength: 160 }
+        bio: { type: [string, "null"], maxLength: 2000 }
+        avatar_url: { type: [string, "null"], format: uri }
+        is_ai_generated: { type: boolean, default: true }
+        is_default: { type: boolean, default: false }
+
+    AuthorUpdate:
+      type: object
+      additionalProperties: false
+      properties:
+        name: { type: string, minLength: 1, maxLength: 160 }
+        bio: { type: [string, "null"], maxLength: 2000 }
+        avatar_url: { type: [string, "null"], format: uri }
+        is_ai_generated: { type: boolean }
+        is_default: { type: boolean }
+
+    MediaAsset:
+      type: object
+      description: |
+        A file in the media library. The storage location is not part of this contract: you get
+        a `url` you can use, and the path behind it is ours to change.
+      required: [id, bucket, url]
+      properties:
+        id: { type: string, format: uuid, readOnly: true }
+        bucket: { $ref: "#/components/schemas/MediaBucket" }
+        url:
+          type: string
+          format: uri
+          readOnly: true
+          description: The public URL. Put this in `featured_image_url` or in article markdown.
+        file_name: { type: [string, "null"], readOnly: true }
+        mime_type:
+          type: [string, "null"]
+          readOnly: true
+          description: The type read from the bytes at registration, not the type you declared.
+        size_bytes: { type: [integer, "null"], readOnly: true }
+        width: { type: [integer, "null"], readOnly: true }
+        height: { type: [integer, "null"], readOnly: true }
+        alt_text: { type: [string, "null"], maxLength: 500 }
+        created_at: { type: string, format: date-time, readOnly: true }
+
+    Site:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+          description: |
+            The identifier of the Site this key belongs to, for your own logging and support
+            requests. It is never a request parameter: the Site is always resolved from the key,
+            so sending it anywhere would have no effect.
+        name: { type: string }
+        domain:
+          type: [string, "null"]
+          description: The domain the blog is served from, if a delivery route is configured.
+        blog_base_url:
+          type: [string, "null"]
+          format: uri
+          description: The base URL published articles appear under.
+        locale: { type: [string, "null"], examples: ["en-GB"] }
+        timezone:
+          type: [string, "null"]
+          description: IANA name. Scheduling timestamps without an offset are read in this zone.
+          examples: ["Europe/London"]
+        pipeline_enabled:
+          type: boolean
+          description: |
+            Whether the AI engine runs on its own cadence for this Site. False means the CMS
+            works exactly as before and nothing is generated unless you ask for a run.
+
+    ContentType:
+      type: object
+      description: An article format, that is, an SEO blueprint you can set on an article via `format_id`.
+      required: [id, key, name]
+      properties:
+        id: { type: string, format: uuid, readOnly: true }
+        key: { type: string, examples: ["how_to"] }
+        name: { type: string, examples: ["How-To"] }
+        is_active: { type: boolean }
+        is_platform_default:
+          type: boolean
+          description: True for a format we ship, false for one defined on your Site.
+
+    Usage:
+      type: object
+      description: |
+        Plan limits, current period usage, credit balance and spend cap in one payload. Read it
+        before a pipeline run to fail fast, or after one to see the balance move.
+      required: [plan, period, limits, credits]
+      properties:
+        plan:
+          type: object
+          required: [key, name]
+          properties:
+            key: { type: string, examples: ["growth"] }
+            name: { type: string, examples: ["Growth"] }
+        period:
+          type: object
+          required: [start, end]
+          properties:
+            start: { type: string, format: date }
+            end: { type: string, format: date }
+        limits:
+          type: array
+          description: One row per metered limit, with what you have used against it.
+          items:
+            type: object
+            required: [key, used]
+            properties:
+              key: { type: string, examples: ["articles.per_month"] }
+              limit:
+                type: [integer, "null"]
+                description: Null means unlimited on this plan.
+              used: { type: integer }
+        features:
+          type: array
+          description: Capability keys your plan grants. A pipeline run needs `ai.article_generation`.
+          items: { type: string }
+        credits:
+          type: object
+          required: [balance]
+          properties:
+            balance:
+              type: number
+              description: Credits available to the whole organisation, shared across its Sites.
+            reserved:
+              type: number
+              description: Credits committed to work already in flight.
+        spend_cap:
+          type: object
+          description: This Site's own monthly ceiling, independent of the organisation balance.
+          properties:
+            monthly_credit_cap:
+              type: [number, "null"]
+              description: Null means uncapped. Zero means this Site may not spend at all.
+            period_spent: { type: number }
+            reached:
+              type: boolean
+              description: True when a pipeline run would be refused with `SPEND_CAP_REACHED`.
+
+    PipelineRun:
+      type: object
+      required: [id, stage, status, started_at]
+      properties:
+        id: { type: string, format: uuid, readOnly: true }
+        stage: { $ref: "#/components/schemas/PipelineStage" }
+        status: { $ref: "#/components/schemas/PipelineRunStatus" }
+        started_at: { type: string, format: date-time }
+        finished_at: { type: [string, "null"], format: date-time }
+        items_processed: { type: integer }
+        items_succeeded: { type: integer }
+        items_failed: { type: integer }
+        triggered_by:
+          type: string
+          description: "`cron` for the normal cadence, or `api` for a run you requested."
+        error_summary:
+          type: [string, "null"]
+          description: |
+            Why the run ended early, when it did. On a `partial` run this is where you find out
+            it was credits, the spend cap, or a vendor failure.
+
+    QueueItem:
+      type: object
+      required: [id, topic_or_keyword, source, status]
+      properties:
+        id: { type: string, format: uuid, readOnly: true }
+        topic_or_keyword: { type: string }
+        source: { $ref: "#/components/schemas/PlanItemSource" }
+        status: { $ref: "#/components/schemas/PlanItemStatus" }
+        signal:
+          type: [object, "null"]
+          description: |
+            Structured research for a competitor sourced item: the angle, hook, data points and
+            gaps found. Extracted signal, never copied prose.
+        target_publish_date: { type: [string, "null"], format: date }
+        priority: { type: integer }
+        linked_article_id:
+          type: [string, "null"]
+          format: uuid
+          description: The article this item produced, once it has been written.
+        created_at: { type: string, format: date-time, readOnly: true }
+
+    ApiKey:
+      type: object
+      description: Key metadata. The secret is never included except in the response that created or rotated it.
+      required: [id, name, kind, key_prefix, scopes]
+      properties:
+        id: { type: string, format: uuid, readOnly: true }
+        name: { type: string }
+        kind: { $ref: "#/components/schemas/KeyKind" }
+        key_prefix:
+          type: string
+          readOnly: true
+          description: The only displayable fragment of the secret. Use it to identify a key in your own UI.
+          # The first 12 characters of the key. API-2: prefix + the first few random chars.
+          examples: ["wv_sk_EXAMPLE"]
+        scopes:
+          type: array
+          items: { $ref: "#/components/schemas/Scope" }
+          description: The scopes actually granted, after intersection with the creator's permissions.
+        last_used_at: { type: [string, "null"], format: date-time, readOnly: true }
+        expires_at: { type: [string, "null"], format: date-time }
+        revoked_at: { type: [string, "null"], format: date-time, readOnly: true }
+        created_at: { type: string, format: date-time, readOnly: true }
+
+    Webhook:
+      type: object
+      required: [id, url, events, enabled]
+      properties:
+        id: { type: string, format: uuid, readOnly: true }
+        url: { type: string, format: uri }
+        events:
+          type: array
+          items: { $ref: "#/components/schemas/WebhookEvent" }
+        description: { type: [string, "null"] }
+        enabled:
+          type: boolean
+          description: |
+            Set to false automatically after repeated delivery failures. Fix your endpoint, then
+            PATCH it back to true. Missed deliveries are not replayed.
+        disabled_reason: { type: [string, "null"], readOnly: true }
+        last_delivery_at: { type: [string, "null"], format: date-time, readOnly: true }
+        created_at: { type: string, format: date-time, readOnly: true }
+
+    WebhookDelivery:
+      type: object
+      description: |
+        ONE ATTEMPT. Six attempts of the same event are six of these, all sharing one `event_id`.
+      required: [id, event_id, event_type, status, attempt]
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+          description: This attempt. Sent as the `Writavo-Delivery` header, and what you pass to redeliver.
+        event_id:
+          type: string
+          format: uuid
+          description: |
+            Stable across retries of the same event, and equal to the payload's `id`. Key your
+            idempotency off this, never off the attempt id.
+        event_type: { $ref: "#/components/schemas/WebhookEvent" }
+        status:
+          type: string
+          enum: [pending, delivered, failed]
+        attempt: { type: integer, minimum: 1, maximum: 6 }
+        exhausted:
+          type: boolean
+          readOnly: true
+          description: |
+            True when this was the last attempt and we stopped trying. `status: failed` with
+            `exhausted: false` means another attempt is scheduled.
+        response_status:
+          type: [integer, "null"]
+          description: The HTTP status your endpoint returned. Null if the request never completed.
+        response_body_excerpt:
+          type: [string, "null"]
+          readOnly: true
+          description: The first 512 characters of your response, kept so a failure can be diagnosed.
+        duration_ms: { type: [integer, "null"], readOnly: true }
+        error: { type: [string, "null"] }
+        created_at: { type: string, format: date-time, readOnly: true }
+        delivered_at: { type: [string, "null"], format: date-time }
+
+  responses:
+    BadRequest:
+      description: |
+        `INVALID_REQUEST`. The request could not be parsed, or a parameter is not usable: bad
+        JSON, an unknown query parameter value, or a missing required header.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+    Unauthorized:
+      description: |
+        `INVALID_API_KEY`, `API_KEY_REVOKED` or `API_KEY_EXPIRED`. There is no key, or it is not
+        usable. This response never distinguishes "no such key" from "wrong key", so a caller
+        cannot probe for valid keys.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+    PaymentRequired:
+      description: |
+        `NOT_ENTITLED`, `INSUFFICIENT_CREDITS` or `SPEND_CAP_REACHED`. The request was
+        understood and you were permitted to make it, but it cannot be paid for. Three distinct
+        codes because the fixes differ: upgrade the plan, top up credits, or raise the Site's
+        cap.
+
+        These are 402 rather than 403 on purpose. A 403 says "you may not"; these all say "not
+        yet, and here is how to change that".
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+    InsufficientScope:
+      description: |
+        `INSUFFICIENT_SCOPE`. The key is valid but does not carry the scope this operation
+        requires, or its creator's permissions no longer cover it.
+
+        This is the **only** 403 in the API. In particular it is never returned for an object
+        belonging to another Site: that case is always 404, so this response never reveals that
+        something exists.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+    NotFound:
+      description: |
+        `NOT_FOUND`. Either no such object exists, or it exists and belongs to a different Site.
+
+        **These two cases are deliberately indistinguishable, and neither ever returns 403.** A
+        403 would confirm the object exists, which would let anyone with a valid key enumerate
+        other customers' content by id. If you are certain the id is right, check you are using
+        the key for the correct Site.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+    Conflict:
+      description: |
+        `SLUG_CONFLICT`, `IDEMPOTENCY_KEY_CONFLICT`, `IDEMPOTENCY_KEY_IN_FLIGHT` or `CONFLICT`.
+        The request is valid but collides with the current state: a slug is taken, an
+        idempotency key was reused with a different body or is still in flight, or the object
+        moved while you were working on it. Read `code` to tell which, then re-read and retry.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+    PreconditionFailed:
+      description: |
+        `PRECONDITION_FAILED`. Your `If-Match` did not match the current version, meaning
+        somebody edited the object since you read it. Nothing was written. Re-read, merge, and
+        retry with the new `ETag`.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+    ValidationFailed:
+      description: |
+        `VALIDATION_FAILED`. The request parsed but the values are not acceptable. `error.fields`
+        maps each offending field to a message you can put next to the input.
+
+        Common causes: publishing without a title, slug or content; scheduling in the past; and
+        sending `status` on a create or update, which is how the API refuses to let a client
+        push content into the AI pipeline.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+    RateLimited:
+      description: |
+        `RATE_LIMIT_EXCEEDED`. Back off and honour `Retry-After`.
+
+        Limits are per key, per minute, by endpoint class. Writes are limited harder than reads
+        because they cost more to serve, and pipeline runs hardest of all because they cost real
+        money.
+
+        | Class | Endpoints | Limit |
+        |---|---|---|
+        | read | every GET | 600 per minute |
+        | write | POST, PATCH and DELETE on content, taxonomy, keys and webhooks | 120 per minute |
+        | upload | `POST /media/upload-url` | 60 per minute |
+        | pipeline | `POST /pipeline/runs` | 10 per minute |
+
+        Every response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`,
+        so you can slow down before you are refused rather than after.
+      headers:
+        RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+        RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+        RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+        Retry-After: { $ref: "#/components/headers/RetryAfter" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+    Maintenance:
+      description: |
+        `MAINTENANCE`. Writes are paused, either platform wide or for your Site. Reads usually
+        keep working, and your published blog is served from cache and stays up. Retry after the
+        window given in `Retry-After`.
+      headers:
+        Retry-After: { $ref: "#/components/headers/RetryAfter" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+    InternalError:
+      description: |
+        `INTERNAL_ERROR`. Something failed on our side. The message is deliberately generic; the
+        detail is in our logs against the `request_id` in the body, so quote it if you contact
+        support.
+
+        Safe to retry, and safer still with the same `Idempotency-Key`, which guarantees you do
+        not create a second object if the first request actually succeeded.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }

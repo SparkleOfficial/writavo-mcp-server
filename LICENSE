@@ -1,0 +1,22 @@
+Writavo MCP Server Licence
+
+Copyright (c) 2026 Writavo. All rights reserved.
+
+This package is client software for the Writavo Content API.
+
+Permission is granted, free of charge, to any person or organisation to download, install, run and
+redistribute this package, unmodified and with this notice intact, for the purpose of accessing the
+Writavo Content API with their own credentials. Permission is also granted to modify it for that
+same purpose within your own organisation.
+
+Redistribution of a modified copy under a name that suggests it is the official Writavo package, or
+use of the Writavo name or marks to endorse a derived work, requires written permission.
+
+Use of the API this package calls is governed by the Writavo terms of service at
+https://writavo.com/terms.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT
+NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT
+OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
