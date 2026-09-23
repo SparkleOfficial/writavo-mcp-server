@@ -1,8 +1,8 @@
 {
   "name": "@writavo/mcp-server",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "mcpName": "com.writavo/cms",
-  "description": "MCP server for the Writavo Content API. Draft, edit, organise, schedule and publish a Site's content from any AI assistant, with tools generated from the published OpenAPI specification.",
+  "description": "MCP server for the Writavo Content API. Sign in from the browser, import an existing blog, and draft, edit, organise, schedule and publish a Site's content from any AI assistant, with tools generated from the published OpenAPI specification.",
   "keywords": [
     "mcp",
     "model-context-protocol",

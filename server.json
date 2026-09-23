@@ -6,19 +6,19 @@
     "url": "https://github.com/SparkleOfficial/writavo-mcp-server",
     "source": "github"
   },
-  "version": "0.1.1",
+  "version": "0.2.0",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@writavo/mcp-server",
-      "version": "0.1.1",
+      "version": "0.2.0",
       "transport": {
         "type": "stdio"
       },
       "environmentVariables": [
         {
           "name": "WRITAVO_API_KEY",
-          "description": "A Writavo API key (wv_sk_ or wv_pub_) from https://app.writavo.com/settings/api-keys. Without one, only the offline API reference tool works.",
+          "description": "A Writavo API key (wv_sk_ or wv_pub_) from https://app.writavo.com/settings/api-keys. Optional: without one, call the login tool to sign in through the browser instead.",
           "isRequired": false,
           "isSecret": true,
           "format": "string"

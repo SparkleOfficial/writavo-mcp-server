@@ -6,7 +6,7 @@ startCommand:
       writavoApiKey:
         type: string
         title: Writavo API key
-        description: "A secret key (wv_sk_) or a publishable key (wv_pub_) from https://app.writavo.com/settings/api-keys. Optional: without one, only the offline API reference tool works."
+        description: "A secret key (wv_sk_) or a publishable key (wv_pub_) from https://app.writavo.com/settings/api-keys. Optional: without one, call the login tool to sign in through the browser instead."
     required: []
   commandFunction:
     command: npx

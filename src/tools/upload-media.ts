@@ -1,9 +1,8 @@
-import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { basename, isAbsolute } from "node:path";
 import { z } from "zod";
-import { apiRequest, putPresigned } from "../api/client.js";
-import { NO_API_KEY_MESSAGE, hasApiKey, keyKind } from "../config.js";
+import { ACCEPTED_TYPES, MediaError, contentTypeFor, fetchImage, uploadImage } from "../api/media.js";
+import { hasApiKey, keyKind, noKeyMessage } from "../config.js";
 import { formatApiError, publishableKeyRefusal, text, toolError, type ToolResult } from "../errors.js";
 import type { ToolArgs } from "./call.js";
 
@@ -52,24 +51,6 @@ export const UPLOAD_MEDIA = {
   },
 };
 
-const TYPE_BY_EXTENSION: Record<string, string> = {
-  webp: "image/webp",
-  png: "image/png",
-  jpg: "image/jpeg",
-  jpeg: "image/jpeg",
-  gif: "image/gif",
-  avif: "image/avif",
-};
-
-interface UploadReservation {
-  upload_id: string;
-  upload_url: string | null;
-  method: string;
-  headers?: Record<string, string>;
-  expires_at: string;
-  max_size_bytes?: number;
-}
-
 export async function handleUploadMedia(rawArgs: ToolArgs): Promise<ToolResult> {
   const args = (rawArgs ?? {}) as {
     file_path?: string;
@@ -80,7 +61,7 @@ export async function handleUploadMedia(rawArgs: ToolArgs): Promise<ToolResult> 
     bucket?: string;
   };
 
-  if (!hasApiKey()) return toolError(NO_API_KEY_MESSAGE);
+  if (!hasApiKey()) return toolError(noKeyMessage());
   if (keyKind() === "publishable") return publishableKeyRefusal("upload_media", "media:write");
 
   if (!args.file_path && !args.source_url) {
@@ -92,6 +73,7 @@ export async function handleUploadMedia(rawArgs: ToolArgs): Promise<ToolResult> 
 
   let bytes: Uint8Array;
   let derivedName: string;
+  let fetchedType: string | undefined;
 
   if (args.file_path) {
     if (!isAbsolute(args.file_path)) {
@@ -104,85 +86,41 @@ export async function handleUploadMedia(rawArgs: ToolArgs): Promise<ToolResult> 
     }
     derivedName = basename(args.file_path);
   } else {
-    const source = args.source_url as string;
-    let parsed: URL;
     try {
-      parsed = new URL(source);
-    } catch {
-      return toolError("source_url is not a valid URL.");
-    }
-    if (parsed.protocol !== "https:") {
-      return toolError("source_url must be https.");
-    }
-    try {
-      const fetched = await fetch(source);
-      if (!fetched.ok) return toolError(`Could not fetch source_url: it returned status ${fetched.status}.`);
-      bytes = new Uint8Array(await fetched.arrayBuffer());
+      const fetched = await fetchImage(args.source_url as string);
+      bytes = fetched.bytes;
+      derivedName = fetched.fileName;
+      fetchedType = fetched.contentType;
     } catch (err) {
-      return toolError(`Could not fetch source_url: ${err instanceof Error ? err.message : String(err)}`);
+      return toolError(`Could not fetch source_url: ${err instanceof Error ? err.message : String(err)}.`);
     }
-    derivedName = basename(parsed.pathname) || "image";
   }
 
   const fileName = args.file_name ?? derivedName;
-  const extension = fileName.split(".").pop()?.toLowerCase() ?? "";
-  const contentType = args.content_type ?? TYPE_BY_EXTENSION[extension];
+  const contentType = args.content_type ?? contentTypeFor(fileName) ?? fetchedType;
   if (!contentType) {
     return toolError(
-      `Cannot tell what kind of image ${fileName} is. Pass content_type explicitly. Accepted: ${Object.values(TYPE_BY_EXTENSION).filter((v, i, a) => a.indexOf(v) === i).join(", ")}.`,
+      `Cannot tell what kind of image ${fileName} is. Pass content_type explicitly. Accepted: ${ACCEPTED_TYPES.join(", ")}.`,
     );
   }
 
   try {
-    // Step 1: reserve.
-    const reservation = await apiRequest<UploadReservation>({
-      method: "POST",
-      path: "/media/upload-url",
-      headers: { "Idempotency-Key": randomUUID() },
-      body: {
-        file_name: fileName,
-        content_type: contentType,
-        size_bytes: bytes.byteLength,
-        ...(args.bucket ? { bucket: args.bucket } : {}),
-      },
+    const asset = await uploadImage({
+      bytes,
+      fileName,
+      contentType,
+      altText: args.alt_text,
+      bucket: args.bucket as "blog-images" | "author-avatars" | undefined,
     });
-
-    if (reservation.data.max_size_bytes && bytes.byteLength > reservation.data.max_size_bytes) {
-      return toolError(
-        `${fileName} is ${bytes.byteLength} bytes and the limit for this upload is ${reservation.data.max_size_bytes}. Resize it and try again.`,
-      );
-    }
-    if (!reservation.data.upload_url) {
-      return toolError(
-        "The API returned a reservation with no upload URL, which happens when an idempotent request is replayed. Try again to get a fresh reservation.",
-      );
-    }
-
-    // Step 2: transfer. No authorization header: the signature in the URL is the credential.
-    await putPresigned(reservation.data.upload_url, bytes, {
-      "Content-Type": contentType,
-      ...(reservation.data.headers ?? {}),
-    });
-
-    // Step 3: register. Until this lands the object is swept and is not part of the library.
-    const asset = await apiRequest<Record<string, unknown>>({
-      method: "POST",
-      path: "/media",
-      headers: { "Idempotency-Key": randomUUID() },
-      body: {
-        upload_id: reservation.data.upload_id,
-        ...(args.alt_text === undefined ? {} : { alt_text: args.alt_text }),
-      },
-    });
-
     return text(
       [
         `Uploaded ${fileName} (${bytes.byteLength} bytes) and registered it in the media library.`,
         "",
-        JSON.stringify(asset.data, null, 2),
+        JSON.stringify(asset, null, 2),
       ].join("\n"),
     );
   } catch (err) {
+    if (err instanceof MediaError) return toolError(`upload_media failed: ${err.message}`);
     return formatApiError(err, { tool: "upload_media", scope: "media:write", entitlement: "none" });
   }
 }

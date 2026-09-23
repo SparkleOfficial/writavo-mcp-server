@@ -62,7 +62,7 @@ export interface McpRefusal {
 }
 
 export const API_BASE_URL = "https://api.writavo.com/v1";
-export const API_VERSION = "1.0.0";
+export const API_VERSION = "1.1.0";
 
 export const OPERATIONS: McpOperation[] = [
   {
@@ -256,6 +256,15 @@ export const OPERATIONS: McpOperation[] = [
         "nullable": false
       },
       {
+        "name": "external_id",
+        "in": "query",
+        "required": false,
+        "description": "Exact `external_id` match. Unique within a Site, so this returns at most one article. An importer calls this before writing, to update an article it brought in on an earlier run rather than create a second copy.",
+        "explode": false,
+        "kind": "string",
+        "nullable": false
+      },
+      {
         "name": "updated_since",
         "in": "query",
         "required": false,
@@ -316,6 +325,15 @@ export const OPERATIONS: McpOperation[] = [
         "in": "body",
         "required": false,
         "description": "Derived from `title` when omitted. Supply it if the URL matters.",
+        "explode": false,
+        "kind": "string",
+        "nullable": true
+      },
+      {
+        "name": "external_id",
+        "in": "body",
+        "required": false,
+        "description": "Your id for this article in the system it came from. Unique within the Site.",
         "explode": false,
         "kind": "string",
         "nullable": true
@@ -545,6 +563,15 @@ export const OPERATIONS: McpOperation[] = [
         "nullable": true
       },
       {
+        "name": "external_id",
+        "in": "body",
+        "required": false,
+        "description": "Your id for this article in the system it came from. `null` clears it.",
+        "explode": false,
+        "kind": "string",
+        "nullable": true
+      },
+      {
         "name": "content",
         "in": "body",
         "required": false,
@@ -740,6 +767,26 @@ export const OPERATIONS: McpOperation[] = [
         "kind": "string",
         "nullable": false,
         "format": "uuid"
+      },
+      {
+        "name": "published_at",
+        "in": "body",
+        "required": false,
+        "description": "The date the article was ORIGINALLY published, for an article imported from another system. First publish only; must be in the past. Omit it to publish now.",
+        "explode": false,
+        "kind": "string",
+        "nullable": false,
+        "format": "date-time"
+      },
+      {
+        "name": "content_updated_at",
+        "in": "body",
+        "required": false,
+        "description": "When the imported article's content last changed at its source. First publish only; must be in the past and not earlier than `published_at`.",
+        "explode": false,
+        "kind": "string",
+        "nullable": false,
+        "format": "date-time"
       }
     ]
   },
@@ -1963,5 +2010,19 @@ export const REFUSALS: McpRefusal[] = [
     "path": "/webhooks/{id}/deliveries/{delivery_id}/redeliver",
     "tag": "Webhooks",
     "reason": "Account configuration, not content. An assistant that can repoint delivery URLs can quietly redirect a Site's event stream, and that is a change a person should make deliberately."
+  },
+  {
+    "operationId": "startDeviceAuthorization",
+    "method": "POST",
+    "path": "/auth/device",
+    "tag": "Device sign-in",
+    "reason": "Reached through the login tool, which drives the whole device sign-in in one call."
+  },
+  {
+    "operationId": "pollDeviceAuthorization",
+    "method": "POST",
+    "path": "/auth/device/token",
+    "tag": "Device sign-in",
+    "reason": "Reached through the login tool, which drives the whole device sign-in in one call."
   }
 ];

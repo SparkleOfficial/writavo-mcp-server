@@ -2,7 +2,7 @@ openapi: 3.1.0
 
 info:
   title: Writavo Content API
-  version: "1.0.0"
+  version: "1.1.0"
   summary: The CMS control plane for a Writavo Site.
   description: |
     The Writavo Content API is the programmable half of the CMS. It lets you create, edit,
@@ -76,6 +76,23 @@ info:
     New values may be added to read-only enums (for example `article.status`, if the pipeline
     grows a stage). Treat every read-only enum as open and fall through gracefully on a value
     you do not recognise.
+
+    ## Moving an existing blog in
+
+    Content you bring from another system keeps its identity. Send your old system's id for each
+    article as `external_id` and look it up with `GET /articles?external_id=` before writing, so
+    a second run updates instead of duplicating. Keep the old `slug` so the URL does not change.
+    When you publish, pass the article's original `published_at` (and optionally
+    `content_updated_at`) in the body of `POST /articles/{id}/publish`: an article's first
+    publish may carry its real history, so your feed order, structured data and sitemap dates
+    stay what they were. The migration guide walks through the whole import.
+
+    ## Signing in from a terminal
+
+    Command line tools and MCP clients do not need a key pasted into them. `POST /auth/device`
+    starts a sign-in that a person approves in the dashboard, and the key the client generated
+    becomes an ordinary secret key for the Site they choose. These two endpoints are the only
+    ones that take no API key.
   contact:
     name: Writavo Support
     url: https://writavo.com/support
@@ -112,6 +129,10 @@ tags:
     description: |
       Outbound event delivery. Register an HTTPS endpoint, subscribe it to events, and receive a
       signed POST whenever your content changes, from this API or from the dashboard.
+  - name: Device sign-in
+    description: |
+      Device sign-in for command line tools and MCP clients: a person approves access in the
+      dashboard instead of copying a key. The only endpoints that take no API key.
 
 security:
   - apiKey: []
@@ -342,6 +363,14 @@ paths:
           description: Exact slug match. Slugs are unique within a Site, so this returns at most one article.
           required: false
           schema: { type: string }
+        - name: external_id
+          in: query
+          description: |
+            Exact `external_id` match. Unique within a Site, so this returns at most one article.
+            An importer calls this before writing, to update an article it brought in on an
+            earlier run rather than create a second copy.
+          required: false
+          schema: { type: string, minLength: 1, maxLength: 255 }
         - name: updated_since
           in: query
           description: |
@@ -612,6 +641,14 @@ paths:
         was **first** made public and is the ordering key for your blog, so republishing after an
         unpublish does not move the post to the top of the feed.
 
+        **Importing an article that was already public somewhere else?** Send its original
+        `published_at` in the body, and optionally `content_updated_at`. Both must be in the past
+        (and on or after 1990-01-01), and `content_updated_at` may not be earlier than
+        `published_at`. They are honoured on the article's **first** publish only: once an article
+        has a `published_at`, sending a different one is `422 VALIDATION_FAILED`, and sending the
+        same one is accepted so a retried import stays a no-op. A future date is refused; use
+        `/schedule` to go live later.
+
         Publishing clears any pending schedule.
 
         This is free. It makes no external call, so it passes no entitlement check, spends no
@@ -628,6 +665,27 @@ paths:
       x-publishable: false
       x-cross-tenant: 404
       x-makes-public: true
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                published_at:
+                  type: string
+                  format: date-time
+                  description: |
+                    The date the article was ORIGINALLY published, for an article imported from
+                    another system. First publish only; must be in the past. Omit it to publish
+                    now.
+                content_updated_at:
+                  type: string
+                  format: date-time
+                  description: |
+                    When the imported article's content last changed at its source. First publish
+                    only; must be in the past and not earlier than `published_at`.
       responses:
         "200":
           description: The article is public.
@@ -2558,6 +2616,183 @@ paths:
         "503": { $ref: "#/components/responses/Maintenance" }
         "500": { $ref: "#/components/responses/InternalError" }
 
+  # ==========================================================================
+  # AUTHENTICATION (device sign-in)
+  # ==========================================================================
+  /auth/device:
+    post:
+      operationId: startDeviceAuthorization
+      tags: [Device sign-in]
+      summary: Start a device sign-in
+      description: |
+        Starts a sign-in for a command line tool or MCP client, modelled on the OAuth device
+        authorization grant (RFC 8628). Takes no API key: this is how a client comes to have one.
+
+        **The client generates the key.** Create a secret the same shape as ours, `wv_sk_`
+        followed by 32 base64url characters (24 random bytes), keep it private, and send only its
+        SHA-256 as `key_hash` plus its first 12 characters as `key_prefix`. The secret never
+        leaves your machine; approval registers its hash as an ordinary secret key.
+
+        Show the person `verification_uri_complete` (or `verification_uri` and `user_code`). They
+        sign in to the dashboard, or create an account first, choose a Site, and approve. Then
+        poll `POST /auth/device/token` every `interval` seconds until it says `approved`, and
+        start using your key. The request expires after `expires_in` seconds.
+
+        The key is created for the approving person, on the Site they choose, with the scopes you
+        asked for that they are allowed to grant, and expires after 90 days. It appears under
+        Settings > API keys, where it can be revoked like any other.
+      security: []
+      x-scope: none
+      x-permission: none
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: auth
+      x-publishable: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [client_name, key_hash, key_prefix, scopes]
+              properties:
+                client_name:
+                  type: string
+                  minLength: 1
+                  maxLength: 80
+                  description: What the person sees on the approval screen, such as the name of your tool.
+                client_host:
+                  type: [string, "null"]
+                  maxLength: 120
+                  description: The machine asking, such as its hostname, so the person can recognise it.
+                key_hash:
+                  type: string
+                  pattern: "^[0-9a-f]{64}$"
+                  description: SHA-256 of the full secret key you generated, as lower-case hex.
+                key_prefix:
+                  type: string
+                  pattern: "^wv_sk_[A-Za-z0-9_-]{6}$"
+                  description: The first 12 characters of that key, shown in the dashboard to identify it.
+                scopes:
+                  type: array
+                  minItems: 1
+                  maxItems: 15
+                  items: { $ref: "#/components/schemas/Scope" }
+                  description: |
+                    The scopes you want. The key receives those the approving person may grant on
+                    the Site they pick; the rest are dropped.
+      responses:
+        "201":
+          description: The sign-in is waiting for approval.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [device_code, user_code, verification_uri, verification_uri_complete, expires_in, interval]
+                        properties:
+                          device_code:
+                            type: string
+                            description: Opaque. Keep it private and send it when you poll.
+                          user_code:
+                            type: string
+                            pattern: "^[BCDFGHJKLMNPQRSTVWXZ]{4}-[BCDFGHJKLMNPQRSTVWXZ]{4}$"
+                            description: What the person confirms on the approval screen.
+                          verification_uri: { type: string, format: uri }
+                          verification_uri_complete:
+                            type: string
+                            format: uri
+                            description: The approval page with the code filled in. Show this one when you can.
+                          expires_in: { type: integer, const: 1800 }
+                          interval:
+                            type: integer
+                            const: 5
+                            description: Seconds to wait between polls.
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /auth/device/token:
+    post:
+      operationId: pollDeviceAuthorization
+      tags: [Device sign-in]
+      summary: Poll a device sign-in
+      description: |
+        Reports whether the person has approved the sign-in. It returns an outcome, never a
+        credential: on `approved`, the key you generated is live, and the response says which
+        Site it belongs to, which scopes it carries and when it expires.
+
+        `pending` means keep waiting. `slow_down` means you polled faster than `interval`; wait
+        the `interval` it returns before the next poll. `denied` and `expired` are final: start
+        again with a new key.
+      security: []
+      x-scope: none
+      x-permission: none
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: auth
+      x-publishable: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [device_code]
+              properties:
+                device_code: { type: string, minLength: 1, maxLength: 128 }
+      responses:
+        "200":
+          description: The current outcome.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [status]
+                        properties:
+                          status:
+                            type: string
+                            enum: [pending, slow_down, approved, denied, expired]
+                          interval:
+                            type: integer
+                            description: Present on `slow_down`. Seconds to wait before polling again.
+                          key:
+                            type: object
+                            description: Present on `approved`.
+                            properties:
+                              id: { type: string, format: uuid }
+                              key_prefix: { type: string }
+                              scopes:
+                                type: array
+                                items: { $ref: "#/components/schemas/Scope" }
+                              expires_at: { type: [string, "null"], format: date-time }
+                          website:
+                            type: object
+                            description: Present on `approved`. The Site the key belongs to.
+                            properties:
+                              id: { type: string, format: uuid }
+                              name: { type: string }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
 # ============================================================================
 # COMPONENTS
 # ============================================================================
@@ -3021,6 +3256,16 @@ components:
           description: |
             The URL segment on your blog. Unique within the Site; a collision is
             `409 SLUG_CONFLICT`. May be null on a draft, and is required to publish.
+        external_id:
+          type: [string, "null"]
+          minLength: 1
+          maxLength: 255
+          pattern: "^[!-~]+$"
+          description: |
+            Your own stable id for this article in the system it came from, such as the
+            primary key in your old CMS. Printable ASCII, no spaces. Unique within the Site: a
+            second article with the same value is `409 CONFLICT`. Null for anything written in
+            Writavo. Filter on it with `GET /articles?external_id=`.
         content:
           type: [string, "null"]
           description: |
@@ -3093,12 +3338,20 @@ components:
           description: |
             When the article was **first** made public. Set by the first publish and never
             changed after, including across an unpublish and republish, because it is your blog's
-            ordering key.
+            ordering key. An imported article's first publish may supply its original date.
         scheduled_publish_at:
           type: [string, "null"]
           format: date-time
           readOnly: true
           description: Set through `POST /articles/{id}/schedule`.
+        content_updated_at:
+          type: [string, "null"]
+          format: date-time
+          readOnly: true
+          description: |
+            When what a reader sees last changed: the title, slug, body, excerpt, images, SEO
+            fields, structured blocks, category or author. Unlike `updated_at` it ignores internal
+            bookkeeping, so it is the honest value for `dateModified` and a sitemap `lastmod`.
         created_at: { type: string, format: date-time, readOnly: true }
         updated_at: { type: string, format: date-time, readOnly: true }
 
@@ -3117,6 +3370,12 @@ components:
           maxLength: 200
           pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$"
           description: Derived from `title` when omitted. Supply it if the URL matters.
+        external_id:
+          type: [string, "null"]
+          minLength: 1
+          maxLength: 255
+          pattern: "^[!-~]+$"
+          description: Your id for this article in the system it came from. Unique within the Site.
         content: { type: [string, "null"], description: Markdown. }
         excerpt: { type: [string, "null"], maxLength: 1000 }
         featured_image_url: { type: [string, "null"], format: uri }
@@ -3148,6 +3407,12 @@ components:
           description: |
             Changing the slug of a published article changes its live URL and nothing is
             redirected for you. The old URL starts returning 404.
+        external_id:
+          type: [string, "null"]
+          minLength: 1
+          maxLength: 255
+          pattern: "^[!-~]+$"
+          description: Your id for this article in the system it came from. `null` clears it.
         content: { type: [string, "null"], description: Markdown. }
         excerpt: { type: [string, "null"], maxLength: 1000 }
         featured_image_url: { type: [string, "null"], format: uri }
@@ -3611,7 +3876,8 @@ components:
 
         Limits are per key, per minute, by endpoint class. Writes are limited harder than reads
         because they cost more to serve, and pipeline runs hardest of all because they cost real
-        money.
+        money. The two device sign-in endpoints take no key, so they are limited per IP address
+        instead.
 
         | Class | Endpoints | Limit |
         |---|---|---|
@@ -3619,6 +3885,7 @@ components:
         | write | POST, PATCH and DELETE on content, taxonomy, keys and webhooks | 120 per minute |
         | upload | `POST /media/upload-url` | 60 per minute |
         | pipeline | `POST /pipeline/runs` | 10 per minute |
+        | auth | `POST /auth/device` and `POST /auth/device/token`, per IP address | 60 per minute |
 
         Every response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`,
         so you can slow down before you are refused rather than after.

@@ -16,7 +16,9 @@
 import { ERROR_GUIDANCE, ERROR_LINKS } from "./error-guidance.mjs";
 
 /** Tags an assistant may reach. Every operation under one of these becomes a tool. */
-export const TOOL_TAGS = ["Meta", "Articles", "Categories", "Tags", "Authors", "Media", "Pipeline"];
+export const TOOL_TAGS = [
+  "Meta", "Articles", "Categories", "Tags", "Authors", "Media", "Pipeline", "Device sign-in",
+];
 
 /**
  * Tags an assistant may NOT reach, and why. These are refusals with reasons rather than
@@ -55,6 +57,17 @@ export const NAME_OVERRIDES = {
 export const COMPOSED_INTO = {
   createMediaUploadUrl: "upload_media",
   registerMedia: "upload_media",
+  // The device sign-in is the same shape of problem: a start call, a person acting in a browser,
+  // and a poll loop that has to honour `interval` and `slow_down`. One tool owns all of it, and
+  // the key it signs in with is generated and kept on the user's machine by that tool alone.
+  startDeviceAuthorization: "login",
+  pollDeviceAuthorization: "login",
+};
+
+/** What each composing tool drives, for the refusal reason a composed operation carries. */
+const COMPOSED_WHAT = {
+  upload_media: "upload handshake",
+  login: "device sign-in",
 };
 
 /** Tools the package implements without a single endpoint behind them. */
@@ -66,8 +79,33 @@ export const LOCAL_TOOLS = [
   },
   {
     name: "get_api_docs",
-    summary: "Read the API reference offline. The one tool that needs no key.",
+    summary: "Read the API reference offline. One of the few tools that needs no key.",
     confirm: false,
+  },
+  {
+    name: "login",
+    summary: "Sign in through the browser: a person approves, and a key generated on this machine goes live.",
+    confirm: false,
+  },
+  {
+    name: "login_status",
+    summary: "Check whether a sign-in started with login has been approved, and which Site it is for.",
+    confirm: false,
+  },
+  {
+    name: "logout",
+    summary: "Forget the signed-in key on this machine. Revoking it is done in the dashboard.",
+    confirm: false,
+  },
+  {
+    name: "start_plan_purchase",
+    summary: "Get the dashboard link to choose a plan. Payment happens on Stripe's page, never in the chat.",
+    confirm: false,
+  },
+  {
+    name: "import_content",
+    summary: "Import articles from a Writavo import file: dry run first, then create, re-host images and publish with original dates.",
+    confirm: true,
   },
 ];
 
@@ -271,7 +309,7 @@ export function buildMcpSurface(spec) {
           method: upper,
           path,
           tag,
-          reason: `Reached through the ${COMPOSED_INTO[operationId]} tool, which drives the whole upload handshake in one call.`,
+          reason: `Reached through the ${COMPOSED_INTO[operationId]} tool, which drives the whole ${COMPOSED_WHAT[COMPOSED_INTO[operationId]] ?? "exchange"} in one call.`,
         });
         continue;
       }

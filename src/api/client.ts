@@ -1,4 +1,4 @@
-import { CONFIG, redact } from "../config.js";
+import { CONFIG, apiKey, redact } from "../config.js";
 
 export interface ApiErrorBody {
   ok: false;
@@ -34,6 +34,11 @@ export interface ApiRequest {
   query?: [string, string][];
   body?: unknown;
   headers?: Record<string, string>;
+  /**
+   * False for the two sign-in endpoints, which take no key. Nothing is sent rather than whatever
+   * key happens to be active, because a request that needs no credential should not carry one.
+   */
+  auth?: boolean;
 }
 
 export interface ApiResponse<T> {
@@ -58,7 +63,7 @@ export async function apiRequest<T>(request: ApiRequest): Promise<ApiResponse<T>
   for (const [key, value] of request.query ?? []) url.searchParams.append(key, value);
 
   const headers: Record<string, string> = {
-    Authorization: `Bearer ${CONFIG.apiKey}`,
+    ...(request.auth === false ? {} : { Authorization: `Bearer ${apiKey()}` }),
     Accept: "application/json",
     "User-Agent": "writavo-mcp-server",
     ...(request.headers ?? {}),

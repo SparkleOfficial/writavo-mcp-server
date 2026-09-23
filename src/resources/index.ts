@@ -2,6 +2,7 @@ import { apiRequest } from "../api/client.js";
 import { ERROR_CATALOG } from "../generated/errors.js";
 import { referenceSection } from "../generated/reference.js";
 import { hasApiKey, redact } from "../config.js";
+import { importFormatDocument } from "../import/format.js";
 
 export interface ResourceDefinition {
   uri: string;
@@ -21,9 +22,10 @@ const contents = (definition: ResourceDefinition, body: string): ResourceContent
 });
 
 /**
- * The three resources API-6 §3 asks for. All generated from openapi.yaml except the content types,
- * which are per Site and can only come from the Site. The reference implementation keeps its
- * equivalent hand-written; here a stale resource is a build failure.
+ * The three resources API-6 §3 asks for, plus the import format. The first three are generated
+ * from openapi.yaml except the content types, which are per Site and can only come from the Site.
+ * The reference implementation keeps its equivalent hand-written; here a stale resource is a
+ * build failure. The import format is emitted from its own zod definition (import/format.ts).
  */
 export const apiReferenceResource: ResourceDefinition = {
   uri: "writavo://api-reference",
@@ -76,7 +78,7 @@ export async function readContentTypes(): Promise<ResourceContents> {
         {
           available: false,
           reason:
-            "No API key is configured, and content types are per Site. Configure WRITAVO_API_KEY to read the real list.",
+            "No API key is configured, and content types are per Site. Call the login tool, or configure WRITAVO_API_KEY, to read the real list.",
           reference: "writavo://api-reference",
         },
         null,
@@ -97,4 +99,16 @@ export async function readContentTypes(): Promise<ResourceContents> {
       ),
     );
   }
+}
+
+export const importFormatResource: ResourceDefinition = {
+  uri: "writavo://import-format",
+  name: "Writavo Import Format v1",
+  description:
+    "The file format import_content reads to bring an existing blog into a Site: every field explained, a sample document, and the JSON Schema, emitted from the same definition the importer validates with.",
+  mimeType: "text/markdown",
+};
+
+export function readImportFormat(): ResourceContents {
+  return contents(importFormatResource, importFormatDocument());
 }

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { apiRequest } from "../api/client.js";
 import type { McpOperation } from "../generated/operations.js";
-import { CONFIG, NO_API_KEY_MESSAGE, hasApiKey, keyKind } from "../config.js";
+import { CONFIG, hasApiKey, keyKind, noKeyMessage } from "../config.js";
 import { formatApiError, publishableKeyRefusal, text, toolError, type ToolResult } from "../errors.js";
 
 export type ToolArgs = Record<string, unknown>;
@@ -41,7 +41,7 @@ function confirmationRequired(operation: McpOperation, args: ToolArgs): ToolResu
 export async function callOperation(operation: McpOperation, rawArgs: ToolArgs): Promise<ToolResult> {
   const args = rawArgs ?? {};
 
-  if (!hasApiKey()) return toolError(NO_API_KEY_MESSAGE);
+  if (!hasApiKey()) return toolError(noKeyMessage());
 
   if (keyKind() === "publishable" && !operation.publishable) {
     return publishableKeyRefusal(operation.tool, operation.scope);

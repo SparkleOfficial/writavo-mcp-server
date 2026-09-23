@@ -7,7 +7,8 @@ issue for anything that affects a live Site.
 
 ## What this package does with your key
 
-`WRITAVO_API_KEY` is read once at startup and sent as an `Authorization: Bearer` header to
+The key comes from `WRITAVO_API_KEY` if it is set, and otherwise from the saved sign-in the
+`login` tool writes. Either way it is sent as an `Authorization: Bearer` header to
 `https://api.writavo.com/v1`, and to nothing else.
 
 - The base URL comes from the published OpenAPI specification, compiled into the package. The
@@ -24,6 +25,23 @@ issue for anything that affects a live Site.
 - Standard output is reserved for the protocol. Every console channel is rebound to standard error
   before the server connects, so a dependency that logs at import time cannot corrupt the stream or
   put a line in your client's log.
+
+## Browser sign-in
+
+`login` generates the new secret key on this machine and sends only its SHA-256 hash and its
+first twelve characters to be approved. The approval page and the polling endpoint never hold a
+usable credential, and the secret never crosses the network until it is used as a bearer header.
+
+- The person approving sees the requesting machine's name and a short code, chooses the Site, and
+  can deny. The key is limited to that one Site, carries only the scopes asked for (never key or
+  webhook management), and expires after 90 days.
+- On approval the key is saved to `$XDG_CONFIG_HOME/writavo/credentials.json` (else
+  `~/.config/writavo/credentials.json`, or `%APPDATA%\writavo\credentials.json` on Windows). The
+  directory is created `0700` and the file `0600`, and it is replaced atomically.
+- `WRITAVO_API_KEY` always outranks the saved sign-in. A key set deliberately in a client config is
+  never silently replaced by a browser login.
+- `logout` deletes the file and stops using the key. The key itself stays valid until it is revoked
+  at <https://app.writavo.com/settings/api-keys> or expires.
 
 ## What an assistant can and cannot reach
 
