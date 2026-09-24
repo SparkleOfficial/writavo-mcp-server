@@ -1,0 +1,14 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "writavo": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@writavo/mcp-server"]
+    },
+    "writavo-docs": {
+      "type": "streamable-http",
+      "url": "https://writavo.com/mcp/docs"
+    }
+  }
+}
