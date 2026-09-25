@@ -15,7 +15,7 @@ Writavo is a CMS with optional AI article generation. A Site's articles, media, 
 tags and authors live in Writavo and are served on the customer's own domain. Everything a
 person can do to that content in the dashboard, an API key can do.
 
-## Use this when
+## When to use this skill
 
 - The user wants an article drafted, edited, scheduled or published on a Writavo Site.
 - The user wants content organised: categories, tags, authors, featured images.

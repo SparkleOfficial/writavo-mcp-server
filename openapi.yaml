@@ -1869,7 +1869,20 @@ paths:
                     batch size.
       responses:
         "202":
-          description: The run was accepted and queued.
+          description: |
+            The run was accepted and queued. It runs asynchronously: poll the URL in `Location`
+            (`GET /pipeline/runs/{id}`) until `status` is terminal, or subscribe to the
+            `pipeline.run.*` webhook events instead of polling.
+          headers:
+            Location:
+              description: Where to poll for this run's status, `/v1/pipeline/runs/{id}`.
+              schema: { type: string }
+          links:
+            GetPipelineRun:
+              operationId: getPipelineRun
+              parameters:
+                id: $response.body#/data/id
+              description: Poll the run this request queued.
           content:
             application/json:
               schema:
@@ -1881,7 +1894,10 @@ paths:
                         type: object
                         required: [id, status, requested_at]
                         properties:
-                          id: { type: string, format: uuid }
+                          id:
+                            type: string
+                            format: uuid
+                            description: The run's job id. Poll `GET /pipeline/runs/{id}` with it.
                           status: { type: string, const: queued }
                           requested_at: { type: string, format: date-time }
                           estimated_start_at:
@@ -2129,8 +2145,13 @@ paths:
       tags: [API keys]
       summary: Rotate an API key
       description: |
-        Issues a new secret for the same key record, keeping its name and scopes, and returns it
-        once.
+        Issues a new secret for the same key record, keeping its name, and returns it once.
+
+        Only the person who created the key, an organisation owner or a platform admin may rotate
+        it: a rotation hands over a live credential that keeps acting with its creator's
+        permissions. Anyone else with `api_keys.manage` gets `403 INSUFFICIENT_SCOPE`. The new
+        secret's scopes are the old key's scopes limited to what the caller could grant today, and
+        a rotation that would leave no scopes is refused with `403 INSUFFICIENT_SCOPE`.
 
         As with creation, a replayed retry returns `secret: null` and `secret_replayable: false`
         rather than handing out the credential a second time. Rotate again if you lost it.
