@@ -128,11 +128,26 @@ export async function apiRequest<T>(ctx: ToolContext, request: ApiRequest): Prom
     }
   };
 
+  // One retry after a NETWORK failure, only when repeating cannot do anything twice: a read, or a
+  // request carrying an Idempotency-Key (the API replays the first outcome). The usual cause is a
+  // pooled keep-alive socket the far end closed while the connection sat idle, which fails before
+  // the request is sent. A timeout (our own abort) is never retried: the request may have landed.
+  const retryable =
+    request.method === "GET" ||
+    Object.keys(headers).some((h) => h.toLowerCase() === "idempotency-key");
   let response: Response;
   try {
     response = await send();
   } catch (err) {
-    throw new WritavoApiError("NETWORK_ERROR", networkMessage(err, ctx.apiBase), 0);
+    const aborted = err instanceof Error && err.name === "AbortError";
+    if (!retryable || aborted) {
+      throw new WritavoApiError("NETWORK_ERROR", networkMessage(err, ctx.apiBase), 0);
+    }
+    try {
+      response = await send();
+    } catch (err2) {
+      throw new WritavoApiError("NETWORK_ERROR", networkMessage(err2, ctx.apiBase), 0);
+    }
   }
 
   if (response.status === 429) {
