@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "writavo",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Manage a Writavo Site's content from an AI agent: the Writavo MCP server (hosted, or local over stdio) plus a skill that walks the draft, edit, schedule and publish loop.",
   "author": { "name": "Writavo", "url": "https://writavo.com" },
   "homepage": "https://writavo.com/docs/mcp",

@@ -1,7 +1,7 @@
 ---
 name: writavo
 description: >-
-  Manage a Writavo Site's blog content: draft, edit, organise, schedule and publish articles, upload media, manage categories, tags and authors, import an existing blog, and trigger the AI article pipeline. Use when a task involves a blog or content site hosted on Writavo.
+  Manage a Writavo Site's blog content: draft, edit, organise, schedule and publish articles, upload media, manage categories, tags and authors, import an existing blog, and trigger the AI article pipeline. Also change the Site's settings, delivery and domains, SEO, team and billing. Use when a task involves a blog or content site hosted on Writavo.
 license: MIT
 metadata:
   homepage: https://writavo.com
@@ -21,10 +21,11 @@ person can do to that content in the dashboard, an API key can do.
 - The user wants content organised: categories, tags, authors, featured images.
 - The user is moving an existing blog into Writavo.
 - The user wants the AI pipeline to research and write articles for them.
+- The user wants a Site setting, the pipeline's configuration, a domain, an SEO task, the team or
+  billing changed without opening the dashboard.
 
-**Do not** use it to write a one-off paragraph (just write it), to administer a WordPress, Ghost
-or Webflow site (use that platform's API), or to change billing, team members or roles (those
-are dashboard-only by design).
+**Do not** use it to write a one-off paragraph (just write it), or to administer a WordPress,
+Ghost or Webflow site (use that platform's API).
 
 ## Step 0: pick a surface
 
@@ -42,10 +43,12 @@ call the `login` tool. The exact command or config for every client (Claude Code
 ChatGPT, Codex, Cursor, VS Code, Gemini CLI, Windsurf, Zed) and a troubleshooting table:
 https://writavo.com/docs/mcp.md
 
-Some actions need a person's approval when an AI agent asks: deleting content, unpublishing and
-running the pipeline. The tool then returns a link instead of acting. Give the user the link, wait
+Some actions need a person's approval when an AI agent asks: anything that spends money or
+credits, every team change and every change to the live site (always), and deleting or
+unpublishing content (while the organisation requires approvals). The tool then returns a link instead of acting. Give the user the link, wait
 for them to approve, and call the same tool again with the same arguments plus the `approval_id`
-it gave you. It works once and lapses after 24 hours. If they deny it, stop and ask what they want
+it gave you. It works once, lapses after 24 hours, and is void if what the request would do has
+changed in the meantime (then ask again). If they deny it, stop and ask what they want
 instead.
 
 ## Step 1: get a credential
@@ -83,10 +86,28 @@ look it up with `GET /articles?external_id=` before writing, so a second run upd
 duplicating. Keep the old `slug` so URLs do not change, and pass the original `published_at` on
 the first publish so feed order and sitemap dates survive. Guide: https://writavo.com/docs/migrate
 
+## Settings, delivery, SEO, team and billing
+
+Everything past content is reached through three MCP tools: `search_writavo_actions` (describe the
+task; it returns matching operations with their inputs, cost and whether they need approval),
+`read_writavo_action` (run a read; changes nothing) and `run_writavo_action` (run a change:
+operationId plus arguments, and `approval_id` on a repeat). Read first
+(`getSiteSettings`, `getDelivery`, `getBillingSummary`), then change. Every refusal names its
+next step: `409 PREREQUISITE_MISSING` names the operation that sets up what is missing, and
+`409 FEATURE_UNAVAILABLE` names the free alternative. Guide: https://writavo.com/docs/administration.md
+
+**Never try these; give the person the page instead:** the AI agent switch, approvals and default
+permissions (https://app.writavo.com/settings/agents), card details
+(https://app.writavo.com/billing?action=add-card), plan changes (`start_plan_purchase`),
+ownership and the person's own access (https://app.writavo.com/team), the outreach policy and
+mailbox (https://app.writavo.com/outreach), CMS and Bing credentials (the `connect_url` the
+connect operation returns), deleting a Site, and API keys and webhooks.
+
 ## The AI pipeline: costs money
 
-`trigger_pipeline_run` (`POST /pipeline/runs`) is the only billable operation. **Confirm with the
-user before calling it**, and pass `max_articles` as a ceiling. It needs the `pipeline:run`
+`trigger_pipeline_run` (`POST /pipeline/runs`) spends credits, as do turning the pipeline up,
+AI rewrites and paid SEO scans. **Confirm with the user before calling any of them**, and pass
+`max_articles` as a ceiling on a run. It needs the `pipeline:run`
 scope. A `402` names which limit was met: `NOT_ENTITLED` (plan), `INSUFFICIENT_CREDITS`,
 `SPEND_CAP_REACHED` or `PAYMENT_METHOD_REQUIRED`. Report it; do not retry. Watch progress with
 `get_pipeline_status` and `get_pipeline_queue`.
@@ -110,7 +131,8 @@ Every code and its fix: https://writavo.com/docs/errors
 - **Do not publish without being asked.** Drafts are the safe default; leave work there.
 - **Do not set pipeline statuses** with `update_article`. Ten of the thirteen statuses belong to
   the engine and a PATCH to one is refused.
-- **Do not trigger a pipeline run without confirmation.** It spends the user's credits.
+- **Do not trigger a pipeline run, a paid scan or anything else that costs money without
+  confirmation.** It spends the user's credits or money.
 - **Do not pass a site or tenant id.** The Site comes from the key; there is no such parameter.
 - **Do not paste a secret key into a file, a commit or a chat reply.**
 

@@ -7,7 +7,7 @@
       "name": "writavo",
       "source": "./",
       "description": "Draft, edit, organise, schedule and publish a Writavo Site's content from Claude Code, through the hosted MCP server at https://mcp.writavo.com/mcp.",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "author": { "name": "Writavo", "url": "https://writavo.com" },
       "homepage": "https://writavo.com/docs/mcp",
       "repository": "https://github.com/SparkleOfficial/writavo-mcp-server",

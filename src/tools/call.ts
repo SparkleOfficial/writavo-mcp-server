@@ -6,30 +6,63 @@ import { formatApiError, publishableKeyRefusal, text, toolError, type ToolResult
 export type ToolArgs = Record<string, unknown>;
 
 /**
+ * How a call is labelled when it is not made by the operation's own tool: run_writavo_action
+ * running an action from the catalog (MCP-3 decision 5). The API's Writavo-Mcp-Tool header takes
+ * [a-z0-9_] only, so it carries the tool that ran ("run_writavo_action"); the operation needs no
+ * label of its own, because the API already records the operationId of the route it served in
+ * the agent call log. `name` is how every reply refers to it, so "call it again" instructions
+ * name the operation_id as well as the tool.
+ */
+export interface CallVia {
+  /** Sent as Writavo-Mcp-Tool. */
+  tool: string;
+  /** Used in replies: `run_writavo_action (operation_id "connectCustomDomain")`. */
+  name: string;
+  /** How to repeat the call, ending where " with confirm: true" can follow. */
+  again: string;
+}
+
+/** The label a generated tool uses for itself. */
+function viaTool(operation: McpOperation): CallVia {
+  return { tool: operation.tool, name: operation.tool, again: `${operation.tool} again` };
+}
+
+/**
  * What a tool says when it is asked to do something outward facing and nobody has said yes yet.
  *
  * API-6 §2 "Confirmation": publishing to a live site, deleting content and spending credits are
  * not one shot actions. The reply describes the consequence in the words the person needs to
  * agree to, and nothing has happened at the point it is returned.
  */
-function confirmationRequired(operation: McpOperation, args: ToolArgs): ToolResult {
+function confirmationRequired(operation: McpOperation, args: ToolArgs, via: CallVia): ToolResult {
   const target = typeof args.id === "string" ? ` (${args.id})` : "";
+  // The specification's own sentence when it has one (x-agent-consequence): the fixed lines below
+  // were written for content and are wrong for revoking an invite or removing a member.
   const consequence =
-    operation.confirmReason === "spend"
-      ? "This spends the organisation's credit balance. The engine is charged per unit of work it completes, and the amount depends on what is in the queue."
+    operation.consequence ??
+    (operation.confirmReason === "spend"
+      ? operation.spendsCredits
+        ? "This spends the organisation's credit balance. The engine is charged per unit of work it completes, and the amount depends on what is in the queue."
+        : "This costs the organisation money."
       : operation.confirmReason === "destructive"
         ? "This permanently deletes content from the customer's Site. There is no trash and no undo."
         : operation.confirmReason === "approval"
           ? "This takes live content down from the customer's Site: readers and search engines stop seeing it."
-          : "This makes content publicly visible on the customer's own live site, where search engines and readers will see it.";
+          : "This makes content publicly visible on the customer's own live site, where search engines and readers will see it.");
+  const costs =
+    operation.consequence && operation.confirmReason === "spend"
+      ? operation.spendsCredits
+        ? "It spends the organisation's credits. "
+        : "It costs money. "
+      : "";
 
   return text(
     [
-      `Nothing has been done. ${operation.tool}${target} needs the user to confirm first.`,
+      `Nothing has been done. ${via.name}${target} needs the user to confirm first.`,
       "",
-      consequence,
+      `${costs}${consequence}`,
       "",
-      `Ask the user whether to go ahead. If they agree, call ${operation.tool} again with confirm: true.`,
+      `Ask the user whether to go ahead. If they agree, call ${via.again} with confirm: true.`,
     ].join("\n"),
   );
 }
@@ -39,17 +72,22 @@ function confirmationRequired(operation: McpOperation, args: ToolArgs): ToolResu
  * function bound to a different row of the generated table, which is what makes a new endpoint in
  * openapi.yaml a working tool with no code behind it.
  */
-export async function callOperation(ctx: ToolContext, operation: McpOperation, rawArgs: ToolArgs): Promise<ToolResult> {
+export async function callOperation(
+  ctx: ToolContext,
+  operation: McpOperation,
+  rawArgs: ToolArgs,
+  via: CallVia = viaTool(operation),
+): Promise<ToolResult> {
   const args = rawArgs ?? {};
 
   if (!hasKey(ctx)) return toolError(ctx.notSignedIn());
 
   if (keyKindOf(ctx) === "publishable" && !operation.publishable) {
-    return publishableKeyRefusal(operation.tool, operation.scope);
+    return publishableKeyRefusal(via.name, operation.scope);
   }
 
   if (operation.confirm && args.confirm !== true) {
-    return confirmationRequired(operation, args);
+    return confirmationRequired(operation, args, via);
   }
 
   let path = operation.path;
@@ -60,7 +98,7 @@ export async function callOperation(ctx: ToolContext, operation: McpOperation, r
     const value = args[param.name];
     if (value === undefined) {
       if (param.required && param.in === "path") {
-        return toolError(`${operation.tool} needs ${param.name}.`);
+        return toolError(`${via.name} needs ${param.name}.`);
       }
       continue;
     }
@@ -82,7 +120,7 @@ export async function callOperation(ctx: ToolContext, operation: McpOperation, r
   }
 
   if (path.includes("{")) {
-    return toolError(`${operation.tool} is missing a path argument: ${path}.`);
+    return toolError(`${via.name} is missing a path argument: ${path}.`);
   }
 
   const headers: Record<string, string> = {};
@@ -101,7 +139,7 @@ export async function callOperation(ctx: ToolContext, operation: McpOperation, r
   }
 
   try {
-    const response = await apiRequest<unknown>(forTool(ctx, operation.tool), {
+    const response = await apiRequest<unknown>(forTool(ctx, via.tool), {
       method: operation.method,
       path,
       query,
@@ -121,8 +159,8 @@ export async function callOperation(ctx: ToolContext, operation: McpOperation, r
     return text(lines.join("\n"));
   } catch (err) {
     return formatApiError(err, {
-      tool: operation.tool,
-      scope: operation.scope,
+      tool: via.name,
+      scope: [operation.scope, ...(operation.alsoScopes ?? [])].filter((s) => s && s !== "none").join(" and ") || operation.scope,
       entitlement: operation.entitlement,
     });
   }

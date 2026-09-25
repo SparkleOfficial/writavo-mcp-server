@@ -74,7 +74,12 @@ export function formatApiError(err: unknown, ctx: ErrorContext): ToolResult {
 
   // The specifics the catalog cannot know, because they belong to the operation rather than the code.
   if (err.code === "INSUFFICIENT_SCOPE" && ctx.scope && ctx.scope !== "none") {
-    lines.push("", `The missing scope is ${ctx.scope}. Add it to the key, or use a key that carries it.`);
+    lines.push(
+      "",
+      ctx.scope.includes(" and ")
+        ? `This needs the scopes ${ctx.scope}. Add them to the key, or use a key that carries them.`
+        : `The missing scope is ${ctx.scope}. Add it to the key, or use a key that carries it.`,
+    );
   }
   if (err.code === "NOT_ENTITLED" && ctx.entitlement && ctx.entitlement !== "none") {
     lines.push("", `The plan feature this needs is ${ctx.entitlement}. Upgrade at ${BILLING_URL}.`);
@@ -109,7 +114,7 @@ export function approvalNeeded(tool: string, err: WritavoApiError): ToolResult {
   const pending = err.code === "APPROVAL_PENDING";
   const lead = pending
     ? `Nothing has been done yet. ${tool} is still waiting for a person to approve it in the Writavo dashboard.`
-    : `Nothing has been done yet. ${tool} needs a person to approve it in the Writavo dashboard before it runs. The organisation requires approval for actions like this one when an AI assistant asks for them.`;
+    : `Nothing has been done yet. ${tool} needs a person to approve it in the Writavo dashboard before it runs. Writavo asks a person before an AI assistant does this kind of action.`;
   if (!approval) {
     return text(
       [

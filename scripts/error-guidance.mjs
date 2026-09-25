@@ -23,7 +23,7 @@ export const ERROR_GUIDANCE = {
   API_KEY_EXPIRED:
     "The key passed its `expires_at`. Create a replacement. If you did not expect an expiry, check whether the key was created with one.",
   INSUFFICIENT_SCOPE:
-    "Either the key lacks the scope, or its creator's permissions no longer cover it. Check `GET /keys` for the scopes actually granted, then check the creator still has the matching dashboard permission. This is the only 403 in the API, and it never means the object belongs to someone else.",
+    "Either the key lacks the scope, or its creator's permissions no longer cover it. Check `GET /ping` for the scopes the key carries now, then check the creator still has the matching dashboard permission. It never means the object belongs to someone else. For an AI agent, the message names the permission row (for example \"SEO and outreach\" or \"Team and organisation\") the person must set to Read or Read and write when they connect the assistant again; tell them that, and do not retry until they have.",
   NOT_ENTITLED:
     "Your plan does not include this capability. Upgrading is the only fix; topping up credits will not help. This is answered before the credit check, so it tells you nothing about your balance.",
   INSUFFICIENT_CREDITS:
@@ -41,7 +41,7 @@ export const ERROR_GUIDANCE = {
   IDEMPOTENCY_KEY_IN_FLIGHT:
     "The first request with this key is still running. Wait a moment and retry with the same key; you will get the original response replayed.",
   CONFLICT:
-    "The request clashes with the object's current state. Read `error.message` first: when it names the step to take (for example \"This article is live. Unpublish it first.\"), do that step, then retry. Otherwise the object changed mid request: re-read it and retry.",
+    "The request clashes with the object's current state. Read `error.message` first: when it names the step to take (for example \"This article is live. Unpublish it first.\" or \"Remove the current custom domain first.\"), do that step, then retry. When it says a scan is already running, wait a few minutes and read the result instead of starting another. Otherwise the object changed mid request: re-read it and retry.",
   PRECONDITION_FAILED:
     "Your `If-Match` did not match, so someone edited the object since you read it. Nothing was written. Re-read, merge your change on top, and retry with the new `ETag`.",
   VALIDATION_FAILED:
@@ -53,7 +53,7 @@ export const ERROR_GUIDANCE = {
   INTERNAL_ERROR:
     "Ours, not yours. Safe to retry, and safer with the same `Idempotency-Key`, which guarantees you do not create a second object if the first request actually succeeded. Quote the `request_id` if you contact support.",
   FORBIDDEN:
-    "Read the message: it names the reason and what to do instead. On `POST /auth/key/extend` the key is not one that may extend itself (only a live key from a device or AI-assistant sign-in can), its creator can no longer manage API keys, or AI agent access is off; signing in again gets a fresh key. On `POST /auth/device` it means `flow` was set to `oauth`, which only Writavo's hosted MCP server may do: leave `flow` out.",
+    "Read the message: it names the reason and what to do instead, and no scope or retry changes it. On the team and permission operations it means an AI agent tried to change the access of the person it acts for, or something to do with ownership, or a change the caller's own role does not allow: a person makes that change at https://app.writavo.com/team. On a setting only a person may change (the AI agent controls, the outreach policy) a person does it in the dashboard at the page the message names. On `POST /auth/key/extend` the key is not one that may extend itself (only a live key from a device or AI-assistant sign-in can), its creator can no longer manage API keys, or AI agent access is off; signing in again gets a fresh key. On `POST /auth/device` it means `flow` was set to `oauth`, which only Writavo's hosted MCP server may do: leave `flow` out.",
   AGENT_ACCESS_DISABLED:
     "An owner or admin turned AI agent access off for this organisation. Nothing you send will work until it is turned back on in Settings > AI agents; the key itself is fine and needs no new sign-in once it is. Keys made in the dashboard are not affected.",
   APPROVAL_REQUIRED:
@@ -63,7 +63,11 @@ export const ERROR_GUIDANCE = {
   APPROVAL_DENIED:
     "A person looked at this request and said no. Do not retry it, and do not rephrase it to get around the refusal; ask them what they would like instead.",
   APPROVAL_INVALID:
-    "The approval id you sent is expired, already used, for a different request, or unknown. Approvals are single use and bound to the exact request. Retry without `Writavo-Approval` to ask for a new one.",
+    "The approval id you sent is expired, already used, for a different request, unknown, or what the request would do has changed since it was approved (\"What this request would do has changed...\"). Approvals are single use and bound to the exact request and its effect. Retry without `Writavo-Approval` to ask for a new one, and tell the person what changed.",
+  PREREQUISITE_MISSING:
+    "Set up the thing the message names, with the operation it names (for example `PATCH /site/settings` for a primary domain, `POST /seo/competitors` for a competitor, `POST /delivery/proxy` for the reverse proxy), then retry. Nothing was done and nothing was charged. If the missing piece is one only a person can set up (a CMS or Bing connection), give them the link from `POST /delivery/cms` or `POST /seo/backlinks/bing`.",
+  FEATURE_UNAVAILABLE:
+    "Writavo has this capability switched off right now, and retrying will not help. When the message says \"Spending is paused\", the organisation's plan has no daily spend cap configured, so nothing that spends credits or money can run: report it to the person, who contacts https://writavo.com/support. Otherwise use the free alternative the message names: for backlinks, the Search Console CSV import (`POST /seo/backlinks/import`) or the Bing Webmaster Tools feed (`POST /seo/backlinks/bing`).",
 };
 
 /**
@@ -89,5 +93,8 @@ export const ERROR_LINKS = {
   RATE_LIMIT_EXCEEDED: [{ label: "The rate limit classes", url: `${DOCS}/rate-limits` }],
   VALIDATION_FAILED: [{ label: "The content lifecycle", url: `${DOCS}/content-lifecycle` }],
   AGENT_ACCESS_DISABLED: [{ label: "AI agent settings", url: `${DASHBOARD}/settings/agents` }],
+  FORBIDDEN: [{ label: "The team and roles", url: `${DASHBOARD}/team` }],
+  PREREQUISITE_MISSING: [{ label: "Settings and administration", url: `${DOCS}/administration` }],
+  FEATURE_UNAVAILABLE: [{ label: "Free backlink sources", url: `${DOCS}/administration#seo` }],
   APPROVAL_PENDING: [{ label: "AI agent settings", url: `${DASHBOARD}/settings/agents` }],
 };

@@ -4,7 +4,7 @@
  *   import { createWritavoMcpServer } from "@writavo/mcp-server/core";
  *   const server = createWritavoMcpServer({
  *     apiKey: () => props.apiKey,
- *     userAgent: "writavo-mcp-worker/0.3.0",
+ *     userAgent: "writavo-mcp-worker/0.4.0",
  *     host: "remote",
  *   });
  *
@@ -20,4 +20,4 @@ export { redact } from "./redact.js";
 export { friendlyClientName, FALLBACK_CLIENT_NAME } from "./client-name.js";
 export { VERSION } from "./version.js";
 export { DEFAULT_API_BASE, REMOTE_MCP_URL } from "./constants.js";
-export { OPERATIONS, REFUSALS } from "../generated/operations.js";
+export { OPERATIONS, REFUSALS, ACTIONS, ACTION_AREAS } from "../generated/operations.js";

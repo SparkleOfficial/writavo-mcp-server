@@ -1,6 +1,6 @@
 {
   "name": "@writavo/mcp-server",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "mcpName": "com.writavo/cms",
   "description": "MCP server for the Writavo Content API. Hosted at https://mcp.writavo.com/mcp (OAuth, no install) or run locally over stdio: sign in from the browser, import an existing blog, and draft, edit, organise, schedule and publish a Site's content from any AI assistant, with tools generated from the published OpenAPI specification.",
   "keywords": [

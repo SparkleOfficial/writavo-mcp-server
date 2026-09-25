@@ -128,7 +128,7 @@ description all work, so you can read the whole API reference before signing up.
 
 ## What it can do
 
-Thirty six tools are compiled from Writavo's published OpenAPI specification, plus four written by
+Thirty six tools are compiled from Writavo's published OpenAPI specification, plus seven written by
 hand on both servers and three more (`login`, `login_status`, `logout`) on the local one:
 
 - **Articles.** List, read, create, update, delete, publish, unpublish, schedule, cancel a schedule.
@@ -145,6 +145,18 @@ hand on both servers and three more (`login`, `login_status`, `logout`) on the l
   happens on Stripe's page in your browser, never in the chat. The CMS (storing, publishing and
   importing content) is pay-as-you-go and needs no plan; a plan buys the AI article pipeline.
 - **Import.** `import_content` brings an existing blog in (below).
+- **Everything else, as actions.** Site settings and the knowledge profile, the organisation,
+  article formats and AI prompts, the pipeline's configuration and content plan, delivery and
+  domains, SEO, outreach, the team and roles, billing, and insights and logs are not separate
+  tools. `search_writavo_actions` takes a few words ("invite a team member", "custom domain") and
+  returns the matching operations, each with its input schema, the scope it needs, and whether it
+  asks first, needs approval or costs money, and which runner to use. `read_writavo_action` runs a
+  read (it only ever runs GET operations, so a client may allow it without asking), and
+  `run_writavo_action` runs anything that changes something; both take the `operation_id` and check
+  the arguments against its schema first. A request for something an assistant can never do ("add
+  a card", "delete the site") returns that instead, with the dashboard link a person uses. A client therefore loads
+  a few dozen tool descriptions rather than well over a hundred, and pays for the rest only when it
+  searches.
 
 Every tool carries MCP annotations: `readOnlyHint` on reads, `destructiveHint` on deletes and
 unpublishing, `idempotentHint` on reads, updates and deletes, and `openWorldHint: false`, because
@@ -204,19 +216,28 @@ nothing in your content except the URLs of the images it copied.
 wait for `confirm: true`, which the assistant can only set after you have agreed. Publishing puts
 content on your live site, deleting is permanent, and a pipeline run spends real credits.
 
-Two things are not reachable from an assistant at all, whatever scopes the key carries:
+Actions follow the same rule: `run_writavo_action` describes anything that spends money, changes
+the live site, removes something or changes the team, and waits for `confirm: true`.
+
+Some things are not reachable from an assistant at all, whatever scopes the key carries:
 
 - **API keys.** A server that can mint a secret key is a server whose compromise mints secret keys,
   and the key it would use to do so is in a config file on the same machine.
 - **Webhooks.** An assistant that can repoint delivery URLs can quietly redirect your event stream.
+- **The AI agent controls, approving its own requests, payment details, plan changes, ownership,
+  deleting a Site or the organisation, the outreach policy and mailbox, and CMS or Bing
+  credentials.** `get_api_docs` (section `tools`) gives the dashboard link a person uses for each.
 
-Both stay in the dashboard.
+All of these stay in the dashboard.
 
 ### Approvals, and turning agents off
 
-When an assistant signed in through the browser (either server) deletes something, unpublishes an
-article or starts a pipeline run, your organisation can require a person to approve it first. This
-is on by default. The tool then does nothing and returns a link to
+When an assistant signed in through the browser (either server) deletes something or unpublishes an
+article, your organisation can require a person to approve it first. This is on by default. Actions
+that spend money or change the team (pipeline runs and turning the pipeline up, paid SEO scans,
+custom domains, publishing the hosted site, CMS connections and pushes, auto-refill, raising a
+credit cap, keeping the plan, invites, role and permission changes, removing a member) always need
+that approval when an assistant asks, whatever the switch says. The tool then does nothing and returns a link to
 `https://app.writavo.com/approvals/...`; once you approve there, the assistant repeats the call
 with the approval id and it goes through, once, for exactly that request. An owner or admin can
 switch approvals off, or switch AI agent access off for the whole organisation, at
@@ -296,9 +317,12 @@ npm test            run the offline smoke checks (sign-in, import and more, agai
 npm run gen:check   fails if the committed tool surface is stale
 ```
 
-Adding an endpoint to `openapi.yaml` and regenerating is the whole of adding a tool; an operation
-marked `x-writavo-approval` gains an `approval_id` argument by itself. Editing anything under
-`src/generated/` fails CI. The seven hand-written tools live in `src/tools/` and are listed in
+Adding an endpoint to `openapi.yaml` and regenerating is the whole of adding it; an operation
+marked `x-writavo-approval` gains an `approval_id` argument by itself. The thirty six MCP-2
+operations are individual tools; every other operation lands in the `ACTIONS` catalog in
+`src/generated/operations.ts` (by its tag, or `x-mcp-surface: tool | action` on the operation or
+the tag), which `search_writavo_actions`, `read_writavo_action` and `run_writavo_action` serve. Editing anything under
+`src/generated/` fails CI. The ten hand-written tools live in `src/tools/` and are listed in
 `LOCAL_TOOLS` in the monorepo's `scripts/mcp-surface.mjs`.
 
 ## Licence

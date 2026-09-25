@@ -67,8 +67,8 @@ export const ERROR_CATALOG: ErrorEntry[] = [
   {
     "code": "INSUFFICIENT_SCOPE",
     "http": "403",
-    "meaning": "The key is valid but lacks the scope this operation needs.",
-    "action": "Either the key lacks the scope, or its creator's permissions no longer cover it. Check `GET /keys` for the scopes actually granted, then check the creator still has the matching dashboard permission. This is the only 403 in the API, and it never means the object belongs to someone else.",
+    "meaning": "The key is valid but lacks the scope this operation needs. For an AI agent, the message names the permission row the person must set to Read or Read and write when they reconnect.",
+    "action": "Either the key lacks the scope, or its creator's permissions no longer cover it. Check `GET /ping` for the scopes the key carries now, then check the creator still has the matching dashboard permission. It never means the object belongs to someone else. For an AI agent, the message names the permission row (for example \"SEO and outreach\" or \"Team and organisation\") the person must set to Read or Read and write when they connect the assistant again; tell them that, and do not retry until they have.",
     "links": [
       {
         "label": "Your API keys and their scopes",
@@ -83,9 +83,14 @@ export const ERROR_CATALOG: ErrorEntry[] = [
   {
     "code": "FORBIDDEN",
     "http": "403",
-    "meaning": "Refused for a reason no scope would change: a key that may not extend itself, or an OAuth sign-in not started by Writavo's MCP server. The message says which.",
-    "action": "Read the message: it names the reason and what to do instead. On `POST /auth/key/extend` the key is not one that may extend itself (only a live key from a device or AI-assistant sign-in can), its creator can no longer manage API keys, or AI agent access is off; signing in again gets a fresh key. On `POST /auth/device` it means `flow` was set to `oauth`, which only Writavo's hosted MCP server may do: leave `flow` out.",
-    "links": []
+    "meaning": "Refused for a reason no scope would change: a key that may not extend itself, an OAuth sign-in not started by Writavo's MCP server, an AI agent changing the access of the person it acts for, anything to do with ownership, or a setting only a person may change. The message says which and what to do instead.",
+    "action": "Read the message: it names the reason and what to do instead, and no scope or retry changes it. On the team and permission operations it means an AI agent tried to change the access of the person it acts for, or something to do with ownership, or a change the caller's own role does not allow: a person makes that change at https://app.writavo.com/team. On a setting only a person may change (the AI agent controls, the outreach policy) a person does it in the dashboard at the page the message names. On `POST /auth/key/extend` the key is not one that may extend itself (only a live key from a device or AI-assistant sign-in can), its creator can no longer manage API keys, or AI agent access is off; signing in again gets a fresh key. On `POST /auth/device` it means `flow` was set to `oauth`, which only Writavo's hosted MCP server may do: leave `flow` out.",
+    "links": [
+      {
+        "label": "The team and roles",
+        "url": "https://app.writavo.com/team"
+      }
+    ]
   },
   {
     "code": "AGENT_ACCESS_DISABLED",
@@ -128,8 +133,8 @@ export const ERROR_CATALOG: ErrorEntry[] = [
   {
     "code": "APPROVAL_INVALID",
     "http": "409",
-    "meaning": "The approval you sent cannot be used for this request: expired, already used, for a different request, or unknown.",
-    "action": "The approval id you sent is expired, already used, for a different request, or unknown. Approvals are single use and bound to the exact request. Retry without `Writavo-Approval` to ask for a new one.",
+    "meaning": "The approval you sent cannot be used for this request: expired, already used, for a different request, unknown, or what the request would do has changed since it was approved.",
+    "action": "The approval id you sent is expired, already used, for a different request, unknown, or what the request would do has changed since it was approved (\"What this request would do has changed...\"). Approvals are single use and bound to the exact request and its effect. Retry without `Writavo-Approval` to ask for a new one, and tell the person what changed.",
     "links": []
   },
   {
@@ -211,9 +216,33 @@ export const ERROR_CATALOG: ErrorEntry[] = [
   {
     "code": "CONFLICT",
     "http": "409",
-    "meaning": "The object changed under you mid request. Re-read and retry.",
-    "action": "The request clashes with the object's current state. Read `error.message` first: when it names the step to take (for example \"This article is live. Unpublish it first.\"), do that step, then retry. Otherwise the object changed mid request: re-read it and retry.",
+    "meaning": "The request clashes with the object's current state, or the object changed under you mid request. The message names the step to take.",
+    "action": "The request clashes with the object's current state. Read `error.message` first: when it names the step to take (for example \"This article is live. Unpublish it first.\" or \"Remove the current custom domain first.\"), do that step, then retry. When it says a scan is already running, wait a few minutes and read the result instead of starting another. Otherwise the object changed mid request: re-read it and retry.",
     "links": []
+  },
+  {
+    "code": "PREREQUISITE_MISSING",
+    "http": "409",
+    "meaning": "Something this operation needs is not set up yet. The message names it and the operation that sets it up. Nothing was done and nothing was charged.",
+    "action": "Set up the thing the message names, with the operation it names (for example `PATCH /site/settings` for a primary domain, `POST /seo/competitors` for a competitor, `POST /delivery/proxy` for the reverse proxy), then retry. Nothing was done and nothing was charged. If the missing piece is one only a person can set up (a CMS or Bing connection), give them the link from `POST /delivery/cms` or `POST /seo/backlinks/bing`.",
+    "links": [
+      {
+        "label": "Settings and administration",
+        "url": "https://writavo.com/docs/administration"
+      }
+    ]
+  },
+  {
+    "code": "FEATURE_UNAVAILABLE",
+    "http": "409",
+    "meaning": "Writavo has this capability switched off right now: paid backlink data platform wide, or spending while the plan has no daily spend cap configured. Nothing the caller sends changes it.",
+    "action": "Writavo has this capability switched off right now, and retrying will not help. When the message says \"Spending is paused\", the organisation's plan has no daily spend cap configured, so nothing that spends credits or money can run: report it to the person, who contacts https://writavo.com/support. Otherwise use the free alternative the message names: for backlinks, the Search Console CSV import (`POST /seo/backlinks/import`) or the Bing Webmaster Tools feed (`POST /seo/backlinks/bing`).",
+    "links": [
+      {
+        "label": "Free backlink sources",
+        "url": "https://writavo.com/docs/administration#seo"
+      }
+    ]
   },
   {
     "code": "PRECONDITION_FAILED",

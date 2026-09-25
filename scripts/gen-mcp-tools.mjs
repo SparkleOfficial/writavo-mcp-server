@@ -13,7 +13,9 @@
 //   node scripts/gen-mcp-tools.mjs --check   exit 1 if the committed output is stale
 //
 // Outputs, all under packages/mcp/src/generated/:
-//   operations.ts   one entry per operation that becomes a tool, plus the documented refusals
+//   operations.ts   one entry per operation that becomes a tool, the ACTIONS catalog that
+//                   search_writavo_actions / run_writavo_action serve (MCP-3 decision 5), and the
+//                   documented refusals
 //   errors.ts       the error catalog joined to scripts/error-guidance.mjs
 //   reference.ts    the text `get_api_docs` and the MCP resources serve
 //
@@ -24,7 +26,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, relative } from "node:path";
 import { parse } from "yaml";
-import { LOCAL_TOOLS, buildMcpSurface } from "./mcp-surface.mjs";
+import { ACTION_TAGS, LOCAL_TOOLS, NEVER_ACTIONS, areaOf, buildMcpSurface } from "./mcp-surface.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -86,8 +88,24 @@ for (const [path, item] of Object.entries(spec.paths ?? {})) {
   }
 }
 const APPROVAL_ACTION = /^[a-z]+\.[a-z_]+$/;
-const operations = surface.operations.map((operation) => {
-  const raw = specOperation.get(operation.operationId)?.op?.["x-writavo-approval"];
+const APPROVAL_KINDS = ["money", "team", "live", "destructive"];
+
+// Whether the specification states "always" per operation (`x-writavo-approval-always: true`,
+// MCP-3). When it does anywhere, its absence on a gated operation MEANS switchable; a spec that
+// predates the extension falls back to the derivation in finish().
+const SPEC_STATES_ALWAYS = [...specOperation.values()].some(({ op }) => op?.["x-writavo-approval-always"] !== undefined);
+
+/**
+ * Tool or action, the same row shape: the approval, whether the organisation's approvals switch can
+ * waive it, when it is asked, and the annotations. Owner decision 6 (MCP-3): money and team
+ * actions ALWAYS need a person's approval when an AI agent asks, whatever the switch says; the
+ * switch relaxes only the rest (deleting, unpublishing, changes to the live site). The
+ * specification says which is which with `x-writavo-approval-always`; without it, "always" is
+ * derived as everything except an individual content tool that removes something.
+ */
+function finish(operation) {
+  const op = specOperation.get(operation.operationId)?.op ?? {};
+  const raw = op["x-writavo-approval"];
   let approval = null;
   if (raw !== undefined && raw !== null) {
     if (typeof raw === "string" && APPROVAL_ACTION.test(raw)) approval = raw;
@@ -98,7 +116,41 @@ const operations = surface.operations.map((operation) => {
   const destructive =
     operation.method === "DELETE" ||
     /(^|[A-Z_])[uU]npublish/.test(operation.operationId) ||
-    (approval !== null && /\.(delete|unpublish)$/.test(approval));
+    (approval !== null && /\.(delete|unpublish|remove|disconnect)$/.test(approval));
+
+  let approvalMode = null;
+  let approvalKind = null;
+  let approvalWhen = null;
+  const always = op["x-writavo-approval-always"];
+  const kind = op["x-writavo-approval-kind"];
+  const when = op["x-writavo-approval-when"];
+  if (approval) {
+    if (always !== undefined && typeof always !== "boolean") {
+      problems.push(`${operation.method} ${operation.path}: x-writavo-approval-always must be true or false, got ${JSON.stringify(always)}`);
+    }
+    approvalMode =
+      always === true
+        ? "always"
+        : always === false || SPEC_STATES_ALWAYS
+          ? "switchable"
+          : operation.surface === "tool" && /\.(delete|unpublish)$/.test(approval)
+            ? "switchable"
+            : "always";
+    if (kind !== undefined) {
+      if (APPROVAL_KINDS.includes(kind)) approvalKind = kind;
+      else problems.push(`${operation.method} ${operation.path}: x-writavo-approval-kind must be one of ${APPROVAL_KINDS.join(", ")}, got ${JSON.stringify(kind)}`);
+    }
+    if (when !== undefined) {
+      const sentence = typeof when === "string" ? when.replace(/\s+/g, " ").trim() : "";
+      if (sentence) approvalWhen = sentence;
+      else problems.push(`${operation.method} ${operation.path}: x-writavo-approval-when must be a sentence`);
+    }
+  } else {
+    for (const [name, value] of [["x-writavo-approval-always", always], ["x-writavo-approval-kind", kind], ["x-writavo-approval-when", when]]) {
+      if (value !== undefined) problems.push(`${operation.method} ${operation.path}: ${name} without x-writavo-approval`);
+    }
+  }
+
   const annotations = {
     title: operation.summary,
     readOnlyHint: operation.method === "GET",
@@ -107,11 +159,25 @@ const operations = surface.operations.map((operation) => {
     // Every tool reaches one closed system, the customer's own Site, through one API.
     openWorldHint: false,
   };
+  const retry =
+    operation.surface === "tool"
+      ? "call again with the same arguments plus approval_id"
+      : "call run_writavo_action again with the same operation_id and arguments plus approval_id";
+  const whenLine = approvalWhen ? ` ${approvalWhen.replace(/\.$/, "")}.` : "";
   const description = approval
-    ? `${operation.description} APPROVAL: when the organisation requires it, the first call returns a link for a person to approve instead of acting; after they approve, call again with the same arguments plus approval_id.`
+    ? approvalMode === "always"
+      ? `${operation.description} APPROVAL: when an AI assistant calls this it always needs a person's approval first: the first call returns a link for them instead of acting; after they approve, ${retry}.${whenLine}`
+      : `${operation.description} APPROVAL: when the organisation requires it, the first call returns a link for a person to approve instead of acting; after they approve, ${retry}.${whenLine}`
     : operation.description;
-  return { ...operation, description, approval, annotations };
-});
+  return { ...operation, description, approval, approvalMode, approvalKind, approvalWhen, annotations };
+}
+
+const operations = surface.operations.map(finish);
+const actions = surface.actions.map(finish);
+
+// The areas search_writavo_actions filters by: every MCP-3 tag, whether or not the specification
+// has routes under it yet, then any other area an action lives in (the MCP-3 pipeline routes).
+const actionAreas = [...new Set([...ACTION_TAGS.map(areaOf), ...actions.map((a) => a.area)])];
 
 if (problems.length > 0) {
   console.error("openapi.yaml cannot be turned into an MCP tool surface:");
@@ -164,21 +230,44 @@ export interface McpAnnotations {
   openWorldHint: boolean;
 }
 
+/**
+ * Whether an approval can be waived by the organisation's approvals switch. "always": an AI
+ * agent's key needs a person's approval every time (MCP-3 decision 6: money and team actions,
+ * \`x-writavo-approval-always\`). "switchable": only while the organisation requires approvals
+ * (deleting, unpublishing, changes to the live site).
+ */
+export type ApprovalMode = "always" | "switchable";
+
 export interface McpOperation {
-  /** The MCP tool name. */
+  /** The MCP tool name. For an action, the snake-case name it is also known by. */
   tool: string;
   operationId: string;
   method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   /** The path template, relative to the base URL. \`{id}\` segments are filled from params. */
   path: string;
   tag: string;
+  /**
+   * "tool": registered as its own MCP tool. "action": in the ACTIONS catalog, reached through
+   * search_writavo_actions and run_writavo_action (MCP-3 decision 5).
+   */
+  surface: "tool" | "action";
+  /** The catalog area, the tag in snake case: "site_settings", "seo", "team". */
+  area: string;
   summary: string;
+  /** The first paragraph of the specification's description, at most 240 characters. */
+  brief: string;
   /** What the model reads when it chooses between tools. */
   description: string;
   scope: string;
+  /** Further scopes the key must also carry (\`x-also-scopes\`). */
+  alsoScopes: string[];
   entitlement: string;
   publishable: boolean;
   spendsCredits: boolean;
+  /** Costs the organisation (or Writavo) money without spending credits (\`x-spends-money\`). */
+  spendsMoney: boolean;
+  /** The one sentence a person agrees to (\`x-agent-consequence\`), or null. */
+  consequence: string | null;
   makesPublic: boolean;
   readOnly: boolean;
   confirm: boolean;
@@ -192,6 +281,12 @@ export interface McpOperation {
    * agent's call with 428 and a link for a person, and the tool takes an optional approval_id.
    */
   approval: string | null;
+  /** Null exactly when approval is null. */
+  approvalMode: ApprovalMode | null;
+  /** What kind of consequence the approval guards (\`x-writavo-approval-kind\`), or null. */
+  approvalKind: "money" | "team" | "live" | "destructive" | null;
+  /** When a conditional approval is asked (\`x-writavo-approval-when\`), or null for every call. */
+  approvalWhen: string | null;
   annotations: McpAnnotations;
   params: McpParam[];
 }
@@ -211,6 +306,32 @@ export const API_VERSION = ${json(String(spec.info?.version ?? ""))};
 export const OPERATIONS: McpOperation[] = ${json(operations)};
 
 export const REFUSALS: McpRefusal[] = ${json(refusals)};
+
+/**
+ * THE ACTIONS CATALOG (MCP-3 decision 5). Every operation an assistant may reach that is not an
+ * individual tool: settings, delivery, SEO, outreach, the team, billing, insights, formats and
+ * prompts, and the pipeline's configuration and content plan. search_writavo_actions ranks these;
+ * run_writavo_action runs exactly these and nothing else.
+ */
+export const ACTIONS: McpOperation[] = ${json(actions)};
+
+/** The areas search_writavo_actions accepts. */
+export const ACTION_AREAS = ${json(actionAreas)} as const;
+
+/** Something an AI agent can never do, and the next step a person takes instead. */
+export interface NeverAction {
+  what: string;
+  why: string;
+  next_step: string;
+  /** What search_writavo_actions matches a request against. */
+  keywords: string;
+}
+
+/**
+ * The NEVER list (MCP-3 contract §9), searchable: search_writavo_actions returns an entry as a
+ * result with no operation_id, so "add a card" answers with the dashboard link, not a near miss.
+ */
+export const NEVER_ACTIONS: NeverAction[] = ${json(NEVER_ACTIONS)};
 `,
 
   "errors.ts": `${BANNER("scripts/error-guidance.mjs")}
@@ -273,10 +394,10 @@ if (CHECK) {
     console.error(`stale, run \`pnpm mcp:gen\`: ${stale.join(", ")}`);
     process.exit(1);
   }
-  console.log(`MCP tool surface is current: ${operations.length + LOCAL_TOOLS.length} tools.`);
+  console.log(`MCP tool surface is current: ${operations.length + LOCAL_TOOLS.length} tools, ${actions.length} actions.`);
 } else {
   console.log(
-    `${operations.length} generated tools + ${LOCAL_TOOLS.length} local, ` +
+    `${operations.length} generated tools + ${LOCAL_TOOLS.length} local, ${actions.length} actions in the catalog, ` +
       `${refusals.length} documented refusals, ${errorCatalog.length} error codes, ` +
       `${sections.length} reference sections -> ${relative(ROOT, OUT_DIR).replace(/\\/g, "/")}/`,
   );

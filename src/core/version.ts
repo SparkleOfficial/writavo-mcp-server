@@ -3,4 +3,4 @@
  * inside a Cloudflare Worker too, where there is no package.json on a filesystem to read. The smoke
  * test asserts this equals package.json, so the two cannot drift.
  */
-export const VERSION = "0.3.0";
+export const VERSION = "0.4.0";

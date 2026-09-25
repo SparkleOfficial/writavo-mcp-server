@@ -1,7 +1,7 @@
 {
   "name": "writavo",
   "displayName": "Writavo",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Manage a Writavo Site's content from Claude Code: the hosted Writavo MCP server (sign in once in the browser, no key to paste) plus a skill that walks the draft, edit, schedule and publish loop.",
   "author": { "name": "Writavo", "url": "https://writavo.com" },
   "homepage": "https://writavo.com/docs/mcp",

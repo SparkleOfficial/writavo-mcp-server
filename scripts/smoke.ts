@@ -25,6 +25,9 @@
  *      Writavo-Mcp-Tool header, logout revoking the key, the key auto-extension, the generator's
  *      handling of x-writavo-approval and of the host-owned /auth/key/* routes, and the core's
  *      import graph staying free of the filesystem and the environment
+ *  16  MCP-3: the actions catalog (a fixture specification through the real generator), the
+ *      search ranking, run_writavo_action's schema validation, unknown-operation refusal, the
+ *      confirmation step and the approval passthrough, both hosts, and the new instructions
  *
  * The live round trip is scripts/integration.ts, which needs a real key and a deployed API.
  *
@@ -219,6 +222,12 @@ async function clientProbe(): Promise<void> {
     );
     const serverInfo = initialized.result?.serverInfo as { name?: string; version?: string } | undefined;
     check("it identifies itself as writavo with a version", serverInfo?.name === "writavo" && Boolean(serverInfo?.version));
+    const stdioInstructions = String((initialized.result as { instructions?: string } | undefined)?.instructions ?? "");
+    check(
+      `the stdio instructions (${stdioInstructions.length} characters) stay under 6000, point at the actions and carry no dashes`,
+      stdioInstructions.length > 0 && stdioInstructions.length < 6000 && stdioInstructions.includes("search_writavo_actions") &&
+        stdioInstructions.includes("run_writavo_action") && stdioInstructions.includes("read_writavo_action") && !/[\u2014\u2013]/.test(stdioInstructions),
+    );
 
     send({ jsonrpc: "2.0", method: "notifications/initialized" });
 
@@ -1502,7 +1511,13 @@ async function main(): Promise<void> {
     const { parse, stringify } = await import("yaml");
     const spec = parse(readFileSync(join(PACKAGE_ROOT, "openapi.yaml"), "utf8")) as { paths: Record<string, Record<string, Record<string, unknown>>> };
     // Start from no gates at all, so the count below is exactly what this test adds.
-    for (const item of Object.values(spec.paths)) for (const op of Object.values(item)) if (op && typeof op === "object") delete op["x-writavo-approval"];
+    // (Its companions go too: an x-writavo-approval-always with no gate is refused by the generator.)
+    for (const item of Object.values(spec.paths)) {
+      for (const op of Object.values(item)) {
+        if (!op || typeof op !== "object") continue;
+        for (const key of Object.keys(op)) if (key.startsWith("x-writavo-approval")) delete op[key];
+      }
+    }
     spec.paths["/articles/{id}"]!.delete!["x-writavo-approval"] = "article.delete";
     spec.paths["/articles/{id}/unpublish"]!.post!["x-writavo-approval"] = "article.unpublish";
     spec.paths["/auth/key/extend"] = {
@@ -1555,6 +1570,536 @@ async function main(): Promise<void> {
     forbidden.join("; "),
   );
   globalThis.fetch = realFetch;
+
+  // -- 16. MCP-3: search and run ----------------------------------------------
+  console.log("\n[ 16. MCP-3: the actions catalog, search_writavo_actions and run_writavo_action ]");
+  const {
+    SEARCH_WRITAVO_ACTIONS,
+    RUN_WRITAVO_ACTION,
+    READ_WRITAVO_ACTION,
+    compactInputSchema,
+    handleReadAction,
+    handleRunAction,
+    handleSearchActions,
+    searchActions,
+    searchCatalog,
+  } = await import("../src/tools/actions.js");
+  const { ACTIONS: REAL_ACTIONS, ACTION_AREAS: REAL_AREAS } = await import("../src/generated/operations.js");
+  const surfaceModule = (await import(join(PACKAGE_ROOT, "scripts", "mcp-surface.mjs"))) as {
+    LOCAL_TOOLS: { name: string }[];
+    NEVER_ACTIONS: { what: string; why: string; next_step: string }[];
+  };
+
+  check(
+    "search_writavo_actions, read_writavo_action and run_writavo_action are core tools on both hosts, and listed for the docs page",
+    ["search_writavo_actions", "read_writavo_action", "run_writavo_action"].every(
+      (n) => CORE_LOCAL_TOOL_NAMES.includes(n as never) && surfaceModule.LOCAL_TOOLS.some((t) => t.name === n),
+    ),
+  );
+  check(
+    "no catalog action is also an individual tool",
+    REAL_ACTIONS.every((a) => !OPERATIONS.some((o) => o.operationId === a.operationId)) && REAL_ACTIONS.every((a) => a.surface === "action"),
+  );
+  check(
+    `the real catalog (${REAL_ACTIONS.length} actions) is coherent: every row has an area in ACTION_AREAS and a schema that builds`,
+    REAL_ACTIONS.every((a) => (REAL_AREAS as readonly string[]).includes(a.area) && compactInputSchema(a).type === "object"),
+  );
+  check(
+    "every gated action has a consequence and an approval mode; every paid action asks first",
+    REAL_ACTIONS.filter((a) => a.approval).every((a) => a.consequence && a.approvalMode) &&
+      REAL_ACTIONS.filter((a) => a.spendsCredits || a.spendsMoney).every((a) => a.confirm),
+  );
+  check(
+    "the login default is the 30 agent scopes, sorted, never keys:* or webhooks:*",
+    DEFAULT_SCOPES.length === 30 &&
+      [...DEFAULT_SCOPES].sort().join() === DEFAULT_SCOPES.join() &&
+      !DEFAULT_SCOPES.some((s: string) => /^(keys|webhooks):/.test(s)) &&
+      ["site:read", "team:write", "billing:write", "org:write", "logs:read"].every((s) => (DEFAULT_SCOPES as readonly string[]).includes(s)),
+    DEFAULT_SCOPES.join(","),
+  );
+  check(
+    "the NEVER list names a next step for each item",
+    surfaceModule.NEVER_ACTIONS.length >= 10 && surfaceModule.NEVER_ACTIONS.every((n) => n.next_step.length > 20),
+  );
+  const toolsRef = handleGetApiDocs({ section: "tools" });
+  check(
+    "get_api_docs section tools explains actions and the never list with links",
+    bodyOf(toolsRef).includes("search_writavo_actions") && bodyOf(toolsRef).includes("Never through an AI agent") &&
+      bodyOf(toolsRef).includes("https://app.writavo.com/settings/agents"),
+  );
+
+  // The generator, on a fixture that adds MCP-3 routes to the vendored specification: a Team route
+  // gated always, a paid custom domain, a Pipeline route that is NOT in the MCP-2 tool list (so it
+  // must become an action with no marker), a route needing two scopes, and an explicit override.
+  const fixtureDir = mkdtempSync(join(PACKAGE_ROOT, ".smoke-actions-"));
+  type ActionRow = { operationId: string; tool: string; surface: string; area: string; approval: string | null; approvalMode: string | null; confirm: boolean; confirmReason: string | null; description: string; consequence: string | null; spendsMoney: boolean; alsoScopes: string[]; params: { name: string }[] };
+  let FIXTURE_ACTIONS: typeof REAL_ACTIONS = [];
+  try {
+    const { parse, stringify } = await import("yaml");
+    const base = () => parse(readFileSync(join(PACKAGE_ROOT, "openapi.yaml"), "utf8")) as {
+      tags: { name: string; "x-mcp-surface"?: string }[];
+      paths: Record<string, Record<string, unknown>>;
+    };
+    const idem = { name: "Idempotency-Key", in: "header", required: true, schema: { type: "string" } };
+    const json = (properties: Record<string, unknown>, required: string[] = []) => ({
+      required: true,
+      content: { "application/json": { schema: { type: "object", additionalProperties: false, required, properties } } },
+    });
+    const op = (operationId: string, tag: string, summary: string, description: string, extra: Record<string, unknown> = {}) => ({
+      operationId,
+      tags: [tag],
+      summary,
+      description,
+      "x-publishable": false,
+      responses: { "200": { description: "ok" } },
+      ...extra,
+    });
+    const withFixture = (mutate?: (spec: ReturnType<typeof base>) => void) => {
+      const spec = base();
+      for (const [name, surface] of [["Team", "action"], ["Billing", "action"], ["Site settings", undefined], ["Delivery", "action"], ["SEO", "action"]] as const) {
+        const tag = spec.tags.find((t) => t.name === name);
+        if (!tag) spec.tags.push({ name, ...(surface ? { "x-mcp-surface": surface } : {}) });
+      }
+      spec.paths["/site/settings"] = {
+        get: op("getSiteSettings", "Site settings", "Read the Site settings", "The Site's name, primary domain, locale and niche.", { "x-scope": "site:read" }),
+        patch: op("updateSiteSettings", "Site settings", "Update the Site settings", "Rename the Site, or change its primary domain, locale or niche.", {
+          "x-scope": "site:write",
+          requestBody: json({
+            name: { type: "string", description: "The Site's name." },
+            primary_domain: { type: ["string", "null"], description: "The customer's domain." },
+            locale_language: { type: "string", description: "Two letters." },
+          }),
+        }),
+      };
+      spec.paths["/team/invites"] = {
+        post: op("inviteTeamMember", "Team", "Invite a team member", "Invite someone to the organisation by email with a role. Returns an accept link to hand over.", {
+          "x-scope": "team:write",
+          "x-writavo-approval": "member.invite",
+          "x-writavo-approval-always": true,
+          "x-writavo-approval-kind": "team",
+          "x-agent-consequence": "Gives this person access to every Site in the organisation once they accept.",
+          parameters: [idem],
+          requestBody: json({ email: { type: "string", format: "email" }, role: { type: "string", enum: ["admin", "editor", "viewer"] } }, ["email", "role"]),
+        }),
+      };
+      spec.paths["/team/members/{user_id}"] = {
+        delete: op("removeTeamMember", "Team", "Remove a team member", "Remove a member from the organisation.", {
+          "x-scope": "team:write",
+          "x-writavo-approval": "member.remove",
+          "x-writavo-approval-always": true,
+          "x-agent-consequence": "The member loses access to every Site in the organisation at once.",
+          parameters: [{ name: "user_id", in: "path", required: true, schema: { type: "string", format: "uuid" } }],
+        }),
+      };
+      spec.paths["/delivery/custom-domain"] = {
+        post: op("connectCustomDomain", "Delivery", "Connect a custom domain", "Serve the blog on a hostname the customer owns, with SSL.", {
+          "x-scope": "delivery:write",
+          "x-spends-money": true,
+          "x-writavo-approval": "domain.connect",
+          "x-writavo-approval-always": true,
+          "x-agent-consequence": "Costs 5 US dollars a month from the day the domain verifies.",
+          parameters: [idem],
+          requestBody: json({ hostname: { type: "string", description: "For example blog.example.com." } }, ["hostname"]),
+        }),
+      };
+      spec.paths["/billing"] = {
+        get: op("getBillingSummary", "Billing", "Read the billing summary", "The plan, the credit balance, allowances and the overage estimate.", { "x-scope": "billing:read" }),
+      };
+      spec.paths["/pipeline/config"] = {
+        patch: op("updatePipelineConfig", "Pipeline", "Update the pipeline configuration", "Turn the AI pipeline on or off and change its cadence and batch size.", {
+          "x-scope": "pipeline:config",
+          "x-spends-credits": true,
+          "x-writavo-approval": "pipeline.configure",
+          "x-writavo-approval-always": true,
+          "x-writavo-approval-when": "Asked only when the change makes the pipeline do more.",
+          "x-agent-consequence": "Turning the pipeline on or up spends credits on every run it starts.",
+          requestBody: json({ enabled: { type: "boolean" }, batch_size: { type: "integer" } }),
+        }),
+      };
+      spec.paths["/seo/content-gaps/{id}/plan"] = {
+        post: op("planContentGap", "SEO", "Plan a content gap", "Turn a content gap into a content plan topic.", {
+          "x-scope": "seo:write",
+          "x-also-scopes": ["plan:write"],
+          parameters: [{ name: "id", in: "path", required: true, schema: { type: "string", format: "uuid" } }, idem],
+        }),
+      };
+      // The contract marks pipeline runs always-gated; say so on the vendored route too, so the
+      // fixture reads the same whichever specification it starts from.
+      const runs = (spec.paths["/pipeline/runs"] as Record<string, Record<string, unknown>> | undefined)?.post;
+      if (runs && runs["x-writavo-approval"]) runs["x-writavo-approval-always"] = true;
+      mutate?.(spec);
+      return spec;
+    };
+    mkdirSync(join(fixtureDir, "scripts"), { recursive: true });
+    for (const f of ["gen-mcp-tools.mjs", "mcp-surface.mjs", "error-guidance.mjs"]) {
+      writeFileSync(join(fixtureDir, "scripts", f), readFileSync(join(PACKAGE_ROOT, "scripts", f)));
+    }
+    const generate = (spec: unknown) => {
+      writeFileSync(join(fixtureDir, "openapi.yaml"), stringify(spec));
+      return spawnSync(process.execPath, [join(fixtureDir, "scripts", "gen-mcp-tools.mjs")], { cwd: fixtureDir, encoding: "utf8" });
+    };
+
+    const gen = generate(withFixture());
+    const generatedFile = join(fixtureDir, "src", "generated", "operations.ts");
+    check("the generator compiles the fixture", gen.status === 0 && existsSync(generatedFile), `${gen.status} ${gen.stderr.slice(0, 400)}`);
+    const fixtureModule = (await import(generatedFile)) as { ACTIONS: typeof REAL_ACTIONS; ACTION_AREAS: readonly string[]; OPERATIONS: typeof OPERATIONS };
+    FIXTURE_ACTIONS = fixtureModule.ACTIONS;
+    const row = (id: string) => FIXTURE_ACTIONS.find((a) => a.operationId === id) as unknown as ActionRow | undefined;
+    const ids = ["getSiteSettings", "updateSiteSettings", "inviteTeamMember", "removeTeamMember", "connectCustomDomain", "getBillingSummary", "updatePipelineConfig", "planContentGap"];
+    check(
+      "every MCP-3 route lands in ACTIONS and none becomes an individual tool",
+      ids.every((id) => row(id)?.surface === "action") && ids.every((id) => !fixtureModule.OPERATIONS.some((o) => o.operationId === id)),
+      ids.filter((id) => !row(id)).join(", "),
+    );
+    check(
+      "the MCP-2 tools are unchanged by the fixture",
+      fixtureModule.OPERATIONS.length === OPERATIONS.length,
+      `${fixtureModule.OPERATIONS.length} vs ${OPERATIONS.length}`,
+    );
+    check(
+      "a new route under the Pipeline tag, with no marker, is an action in the pipeline area",
+      row("updatePipelineConfig")?.area === "pipeline" && fixtureModule.ACTION_AREAS.includes("pipeline"),
+    );
+    check(
+      "team, money and pipeline approvals are ALWAYS (decision 6); the MCP-2 content removals stay switchable",
+      row("inviteTeamMember")?.approvalMode === "always" && row("connectCustomDomain")?.approvalMode === "always" &&
+        row("updatePipelineConfig")?.approvalMode === "always" &&
+        fixtureModule.OPERATIONS.filter((o) => o.approval && /\.(delete|unpublish)$/.test(o.approval)).every((o) => o.approvalMode === "switchable") &&
+        fixtureModule.OPERATIONS.filter((o) => o.approval === "pipeline.run").every((o) => o.approvalMode === "always"),
+    );
+    check(
+      "x-writavo-approval-when is carried, and said in the description",
+      (row("updatePipelineConfig") as unknown as { approvalWhen?: string })?.approvalWhen === "Asked only when the change makes the pipeline do more." &&
+        /approval_id\. Asked only when the change makes the pipeline do more\./.test(row("updatePipelineConfig")?.description ?? ""),
+      row("updatePipelineConfig")?.description.slice(-300),
+    );
+    const staysSwitchable = generate(withFixture((spec) => {
+      (spec.paths["/team/members/{user_id}"]!.delete as Record<string, unknown>)["x-writavo-approval-always"] = false;
+    }));
+    const switchSource = existsSync(generatedFile) ? readFileSync(generatedFile, "utf8") : "";
+    const removeRow = switchSource.slice(switchSource.indexOf('"operationId": "removeTeamMember"'));
+    check(
+      "x-writavo-approval-always: false makes an approval switchable",
+      staysSwitchable.status === 0 && /"approvalMode": "switchable"/.test(removeRow.slice(0, removeRow.indexOf('"annotations"'))),
+      staysSwitchable.stderr.slice(0, 200),
+    );
+    check(
+      "x-spends-money asks first as a spend, and says COSTS MONEY with the consequence",
+      row("connectCustomDomain")?.confirmReason === "spend" && row("connectCustomDomain")?.spendsMoney === true &&
+        /COSTS MONEY: Costs 5 US dollars a month/.test(row("connectCustomDomain")?.description ?? ""),
+      row("connectCustomDomain")?.description.slice(0, 300),
+    );
+    check(
+      "x-agent-consequence replaces the content wording on a team DELETE",
+      /PERMANENT: The member loses access/.test(row("removeTeamMember")?.description ?? "") &&
+        !/deletes content/.test(row("removeTeamMember")?.description ?? ""),
+      row("removeTeamMember")?.description.slice(0, 300),
+    );
+    check(
+      "a settings write says which settings it changes, not that it changes content",
+      /Changes Site settings\./.test(row("updateSiteSettings")?.description ?? "") && !/Changes content/.test(row("updateSiteSettings")?.description ?? ""),
+      row("updateSiteSettings")?.description.slice(0, 300),
+    );
+    check(
+      "x-also-scopes is carried and named",
+      row("planContentGap")?.alsoScopes.join() === "plan:write" && /seo:write and plan:write scopes/.test(row("planContentGap")?.description ?? ""),
+    );
+    check(
+      "an action's approval line tells the model to repeat run_writavo_action",
+      /run_writavo_action again with the same operation_id/.test(row("inviteTeamMember")?.description ?? ""),
+    );
+
+    const refusedGen = (label: string, mutate: (spec: ReturnType<typeof base>) => void, expect: RegExp) => {
+      const out = generate(withFixture(mutate));
+      check(`the generator refuses ${label}`, out.status !== 0 && expect.test(out.stderr), `${out.status} ${out.stderr.slice(0, 300)}`);
+    };
+    refusedGen(
+      "a gated action with no x-agent-consequence",
+      (spec) => {
+        delete (spec.paths["/team/invites"]!.post as Record<string, unknown>)["x-agent-consequence"];
+      },
+      /must carry x-agent-consequence/,
+    );
+    refusedGen(
+      "x-spends-money with nothing saying what it costs",
+      (spec) => {
+        const get = spec.paths["/billing"]!.get as Record<string, unknown>;
+        get["x-spends-money"] = true;
+      },
+      /x-spends-money needs an x-agent-consequence/,
+    );
+    refusedGen(
+      "an x-mcp-surface value it does not know",
+      (spec) => {
+        (spec.paths["/billing"]!.get as Record<string, unknown>)["x-mcp-surface"] = "hidden";
+      },
+      /x-mcp-surface must be "tool" or "action"/,
+    );
+    const promoted = generate(withFixture((spec) => {
+      (spec.paths["/billing"]!.get as Record<string, unknown>)["x-mcp-surface"] = "tool";
+    }));
+    const promotedSource = existsSync(generatedFile) ? readFileSync(generatedFile, "utf8") : "";
+    check(
+      "x-mcp-surface: tool on an operation makes it an individual tool, a decision recorded in the spec",
+      promoted.status === 0 && promotedSource.includes('"tool": "get_billing_summary"') &&
+        promotedSource.indexOf('"operationId": "getBillingSummary"') < promotedSource.indexOf("export const ACTIONS"),
+      promoted.stderr.slice(0, 300),
+    );
+  } finally {
+    rmSync(fixtureDir, { recursive: true, force: true });
+  }
+
+  if (FIXTURE_ACTIONS.length > 0) {
+    // Search ranking, over the fixture catalog. No model, no network.
+    const top = (query: string, area?: string) => searchActions(query, { area }, FIXTURE_ACTIONS)[0]?.operation.operationId;
+    check("search: \"invite a team member\" finds inviteTeamMember first", top("invite a team member") === "inviteTeamMember", String(top("invite a team member")));
+    check("search: \"custom domain\" finds connectCustomDomain first", top("custom domain") === "connectCustomDomain", String(top("custom domain")));
+    const top3 = (query: string) => searchActions(query, {}, FIXTURE_ACTIONS).slice(0, 3).map((m) => m.operation.operationId);
+    check("search: \"credit balance\" finds the billing summary first (a question favours reads)", top("credit balance") === "getBillingSummary", top3("credit balance").join(", "));
+    if (FIXTURE_ACTIONS.some((a) => a.operationId === "trackKeyword") && FIXTURE_ACTIONS.some((a) => a.operationId === "listTrackedKeywords")) {
+      check("search: \"track a keyword\" finds trackKeyword before the list (a write verb favours writes)", top("track a keyword") === "trackKeyword", top3("track a keyword").join(", "));
+    }
+    // The NEVER list is searchable, and it answers first with the dashboard step.
+    for (const [query, what] of [
+      ["change agent settings", "AI agent switch"],
+      ["turn off approvals", "AI agent switch"],
+      ["delete the site", "Delete a Site"],
+      ["add a card", "payment details"],
+      ["change plan", "Change the plan"],
+      ["rotate an api key", "API keys"],
+    ] as const) {
+      const first = searchCatalog(query, {}, FIXTURE_ACTIONS)[0];
+      check(
+        `search: "${query}" answers with the NEVER entry first, and its next step`,
+        first?.kind === "never" && first.never.what.includes(what) && /https:\/\/|start_plan_purchase/.test(first.never.next_step),
+        JSON.stringify(first ?? {}).slice(0, 200),
+      );
+    }
+    for (const query of ["change someone's role", "invoices", "wordpress", "update billing", "remove a member", "credit balance"]) {
+      check(`search: "${query}" is not shadowed by a NEVER entry`, searchCatalog(query, {}, FIXTURE_ACTIONS)[0]?.kind === "action");
+    }
+    const neverText = bodyOf(handleSearchActions({ query: "add a card" }, FIXTURE_ACTIONS));
+    check(
+      "a NEVER result carries no operation_id, gives the link, and tells the model to stop there",
+      neverText.includes('"never_through_an_agent"') && neverText.includes("billing?action=add-card") &&
+        neverText.includes("do not try an operation instead") &&
+        !/"operation_id"[^\n]*"never_through_an_agent"|"never_through_an_agent"[^\n]*"operation_id"/.test(neverText),
+      neverText.slice(0, 400),
+    );
+    check("search: \"rename my site\" finds the settings update first", top("rename my site") === "updateSiteSettings", String(top("rename my site")));
+    check("search: \"remove someone from the team\" finds removeTeamMember first", top("remove someone from the team") === "removeTeamMember", top3("remove someone from the team").join(", "));
+    check("search: a question prefers reads (\"who is on the team\")", searchActions("who is on the team", {}, FIXTURE_ACTIONS)[0]?.operation.method === "GET", top3("who is on the team").join(", "));
+    check("search: \"turn the pipeline on\" finds the pipeline configuration", top("turn the pipeline on") === "updatePipelineConfig", String(top("turn the pipeline on")));
+    check("search: an exact operationId comes first", top("planContentGap") === "planContentGap");
+    check(
+      "search: an area filters, and an empty query lists the area",
+      searchActions("", { area: "team" }, FIXTURE_ACTIONS).every((m) => m.operation.area === "team") &&
+        searchActions("", { area: "team" }, FIXTURE_ACTIONS).length === Math.min(20, FIXTURE_ACTIONS.filter((a) => a.area === "team").length) &&
+        searchActions("domain", { area: "billing" }, FIXTURE_ACTIONS).length === 0,
+    );
+    check("search: limit is honoured", searchActions("settings site team billing domain", { limit: 2 }, FIXTURE_ACTIONS).length <= 2);
+    check("search: nothing matches nonsense", searchActions("zzqx plorb", {}, FIXTURE_ACTIONS).length === 0);
+
+    const found = bodyOf(handleSearchActions({ query: "invite a team member", limit: 3 }, FIXTURE_ACTIONS));
+    const parsed = JSON.parse(found.slice(found.indexOf("["), found.lastIndexOf("]") + 1)) as Record<string, unknown>[];
+    const first = parsed[0] ?? {};
+    const schema = first.input_schema as { required?: string[]; additionalProperties?: boolean; properties?: Record<string, { enum?: string[] }> } | undefined;
+    check(
+      "a search result carries operation_id, the call, scope, approval, spend and a compact input schema",
+      first.operation_id === "inviteTeamMember" && first.call === "POST /team/invites" && first.needs_scope === "team:write" &&
+        String(first.needs_approval).startsWith("always") && first.spends === "nothing" && first.asks_first === true &&
+        schema?.additionalProperties === false && schema?.required?.join() === "email,role" &&
+        schema?.properties?.role?.enum?.join() === "admin,editor,viewer" && !("Idempotency-Key" in (schema?.properties ?? {})),
+      JSON.stringify(first).slice(0, 500),
+    );
+    const paid = JSON.parse(((s: string) => s.slice(s.indexOf("["), s.lastIndexOf("]") + 1))(bodyOf(handleSearchActions({ query: "custom domain", limit: 1 }, FIXTURE_ACTIONS)))) as Record<string, unknown>[];
+    check("a paid action says it spends money, and its consequence", paid[0]?.spends === "money" && /5 US dollars/.test(String(paid[0]?.consequence)));
+    check(
+      "every search result names its runner: read_writavo_action for a GET, run_writavo_action otherwise",
+      first.runner === "run_writavo_action" && paid[0]?.runner === "run_writavo_action" &&
+        (JSON.parse(((s: string) => s.slice(s.indexOf("["), s.lastIndexOf("]") + 1))(bodyOf(handleSearchActions({ query: "billing summary", limit: 1 }, FIXTURE_ACTIONS)))) as Record<string, unknown>[])[0]?.runner === "read_writavo_action",
+    );
+    check("an unknown area is refused with the list", handleSearchActions({ query: "x", area: "nowhere" }, FIXTURE_ACTIONS).isError === true);
+    check("an empty search is refused with the areas", handleSearchActions({ query: "  " }, FIXTURE_ACTIONS).isError === true);
+    check("searching needs no key and makes no request", (() => { stub.reset(); handleSearchActions({ query: "domain" }, FIXTURE_ACTIONS); return stub.requests.length === 0; })());
+
+    // Run: validation before anything is sent.
+    activateKey(SECRET_KEY, "env");
+    stub.reset();
+    stub.respond = () => ({ status: 200, body: { ok: true, data: { ok: "yes" } } });
+    const run = (args: Record<string, unknown>) => handleRunAction(STDIO_CONTEXT, args, FIXTURE_ACTIONS);
+    const badType = await run({ operation_id: "inviteTeamMember", arguments: { email: 5, role: "editor" }, confirm: true });
+    const unknownField = await run({ operation_id: "inviteTeamMember", arguments: { email: "a@example.com", role: "editor", website_id: "x" }, confirm: true });
+    const missing = await run({ operation_id: "inviteTeamMember", arguments: { role: "editor" }, confirm: true });
+    const badEnum = await run({ operation_id: "inviteTeamMember", arguments: { email: "a@example.com", role: "owner" }, confirm: true });
+    check(
+      "run: a wrong type, an unknown field, a missing field and an enum outside the schema are all refused",
+      [badType, unknownField, missing, badEnum].every((r) => r.isError === true && bodyOf(r).includes("Nothing was done")) &&
+        bodyOf(badType).includes("- email:") && bodyOf(unknownField).includes("website_id") && bodyOf(missing).includes("- email:") &&
+        bodyOf(badEnum).includes("- role:") && bodyOf(badEnum).includes('"input_schema"') === false && bodyOf(badEnum).includes('"required"'),
+      [badType, unknownField, missing, badEnum].map((r) => bodyOf(r).slice(0, 120)).join(" | "),
+    );
+    check("run: nothing reached the API for any of them", stub.requests.length === 0);
+
+    const notFound = await run({ operation_id: "deleteEverything" });
+    const coreOp = await run({ operation_id: "deleteArticle", arguments: { id: "00000000-0000-4000-8000-000000000000" }, confirm: true });
+    const refusedOp = REFUSALS.find((r) => r.tag === "API keys");
+    const withheld = refusedOp ? await run({ operation_id: refusedOp.operationId }) : null;
+    check(
+      "run: an operationId outside the catalog is refused, a tool's is pointed at its tool, a withheld one gives its reason",
+      notFound.isError === true && /no action "deleteEverything"/.test(bodyOf(notFound)) && bodyOf(notFound).includes("search_writavo_actions") &&
+        coreOp.isError === true && bodyOf(coreOp).includes("delete_article") &&
+        (withheld === null || (withheld.isError === true && /not available to an AI assistant/.test(bodyOf(withheld)))),
+      [notFound, coreOp, withheld].map((r) => (r ? bodyOf(r).slice(0, 160) : "")).join(" | "),
+    );
+    check("run: none of those reached the API", stub.requests.length === 0);
+
+    // Confirmation, exactly as a tool.
+    const unconfirmed = await run({ operation_id: "connectCustomDomain", arguments: { hostname: "blog.example.com" } });
+    check(
+      "run: a paid action does nothing without confirm, states its consequence, and says how to repeat the call",
+      stub.requests.length === 0 && bodyOf(unconfirmed).startsWith("Nothing has been done.") &&
+        bodyOf(unconfirmed).includes("5 US dollars a month") && bodyOf(unconfirmed).includes('operation_id "connectCustomDomain"') &&
+        bodyOf(unconfirmed).includes("confirm: true"),
+      bodyOf(unconfirmed).slice(0, 400),
+    );
+
+    // Approval passthrough.
+    stub.reset();
+    stub.respond = () => ({
+      status: 428,
+      body: { ok: false, error: { code: "APPROVAL_REQUIRED", message: "A person has to approve this.", approval: { id: APPROVAL_ID, url: `https://app.writavo.com/approvals/${APPROVAL_ID}`, expires_at: null, status: "pending" } } },
+    });
+    const inviteArgs = { email: "new.person@example.com", role: "editor" };
+    const parkedAction = await run({ operation_id: "inviteTeamMember", arguments: inviteArgs, confirm: true });
+    const parkedText = bodyOf(parkedAction);
+    check(
+      "run: a 428 becomes the approval instruction, naming run_writavo_action and the operation",
+      parkedAction.isError !== true && parkedText.startsWith("Nothing has been done yet.") &&
+        parkedText.includes(`https://app.writavo.com/approvals/${APPROVAL_ID}`) && parkedText.includes(`approval_id: "${APPROVAL_ID}"`) &&
+        parkedText.includes('run_writavo_action (operation_id "inviteTeamMember")') && !/\b428\b/.test(parkedText),
+      parkedText.slice(0, 400),
+    );
+    const firstCall = stub.requests[0];
+    check(
+      "run: the request went to the operation's route, labelled run_writavo_action, with an Idempotency-Key and exactly the arguments",
+      firstCall?.method === "POST" && firstCall.path === "/v1/team/invites" && firstCall.mcpTool === "run_writavo_action" &&
+        firstCall.idempotencyKey !== null && firstCall.approval === null && JSON.stringify(JSON.parse(firstCall.body)) === JSON.stringify(inviteArgs),
+      JSON.stringify(firstCall ?? {}).slice(0, 300),
+    );
+    stub.reset();
+    stub.respond = () => ({ status: 201, body: { ok: true, data: { accept_url: "https://app.writavo.com/invite/abc" } } });
+    const approvedRun = await run({ operation_id: "inviteTeamMember", arguments: inviteArgs, confirm: true, approval_id: APPROVAL_ID });
+    check(
+      "run: the retry sends Writavo-Approval with the same body, and returns the API's data",
+      stub.requests[0]?.approval === APPROVAL_ID && stub.requests[0]?.body === firstCall?.body && bodyOf(approvedRun).includes("accept_url"),
+      JSON.stringify(stub.requests[0] ?? {}).slice(0, 300),
+    );
+    stub.reset();
+    await run({ operation_id: "invite_team_member", arguments: JSON.stringify({ ...inviteArgs, approval_id: APPROVAL_ID, confirm: true }) });
+    check(
+      "run: the snake-case name works, arguments may be JSON text, and confirm/approval_id inside arguments are lifted",
+      stub.requests[0]?.approval === APPROVAL_ID && JSON.stringify(JSON.parse(stub.requests[0]?.body ?? "{}")) === JSON.stringify(inviteArgs),
+      JSON.stringify(stub.requests[0] ?? {}).slice(0, 300),
+    );
+    stub.reset();
+    const read = (args: Record<string, unknown>) => handleReadAction(STDIO_CONTEXT, args, FIXTURE_ACTIONS);
+    const readViaRun = await run({ operation_id: "getBillingSummary" });
+    const writeViaRead = await read({ operation_id: "inviteTeamMember", arguments: inviteArgs, confirm: true });
+    check(
+      "run_writavo_action refuses a GET and points to read_writavo_action; read_writavo_action refuses a write and points back",
+      readViaRun.isError === true && bodyOf(readViaRun).includes("read_writavo_action") &&
+        writeViaRead.isError === true && bodyOf(writeViaRead).includes("run_writavo_action") && stub.requests.length === 0,
+      `${bodyOf(readViaRun).slice(0, 160)} | ${bodyOf(writeViaRead).slice(0, 160)}`,
+    );
+    stub.reset();
+    const readOk = await read({ operation_id: "getBillingSummary" });
+    check(
+      "read_writavo_action runs a GET: no confirm, no Writavo-Approval, labelled read_writavo_action",
+      readOk.isError !== true && stub.requests.length === 1 && stub.requests[0]?.method === "GET" && stub.requests[0]?.approval === null &&
+        stub.requests[0]?.body === "" && stub.requests[0]?.mcpTool === "read_writavo_action",
+      JSON.stringify(stub.requests[0] ?? {}).slice(0, 300),
+    );
+    stub.reset();
+    const badLifted = await run({ operation_id: "inviteTeamMember", arguments: { ...inviteArgs, approval_id: "not-a-uuid\r\nX-Evil: 1" }, confirm: true });
+    const badTop = await run({ operation_id: "inviteTeamMember", arguments: inviteArgs, confirm: true, approval_id: "12345" });
+    check(
+      "an approval_id that is not a UUID is refused, whether given at the top level or lifted from arguments",
+      badLifted.isError === true && badTop.isError === true && bodyOf(badLifted).includes("UUID") && stub.requests.length === 0,
+      `${bodyOf(badLifted).slice(0, 160)} | ${stub.requests.length}`,
+    );
+    stub.reset();
+    await run({ operation_id: "removeTeamMember", arguments: { user_id: "22222222-3333-4444-8555-666666666666" }, confirm: true });
+    check(
+      "run: path arguments are filled into the route",
+      stub.requests[0]?.method === "DELETE" && stub.requests[0]?.path === "/v1/team/members/22222222-3333-4444-8555-666666666666",
+      JSON.stringify(stub.requests[0] ?? {}).slice(0, 200),
+    );
+    stub.reset();
+    stub.respond = () => ({ status: 403, body: { ok: false, error: { code: "INSUFFICIENT_SCOPE", message: "This key does not carry the scope this operation needs." } } });
+    const twoScopes = await run({ operation_id: "planContentGap", arguments: { id: "22222222-3333-4444-8555-666666666666" } });
+    check(
+      "run: INSUFFICIENT_SCOPE names both scopes an action needs",
+      twoScopes.isError === true && bodyOf(twoScopes).includes("seo:write and plan:write"),
+      bodyOf(twoScopes).slice(0, 300),
+    );
+    clearKey();
+    stub.reset();
+    const noKeyRun = await read({ operation_id: "getBillingSummary" });
+    check("run: with no key it says how to sign in and sends nothing", noKeyRun.isError === true && stub.requests.length === 0);
+    stub.respond = siteRespond;
+  } else {
+    check("the fixture catalog was generated", false, "the fixture generator produced no actions");
+  }
+
+  // Both hosts register the two tools, and the instructions point at them.
+  {
+    const remote2 = createWritavoMcpServer({ apiKey: () => SECRET_KEY, apiBase: baseUrl, userAgent: "writavo-mcp-smoke-worker/1.0", host: "remote" });
+    const [c2, s2] = InMemoryTransport.createLinkedPair();
+    const client2 = new Client({ name: "writavo-mcp-smoke", version: "1.0.0" });
+    await Promise.all([remote2.connect(s2), client2.connect(c2)]);
+    const listed2 = (await client2.listTools()).tools;
+    const search2 = listed2.find((t) => t.name === "search_writavo_actions");
+    const run2 = listed2.find((t) => t.name === "run_writavo_action");
+    const read2 = listed2.find((t) => t.name === "read_writavo_action");
+    check(
+      `the hosted core lists ${listed2.length} tools (43 expected here), including all three action tools`,
+      listed2.length === OPERATIONS.length + CORE_LOCAL_TOOL_NAMES.length && Boolean(search2 && run2 && read2),
+    );
+    check(
+      "read_writavo_action is read-only, not destructive and idempotent, and takes no approval_id or confirm",
+      read2?.annotations?.readOnlyHint === true && read2?.annotations?.destructiveHint === false && read2?.annotations?.idempotentHint === true &&
+        Object.keys((read2?.inputSchema as { properties?: object })?.properties ?? {}).join() === "operation_id,arguments",
+    );
+    check(
+      "the hosted core lists search read-only and run not",
+      search2?.annotations?.readOnlyHint === true && run2?.annotations?.readOnlyHint === false && run2?.annotations?.destructiveHint === true &&
+        Object.keys((run2?.inputSchema as { properties?: object })?.properties ?? {}).join() === "operation_id,arguments,approval_id,confirm",
+    );
+    stub.reset();
+    const viaMcp = await client2.callTool({ name: "search_writavo_actions", arguments: { query: "team member" } });
+    check("search_writavo_actions answers through the protocol and sends no request", viaMcp.isError !== true && stub.requests.length === 0, JSON.stringify(viaMcp.content).slice(0, 200));
+    const runUnknown = await client2.callTool({ name: "run_writavo_action", arguments: { operation_id: "doesNotExist" } });
+    check("run_writavo_action refuses an unknown operation through the protocol", runUnknown.isError === true && stub.requests.length === 0);
+    const instructions = client2.getInstructions() ?? "";
+    check(
+      `the hosted instructions (${instructions.length} characters) stay under 6000, name both tools and the never list`,
+      instructions.length < 6000 && instructions.includes("search_writavo_actions") && instructions.includes("run_writavo_action") &&
+        instructions.includes("read_writavo_action") && instructions.includes("never_through_an_agent") &&
+        instructions.includes("NEVER through these tools") && instructions.includes("PREREQUISITE_MISSING"),
+    );
+    const shipped = [
+      instructions,
+      SEARCH_WRITAVO_ACTIONS.description,
+      RUN_WRITAVO_ACTION.description,
+      READ_WRITAVO_ACTION.description,
+      ...REAL_ACTIONS.flatMap((a) => [a.description, a.summary, a.brief, ...a.params.map((p) => p.description)]),
+      ...FIXTURE_ACTIONS.map((a) => a.description),
+      ...surfaceModule.NEVER_ACTIONS.flatMap((n) => [n.what, n.why, n.next_step]),
+    ];
+    check(`no em-dash or en-dash in ${shipped.length} MCP-3 strings`, !shipped.some((s) => /[—–]/.test(s)), shipped.find((s) => /[—–]/.test(s))?.slice(0, 120) ?? "");
+    await client2.close();
+  }
 
   // -- the base URL guard ----------------------------------------------------
   console.log("\n[ The base URL guard ]");

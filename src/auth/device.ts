@@ -19,19 +19,43 @@ import { STDIO_CONTEXT } from "../stdio/context.js";
  * with OAuth on the Worker instead, and never imports this.
  */
 
-/** What login asks for when the caller names nothing. Never keys:* or webhooks:*. */
+/**
+ * What login asks for when the caller names nothing: the 30 agent scopes (MCP-3 contract §3.2),
+ * in the order of the database's public.agent_scopes(). Never keys:* or webhooks:*. The key ends
+ * up with this intersected with what the person may grant and what they choose when approving;
+ * the organisation's default permissions pre-fill that choice.
+ */
 export const DEFAULT_SCOPES = [
   "articles:read",
   "articles:write",
-  "taxonomy:read",
-  "taxonomy:write",
   "authors:read",
   "authors:write",
+  "billing:read",
+  "billing:write",
+  "delivery:read",
+  "delivery:write",
+  "insights:read",
+  "integrations:write",
+  "logs:read",
   "media:read",
   "media:write",
+  "meta:read",
+  "org:write",
+  "outreach:read",
+  "pipeline:config",
   "pipeline:read",
   "pipeline:run",
-  "meta:read",
+  "plan:write",
+  "prompts:write",
+  "roles:write",
+  "seo:read",
+  "seo:write",
+  "site:read",
+  "site:write",
+  "taxonomy:read",
+  "taxonomy:write",
+  "team:read",
+  "team:write",
 ] as const;
 
 export type LoginScope = (typeof DEFAULT_SCOPES)[number];
