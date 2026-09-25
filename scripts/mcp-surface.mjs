@@ -74,36 +74,43 @@ const COMPOSED_WHAT = {
 export const LOCAL_TOOLS = [
   {
     name: "upload_media",
+    scope: "media:write",
     summary: "Upload an image and register it in the media library, in one call.",
     confirm: false,
   },
   {
     name: "get_api_docs",
+    scope: "none",
     summary: "Read the API reference offline. One of the few tools that needs no key.",
     confirm: false,
   },
   {
     name: "login",
+    scope: "none",
     summary: "Sign in through the browser: a person approves, and a key generated on this machine goes live.",
     confirm: false,
   },
   {
     name: "login_status",
+    scope: "none",
     summary: "Check whether a sign-in started with login has been approved, and which Site it is for.",
     confirm: false,
   },
   {
     name: "logout",
-    summary: "Forget the signed-in key on this machine. Revoking it is done in the dashboard.",
+    scope: "none",
+    summary: "Sign out on this machine: revoke the signed-in key on the server, then forget it locally.",
     confirm: false,
   },
   {
     name: "start_plan_purchase",
+    scope: "none",
     summary: "Get the dashboard link to choose a plan. Payment happens on Stripe's page, never in the chat.",
     confirm: false,
   },
   {
     name: "import_content",
+    scope: "articles:write",
     summary: "Import articles from a Writavo import file: dry run first, then create, re-host images and publish with original dates.",
     confirm: true,
   },
@@ -331,9 +338,13 @@ export function buildMcpSurface(spec) {
           ? "spend"
           : upper === "DELETE"
             ? "destructive"
-            : op["x-makes-public"] === true
-              ? "public"
-              : null;
+            : op["x-writavo-approval"]
+              // The server makes an agent key get a person's approval for this (0089), so the
+              // tool asks first too: taking something down is as consequential as deleting it.
+              ? "approval"
+              : op["x-makes-public"] === true
+                ? "public"
+                : null;
 
       operations.push({
         tool: NAME_OVERRIDES[operationId] ?? snake(operationId),

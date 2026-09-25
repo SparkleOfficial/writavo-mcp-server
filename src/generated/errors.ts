@@ -67,7 +67,7 @@ export const ERROR_CATALOG: ErrorEntry[] = [
   {
     "code": "INSUFFICIENT_SCOPE",
     "http": "403",
-    "meaning": "The key is valid but lacks the scope this operation needs. The only 403 in the API.",
+    "meaning": "The key is valid but lacks the scope this operation needs.",
     "action": "Either the key lacks the scope, or its creator's permissions no longer cover it. Check `GET /keys` for the scopes actually granted, then check the creator still has the matching dashboard permission. This is the only 403 in the API, and it never means the object belongs to someone else.",
     "links": [
       {
@@ -79,6 +79,58 @@ export const ERROR_CATALOG: ErrorEntry[] = [
         "url": "https://writavo.com/docs/authentication"
       }
     ]
+  },
+  {
+    "code": "FORBIDDEN",
+    "http": "403",
+    "meaning": "Refused for a reason no scope would change: a key that may not extend itself, or an OAuth sign-in not started by Writavo's MCP server. The message says which.",
+    "action": "Read the message: it names the reason and what to do instead. On `POST /auth/key/extend` the key is not one that may extend itself (only a live key from a device or AI-assistant sign-in can), its creator can no longer manage API keys, or AI agent access is off; signing in again gets a fresh key. On `POST /auth/device` it means `flow` was set to `oauth`, which only Writavo's hosted MCP server may do: leave `flow` out.",
+    "links": []
+  },
+  {
+    "code": "AGENT_ACCESS_DISABLED",
+    "http": "403",
+    "meaning": "The key belongs to an AI agent and the organisation has turned AI agent access off.",
+    "action": "An owner or admin turned AI agent access off for this organisation. Nothing you send will work until it is turned back on in Settings > AI agents; the key itself is fine and needs no new sign-in once it is. Keys made in the dashboard are not affected.",
+    "links": [
+      {
+        "label": "AI agent settings",
+        "url": "https://app.writavo.com/settings/agents"
+      }
+    ]
+  },
+  {
+    "code": "APPROVAL_REQUIRED",
+    "http": "428",
+    "meaning": "An AI agent asked for an action a person must approve. error.approval has the link and the id to retry with.",
+    "action": "Nothing has happened yet. Show the person `error.approval.url`, where they can approve or deny this exact request. Once they approve, send the identical request again with the header `Writavo-Approval: <error.approval.id>`. Do not change the path or the body, and do not retry in a loop: an approval lasts 24 hours.",
+    "links": []
+  },
+  {
+    "code": "APPROVAL_PENDING",
+    "http": "428",
+    "meaning": "The approval you sent has not been decided yet. Retry once it has.",
+    "action": "The person has not decided yet. Wait for them to approve at `error.approval.url`, then retry with the same `Writavo-Approval` id. Polling will not speed it up.",
+    "links": [
+      {
+        "label": "AI agent settings",
+        "url": "https://app.writavo.com/settings/agents"
+      }
+    ]
+  },
+  {
+    "code": "APPROVAL_DENIED",
+    "http": "403",
+    "meaning": "A person denied the action.",
+    "action": "A person looked at this request and said no. Do not retry it, and do not rephrase it to get around the refusal; ask them what they would like instead.",
+    "links": []
+  },
+  {
+    "code": "APPROVAL_INVALID",
+    "http": "409",
+    "meaning": "The approval you sent cannot be used for this request: expired, already used, for a different request, or unknown.",
+    "action": "The approval id you sent is expired, already used, for a different request, or unknown. Approvals are single use and bound to the exact request. Retry without `Writavo-Approval` to ask for a new one.",
+    "links": []
   },
   {
     "code": "NOT_ENTITLED",
@@ -160,7 +212,7 @@ export const ERROR_CATALOG: ErrorEntry[] = [
     "code": "CONFLICT",
     "http": "409",
     "meaning": "The object changed under you mid request. Re-read and retry.",
-    "action": "The object changed under you mid request. Re-read it and retry.",
+    "action": "The request clashes with the object's current state. Read `error.message` first: when it names the step to take (for example \"This article is live. Unpublish it first.\"), do that step, then retry. Otherwise the object changed mid request: re-read it and retry.",
     "links": []
   },
   {

@@ -24,13 +24,22 @@ export interface McpParam {
 }
 
 /** Why a tool asks before it acts. Null means it does not need to. */
-export type ConfirmReason = "spend" | "destructive" | "public" | null;
+export type ConfirmReason = "spend" | "destructive" | "approval" | "public" | null;
+
+/** MCP tool annotations, derived from the method and the specification's extensions. */
+export interface McpAnnotations {
+  title: string;
+  readOnlyHint: boolean;
+  destructiveHint: boolean;
+  idempotentHint: boolean;
+  openWorldHint: boolean;
+}
 
 export interface McpOperation {
   /** The MCP tool name. */
   tool: string;
   operationId: string;
-  method: "GET" | "POST" | "PATCH" | "DELETE";
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   /** The path template, relative to the base URL. `{id}` segments are filled from params. */
   path: string;
   tag: string;
@@ -49,6 +58,12 @@ export interface McpOperation {
   idempotency: boolean;
   /** The API accepts If-Match, so the tool takes an optional if_match argument. */
   ifMatch: boolean;
+  /**
+   * The approval action from `x-writavo-approval`, or null. When set, the API may answer an AI
+   * agent's call with 428 and a link for a person, and the tool takes an optional approval_id.
+   */
+  approval: string | null;
+  annotations: McpAnnotations;
   params: McpParam[];
 }
 
@@ -62,7 +77,7 @@ export interface McpRefusal {
 }
 
 export const API_BASE_URL = "https://api.writavo.com/v1";
-export const API_VERSION = "1.1.0";
+export const API_VERSION = "1.2.0";
 
 export const OPERATIONS: McpOperation[] = [
   {
@@ -83,7 +98,15 @@ export const OPERATIONS: McpOperation[] = [
     "confirmReason": null,
     "idempotency": false,
     "ifMatch": false,
-    "params": []
+    "params": [],
+    "approval": null,
+    "annotations": {
+      "title": "Verify a key",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
   },
   {
     "tool": "get_site_info",
@@ -103,7 +126,15 @@ export const OPERATIONS: McpOperation[] = [
     "confirmReason": null,
     "idempotency": false,
     "ifMatch": false,
-    "params": []
+    "params": [],
+    "approval": null,
+    "annotations": {
+      "title": "Read Site information",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
   },
   {
     "tool": "get_content_types",
@@ -123,7 +154,15 @@ export const OPERATIONS: McpOperation[] = [
     "confirmReason": null,
     "idempotency": false,
     "ifMatch": false,
-    "params": []
+    "params": [],
+    "approval": null,
+    "annotations": {
+      "title": "List content types",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
   },
   {
     "tool": "get_usage",
@@ -143,7 +182,15 @@ export const OPERATIONS: McpOperation[] = [
     "confirmReason": null,
     "idempotency": false,
     "ifMatch": false,
-    "params": []
+    "params": [],
+    "approval": null,
+    "annotations": {
+      "title": "Read plan limits, usage and balances",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
   },
   {
     "tool": "list_articles",
@@ -290,7 +337,15 @@ export const OPERATIONS: McpOperation[] = [
           "created_at.desc"
         ]
       }
-    ]
+    ],
+    "approval": null,
+    "annotations": {
+      "title": "List articles",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
   },
   {
     "tool": "create_article",
@@ -473,7 +528,15 @@ export const OPERATIONS: McpOperation[] = [
         "nullable": false,
         "itemKind": "string"
       }
-    ]
+    ],
+    "approval": null,
+    "annotations": {
+      "title": "Create an article",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
   },
   {
     "tool": "get_article",
@@ -513,7 +576,15 @@ export const OPERATIONS: McpOperation[] = [
         "kind": "string",
         "nullable": false
       }
-    ]
+    ],
+    "approval": null,
+    "annotations": {
+      "title": "Read one article",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
   },
   {
     "tool": "update_article",
@@ -706,7 +777,15 @@ export const OPERATIONS: McpOperation[] = [
         "nullable": false,
         "itemKind": "string"
       }
-    ]
+    ],
+    "approval": null,
+    "annotations": {
+      "title": "Update an article",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
   },
   {
     "tool": "delete_article",
@@ -715,7 +794,7 @@ export const OPERATIONS: McpOperation[] = [
     "path": "/articles/{id}",
     "tag": "Articles",
     "summary": "Delete an article",
-    "description": "Delete an article. Permanent. The row and its tag assignments are removed, and if the article was published its URL starts returning 404 on your blog once the cache is purged. PERMANENT: this deletes content from the customer's Site. There is no trash and no undo. Ask the user before calling this, and pass confirm: true only once they have agreed. Needs a secret key (wv_sk_) carrying the articles:write scope.",
+    "description": "Delete an article. Permanent. The row and its tag assignments are removed, and if the article was published its URL starts returning 404 on your blog once the cache is purged. PERMANENT: this deletes content from the customer's Site. There is no trash and no undo. Ask the user before calling this, and pass confirm: true only once they have agreed. Needs a secret key (wv_sk_) carrying the articles:write scope. APPROVAL: when the organisation requires it, the first call returns a link for a person to approve instead of acting; after they approve, call again with the same arguments plus approval_id.",
     "scope": "articles:write",
     "entitlement": "none",
     "publishable": false,
@@ -737,7 +816,15 @@ export const OPERATIONS: McpOperation[] = [
         "nullable": false,
         "format": "uuid"
       }
-    ]
+    ],
+    "approval": "article.delete",
+    "annotations": {
+      "title": "Delete an article",
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
   },
   {
     "tool": "publish_article",
@@ -788,7 +875,15 @@ export const OPERATIONS: McpOperation[] = [
         "nullable": false,
         "format": "date-time"
       }
-    ]
+    ],
+    "approval": null,
+    "annotations": {
+      "title": "Publish an article",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
   },
   {
     "tool": "unpublish_article",
@@ -797,15 +892,15 @@ export const OPERATIONS: McpOperation[] = [
     "path": "/articles/{id}/unpublish",
     "tag": "Articles",
     "summary": "Unpublish an article",
-    "description": "Unpublish an article. Takes the article off the web and returns it to `status: draft`. The URL starts returning 404 on your blog once the cache is purged. Changes content on the customer's Site. Nothing becomes public: publishing is always a separate call. Needs a secret key (wv_sk_) carrying the articles:write scope.",
+    "description": "Unpublish an article. Takes the article off the web and returns it to `status: draft`. The URL starts returning 404 on your blog once the cache is purged. Changes content on the customer's Site. Nothing becomes public: publishing is always a separate call. Ask the user before calling this, and pass confirm: true only once they have agreed. Needs a secret key (wv_sk_) carrying the articles:write scope. APPROVAL: when the organisation requires it, the first call returns a link for a person to approve instead of acting; after they approve, call again with the same arguments plus approval_id.",
     "scope": "articles:write",
     "entitlement": "none",
     "publishable": false,
     "spendsCredits": false,
     "makesPublic": false,
     "readOnly": false,
-    "confirm": false,
-    "confirmReason": null,
+    "confirm": true,
+    "confirmReason": "approval",
     "idempotency": false,
     "ifMatch": false,
     "params": [
@@ -819,7 +914,15 @@ export const OPERATIONS: McpOperation[] = [
         "nullable": false,
         "format": "uuid"
       }
-    ]
+    ],
+    "approval": "article.unpublish",
+    "annotations": {
+      "title": "Unpublish an article",
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
   },
   {
     "tool": "schedule_article",
@@ -860,7 +963,15 @@ export const OPERATIONS: McpOperation[] = [
         "nullable": false,
         "format": "date-time"
       }
-    ]
+    ],
+    "approval": null,
+    "annotations": {
+      "title": "Schedule an article",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
   },
   {
     "tool": "cancel_article_schedule",
@@ -869,7 +980,7 @@ export const OPERATIONS: McpOperation[] = [
     "path": "/articles/{id}/cancel-schedule",
     "tag": "Articles",
     "summary": "Cancel a scheduled publish",
-    "description": "Cancel a scheduled publish. Returns the article to `status: draft` and clears `scheduled_publish_at`. The content is untouched. Calling this on an article that is not scheduled is a no-op that returns the current state. Changes content on the customer's Site. Nothing becomes public: publishing is always a separate call. Needs a secret key (wv_sk_) carrying the articles:write scope.",
+    "description": "Cancel a scheduled publish. Returns a scheduled article to `status: draft` and clears `scheduled_publish_at`. The content is untouched. Calling this on an article that is not scheduled, including a published one, is a no-op that returns the current state unchanged: it never takes a live article down. Use `POST /articles/{id}/unpublish` for that. Changes content on the customer's Site. Nothing becomes public: publishing is always a separate call. Needs a secret key (wv_sk_) carrying the articles:write scope.",
     "scope": "articles:write",
     "entitlement": "none",
     "publishable": false,
@@ -891,7 +1002,15 @@ export const OPERATIONS: McpOperation[] = [
         "nullable": false,
         "format": "uuid"
       }
-    ]
+    ],
+    "approval": null,
+    "annotations": {
+      "title": "Cancel a scheduled publish",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
   },
   {
     "tool": "list_categories",
@@ -939,7 +1058,15 @@ export const OPERATIONS: McpOperation[] = [
         "kind": "string",
         "nullable": false
       }
-    ]
+    ],
+    "approval": null,
+    "annotations": {
+      "title": "List categories",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
   },
   {
     "tool": "create_category",
@@ -978,7 +1105,15 @@ export const OPERATIONS: McpOperation[] = [
         "kind": "string",
         "nullable": false
       }
-    ]
+    ],
+    "approval": null,
+    "annotations": {
+      "title": "Create a category",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
   },
   {
     "tool": "get_category",
@@ -1009,7 +1144,15 @@ export const OPERATIONS: McpOperation[] = [
         "nullable": false,
         "format": "uuid"
       }
-    ]
+    ],
+    "approval": null,
+    "annotations": {
+      "title": "Read one category",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
   },
   {
     "tool": "update_category",
@@ -1058,7 +1201,15 @@ export const OPERATIONS: McpOperation[] = [
         "kind": "string",
         "nullable": false
       }
-    ]
+    ],
+    "approval": null,
+    "annotations": {
+      "title": "Update a category",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
   },
   {
     "tool": "delete_category",
@@ -1067,7 +1218,7 @@ export const OPERATIONS: McpOperation[] = [
     "path": "/categories/{id}",
     "tag": "Categories",
     "summary": "Delete a category",
-    "description": "Delete a category. Articles in this category are not deleted. Their `category_id` becomes `null`, so they stay published and simply lose their category. Removing a category never removes content. PERMANENT: this deletes content from the customer's Site. There is no trash and no undo. Ask the user before calling this, and pass confirm: true only once they have agreed. Needs a secret key (wv_sk_) carrying the taxonomy:write scope.",
+    "description": "Delete a category. Articles in this category are not deleted. Their `category_id` becomes `null`, so they stay published and simply lose their category. Removing a category never removes content. PERMANENT: this deletes content from the customer's Site. There is no trash and no undo. Ask the user before calling this, and pass confirm: true only once they have agreed. Needs a secret key (wv_sk_) carrying the taxonomy:write scope. APPROVAL: when the organisation requires it, the first call returns a link for a person to approve instead of acting; after they approve, call again with the same arguments plus approval_id.",
     "scope": "taxonomy:write",
     "entitlement": "none",
     "publishable": false,
@@ -1089,7 +1240,15 @@ export const OPERATIONS: McpOperation[] = [
         "nullable": false,
         "format": "uuid"
       }
-    ]
+    ],
+    "approval": "category.delete",
+    "annotations": {
+      "title": "Delete a category",
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
   },
   {
     "tool": "list_tags",
@@ -1137,7 +1296,15 @@ export const OPERATIONS: McpOperation[] = [
         "kind": "string",
         "nullable": false
       }
-    ]
+    ],
+    "approval": null,
+    "annotations": {
+      "title": "List tags",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
   },
   {
     "tool": "create_tag",
@@ -1176,7 +1343,15 @@ export const OPERATIONS: McpOperation[] = [
         "kind": "string",
         "nullable": false
       }
-    ]
+    ],
+    "approval": null,
+    "annotations": {
+      "title": "Create a tag",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
   },
   {
     "tool": "get_tag",
@@ -1207,7 +1382,15 @@ export const OPERATIONS: McpOperation[] = [
         "nullable": false,
         "format": "uuid"
       }
-    ]
+    ],
+    "approval": null,
+    "annotations": {
+      "title": "Read one tag",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
   },
   {
     "tool": "update_tag",
@@ -1256,7 +1439,15 @@ export const OPERATIONS: McpOperation[] = [
         "kind": "string",
         "nullable": false
       }
-    ]
+    ],
+    "approval": null,
+    "annotations": {
+      "title": "Update a tag",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
   },
   {
     "tool": "delete_tag",
@@ -1265,7 +1456,7 @@ export const OPERATIONS: McpOperation[] = [
     "path": "/tags/{id}",
     "tag": "Tags",
     "summary": "Delete a tag",
-    "description": "Delete a tag. The tag is removed from every article that carried it. No article is deleted. PERMANENT: this deletes content from the customer's Site. There is no trash and no undo. Ask the user before calling this, and pass confirm: true only once they have agreed. Needs a secret key (wv_sk_) carrying the taxonomy:write scope.",
+    "description": "Delete a tag. The tag is removed from every article that carried it. No article is deleted. PERMANENT: this deletes content from the customer's Site. There is no trash and no undo. Ask the user before calling this, and pass confirm: true only once they have agreed. Needs a secret key (wv_sk_) carrying the taxonomy:write scope. APPROVAL: when the organisation requires it, the first call returns a link for a person to approve instead of acting; after they approve, call again with the same arguments plus approval_id.",
     "scope": "taxonomy:write",
     "entitlement": "none",
     "publishable": false,
@@ -1287,7 +1478,15 @@ export const OPERATIONS: McpOperation[] = [
         "nullable": false,
         "format": "uuid"
       }
-    ]
+    ],
+    "approval": "tag.delete",
+    "annotations": {
+      "title": "Delete a tag",
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
   },
   {
     "tool": "list_authors",
@@ -1335,7 +1534,15 @@ export const OPERATIONS: McpOperation[] = [
         "kind": "string",
         "nullable": false
       }
-    ]
+    ],
+    "approval": null,
+    "annotations": {
+      "title": "List authors",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
   },
   {
     "tool": "create_author",
@@ -1402,7 +1609,15 @@ export const OPERATIONS: McpOperation[] = [
         "kind": "boolean",
         "nullable": false
       }
-    ]
+    ],
+    "approval": null,
+    "annotations": {
+      "title": "Create an author",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
   },
   {
     "tool": "get_author",
@@ -1433,7 +1648,15 @@ export const OPERATIONS: McpOperation[] = [
         "nullable": false,
         "format": "uuid"
       }
-    ]
+    ],
+    "approval": null,
+    "annotations": {
+      "title": "Read one author",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
   },
   {
     "tool": "update_author",
@@ -1510,7 +1733,15 @@ export const OPERATIONS: McpOperation[] = [
         "kind": "boolean",
         "nullable": false
       }
-    ]
+    ],
+    "approval": null,
+    "annotations": {
+      "title": "Update an author",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
   },
   {
     "tool": "delete_author",
@@ -1519,7 +1750,7 @@ export const OPERATIONS: McpOperation[] = [
     "path": "/authors/{id}",
     "tag": "Authors",
     "summary": "Delete an author",
-    "description": "Delete an author. Articles by this author are not deleted. Their `author_id` becomes `null`, so they stay published and lose their byline. PERMANENT: this deletes content from the customer's Site. There is no trash and no undo. Ask the user before calling this, and pass confirm: true only once they have agreed. Needs a secret key (wv_sk_) carrying the authors:write scope.",
+    "description": "Delete an author. Articles by this author are not deleted. Their `author_id` becomes `null`, so they stay published and lose their byline. PERMANENT: this deletes content from the customer's Site. There is no trash and no undo. Ask the user before calling this, and pass confirm: true only once they have agreed. Needs a secret key (wv_sk_) carrying the authors:write scope. APPROVAL: when the organisation requires it, the first call returns a link for a person to approve instead of acting; after they approve, call again with the same arguments plus approval_id.",
     "scope": "authors:write",
     "entitlement": "none",
     "publishable": false,
@@ -1541,7 +1772,15 @@ export const OPERATIONS: McpOperation[] = [
         "nullable": false,
         "format": "uuid"
       }
-    ]
+    ],
+    "approval": "author.delete",
+    "annotations": {
+      "title": "Delete an author",
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
   },
   {
     "tool": "list_media",
@@ -1602,7 +1841,15 @@ export const OPERATIONS: McpOperation[] = [
         "kind": "string",
         "nullable": false
       }
-    ]
+    ],
+    "approval": null,
+    "annotations": {
+      "title": "List media assets",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
   },
   {
     "tool": "get_media",
@@ -1633,7 +1880,15 @@ export const OPERATIONS: McpOperation[] = [
         "nullable": false,
         "format": "uuid"
       }
-    ]
+    ],
+    "approval": null,
+    "annotations": {
+      "title": "Read one media asset",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
   },
   {
     "tool": "update_media",
@@ -1673,7 +1928,15 @@ export const OPERATIONS: McpOperation[] = [
         "kind": "string",
         "nullable": true
       }
-    ]
+    ],
+    "approval": null,
+    "annotations": {
+      "title": "Update a media asset",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
   },
   {
     "tool": "delete_media",
@@ -1682,7 +1945,7 @@ export const OPERATIONS: McpOperation[] = [
     "path": "/media/{id}",
     "tag": "Media",
     "summary": "Delete a media asset",
-    "description": "Delete a media asset. Removes the catalog row and the stored bytes. PERMANENT: this deletes content from the customer's Site. There is no trash and no undo. Ask the user before calling this, and pass confirm: true only once they have agreed. Needs a secret key (wv_sk_) carrying the media:write scope.",
+    "description": "Delete a media asset. Removes the catalog row and the stored bytes. PERMANENT: this deletes content from the customer's Site. There is no trash and no undo. Ask the user before calling this, and pass confirm: true only once they have agreed. Needs a secret key (wv_sk_) carrying the media:write scope. APPROVAL: when the organisation requires it, the first call returns a link for a person to approve instead of acting; after they approve, call again with the same arguments plus approval_id.",
     "scope": "media:write",
     "entitlement": "none",
     "publishable": false,
@@ -1704,7 +1967,15 @@ export const OPERATIONS: McpOperation[] = [
         "nullable": false,
         "format": "uuid"
       }
-    ]
+    ],
+    "approval": "media.delete",
+    "annotations": {
+      "title": "Delete a media asset",
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
   },
   {
     "tool": "list_pipeline_runs",
@@ -1779,7 +2050,15 @@ export const OPERATIONS: McpOperation[] = [
           "publish"
         ]
       }
-    ]
+    ],
+    "approval": null,
+    "annotations": {
+      "title": "List pipeline runs",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
   },
   {
     "tool": "trigger_pipeline_run",
@@ -1788,7 +2067,7 @@ export const OPERATIONS: McpOperation[] = [
     "path": "/pipeline/runs",
     "tag": "Pipeline",
     "summary": "Request a pipeline run",
-    "description": "Request a pipeline run. This is the only billable operation in this API. COSTS MONEY: this spends the organisation's credit balance. It is the only billable tool here, and it is charged per unit of work the engine completes. Ask the user before calling this, and pass confirm: true only once they have agreed. Needs a secret key (wv_sk_) carrying the pipeline:run scope.",
+    "description": "Request a pipeline run. This is the only billable operation in this API. COSTS MONEY: this spends the organisation's credit balance. It is the only billable tool here, and it is charged per unit of work the engine completes. Ask the user before calling this, and pass confirm: true only once they have agreed. Needs a secret key (wv_sk_) carrying the pipeline:run scope. APPROVAL: when the organisation requires it, the first call returns a link for a person to approve instead of acting; after they approve, call again with the same arguments plus approval_id.",
     "scope": "pipeline:run",
     "entitlement": "ai.article_generation",
     "publishable": false,
@@ -1809,7 +2088,15 @@ export const OPERATIONS: McpOperation[] = [
         "kind": "integer",
         "nullable": false
       }
-    ]
+    ],
+    "approval": "pipeline.run",
+    "annotations": {
+      "title": "Request a pipeline run",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
   },
   {
     "tool": "get_pipeline_status",
@@ -1840,7 +2127,15 @@ export const OPERATIONS: McpOperation[] = [
         "nullable": false,
         "format": "uuid"
       }
-    ]
+    ],
+    "approval": null,
+    "annotations": {
+      "title": "Read one pipeline run",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
   },
   {
     "tool": "get_pipeline_queue",
@@ -1908,7 +2203,15 @@ export const OPERATIONS: McpOperation[] = [
           "competitor_seed"
         ]
       }
-    ]
+    ],
+    "approval": null,
+    "annotations": {
+      "title": "Read the content queue",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
   }
 ];
 
@@ -2024,5 +2327,19 @@ export const REFUSALS: McpRefusal[] = [
     "path": "/auth/device/token",
     "tag": "Device sign-in",
     "reason": "Reached through the login tool, which drives the whole device sign-in in one call."
+  },
+  {
+    "operationId": "extendApiKey",
+    "method": "POST",
+    "path": "/auth/key/extend",
+    "tag": "API keys",
+    "reason": "Used by the MCP server itself, never by an assistant: the stdio server extends a signed-in key while it is in use and revokes it on logout, and the hosted server does the same when it refreshes a connection."
+  },
+  {
+    "operationId": "revokeCurrentApiKey",
+    "method": "POST",
+    "path": "/auth/key/revoke",
+    "tag": "API keys",
+    "reason": "Used by the MCP server itself, never by an assistant: the stdio server extends a signed-in key while it is in use and revokes it on logout, and the hosted server does the same when it refreshes a connection."
   }
 ];

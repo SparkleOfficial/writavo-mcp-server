@@ -37,6 +37,8 @@ if (!KEY.startsWith("wv_sk_")) {
 
 const { callOperation } = await import("../src/tools/call.js");
 const { handleUploadMedia } = await import("../src/tools/upload-media.js");
+const { STDIO_CONTEXT } = await import("../src/stdio/context.js");
+const { MEDIA_FILES } = await import("../src/stdio/files.js");
 const { OPERATIONS } = await import("../src/generated/operations.js");
 
 interface ToolReply {
@@ -137,18 +139,18 @@ async function main(): Promise<void> {
 
   try {
     console.log("[ Connect ]");
-    await step("verify_api_key", () => callOperation(operation("verify_api_key"), {}), (r) =>
+    await step("verify_api_key", () => callOperation(STDIO_CONTEXT, operation("verify_api_key"), {}), (r) =>
       body(r).includes("secret") ? null : "the key did not report as secret",
     );
-    await step("get_site_info", () => callOperation(operation("get_site_info"), {}), succeeds);
+    await step("get_site_info", () => callOperation(STDIO_CONTEXT, operation("get_site_info"), {}), succeeds);
 
     console.log("\n[ Taxonomy and people ]");
     const categories = await step(
       "list_categories",
-      () => callOperation(operation("list_categories"), { limit: 5 }),
+      () => callOperation(STDIO_CONTEXT, operation("list_categories"), { limit: 5 }),
       succeeds,
     );
-    const authors = await step("list_authors", () => callOperation(operation("list_authors"), { limit: 5 }), succeeds);
+    const authors = await step("list_authors", () => callOperation(STDIO_CONTEXT, operation("list_authors"), { limit: 5 }), succeeds);
     const categoryId = (json(categories).items as { id: string }[] | undefined)?.[0]?.id ?? null;
     const authorId = (json(authors).items as { id: string }[] | undefined)?.[0]?.id ?? null;
 
@@ -156,7 +158,7 @@ async function main(): Promise<void> {
     const created = await step(
       "create_article creates a DRAFT",
       () =>
-        callOperation(operation("create_article"), {
+        callOperation(STDIO_CONTEXT, operation("create_article"), {
           title: `MCP integration ${stamp}`,
           slug,
           content:
@@ -180,7 +182,7 @@ async function main(): Promise<void> {
       await step(
         "update_article sets the category and author",
         () =>
-          callOperation(operation("update_article"), {
+          callOperation(STDIO_CONTEXT, operation("update_article"), {
             id: articleId,
             ...(categoryId ? { category_id: categoryId } : {}),
             ...(authorId ? { author_id: authorId } : {}),
@@ -196,14 +198,14 @@ async function main(): Promise<void> {
     writeFileSync(imagePath, tinyPng());
     const uploaded = await step(
       "upload_media drives the whole three step upload",
-      () => handleUploadMedia({ file_path: imagePath, alt_text: "A test gradient." }),
+      () => handleUploadMedia(STDIO_CONTEXT, { path: imagePath, alt_text: "A test gradient." }, MEDIA_FILES),
       succeeds,
     );
     const imageUrl = json(uploaded).url;
     if (typeof imageUrl === "string") {
       await step(
         "update_article attaches the image",
-        () => callOperation(operation("update_article"), { id: articleId, featured_image_url: imageUrl }),
+        () => callOperation(STDIO_CONTEXT, operation("update_article"), { id: articleId, featured_image_url: imageUrl }),
         succeeds,
       );
     }
@@ -211,24 +213,24 @@ async function main(): Promise<void> {
     console.log("\n[ Publish ]");
     await step(
       "publish_article refuses without confirmation",
-      () => callOperation(operation("publish_article"), { id: articleId }),
+      () => callOperation(STDIO_CONTEXT, operation("publish_article"), { id: articleId }),
       (r) => (body(r).startsWith("Nothing has been done.") ? null : "it did not refuse"),
     );
     await step(
       "publish_article publishes once confirmed",
-      () => callOperation(operation("publish_article"), { id: articleId, confirm: true }),
+      () => callOperation(STDIO_CONTEXT, operation("publish_article"), { id: articleId, confirm: true }),
       (r) => (json(r).status === "published" ? null : `status is ${String(json(r).status)}`),
     );
 
     console.log("\n[ Read back ]");
     await step(
       "get_article returns it as published",
-      () => callOperation(operation("get_article"), { id: articleId }),
+      () => callOperation(STDIO_CONTEXT, operation("get_article"), { id: articleId }),
       (r) => (json(r).status === "published" ? null : `status is ${String(json(r).status)}`),
     );
     await step(
       "list_articles finds it by slug",
-      () => callOperation(operation("list_articles"), { slug, status: ["published"] }),
+      () => callOperation(STDIO_CONTEXT, operation("list_articles"), { slug, status: ["published"] }),
       (r) => {
         const items = json(r).items as { id: string }[] | undefined;
         return items?.some((i) => i.id === articleId) ? null : "the published list does not contain it";
@@ -238,7 +240,7 @@ async function main(): Promise<void> {
     console.log("\n[ Unpublish ]");
     await step(
       "unpublish_article takes it off the web",
-      () => callOperation(operation("unpublish_article"), { id: articleId }),
+      () => callOperation(STDIO_CONTEXT, operation("unpublish_article"), { id: articleId }),
       (r) => (json(r).status === "draft" ? null : `status is ${String(json(r).status)}`),
     );
   } finally {
@@ -246,7 +248,7 @@ async function main(): Promise<void> {
       console.log("\n[ Clean up ]");
       await step(
         "delete_article removes the test article",
-        () => callOperation(operation("delete_article"), { id: articleId, confirm: true }),
+        () => callOperation(STDIO_CONTEXT, operation("delete_article"), { id: articleId, confirm: true }),
         succeeds,
       );
     }

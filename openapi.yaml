@@ -2,7 +2,7 @@ openapi: 3.1.0
 
 info:
   title: Writavo Content API
-  version: "1.1.0"
+  version: "1.2.0"
   summary: The CMS control plane for a Writavo Site.
   description: |
     The Writavo Content API is the programmable half of the CMS. It lets you create, edit,
@@ -92,7 +92,32 @@ info:
     Command line tools and MCP clients do not need a key pasted into them. `POST /auth/device`
     starts a sign-in that a person approves in the dashboard, and the key the client generated
     becomes an ordinary secret key for the Site they choose. These two endpoints are the only
-    ones that take no API key.
+    ones that take no API key. A key obtained this way can extend itself while it is in use
+    (`POST /auth/key/extend`) and revoke itself on sign-out (`POST /auth/key/revoke`).
+
+    AI assistants that support remote MCP servers can skip the terminal entirely: the hosted
+    server at `https://mcp.writavo.com/mcp` signs a person in with OAuth 2.1 and one browser
+    consent, and underneath runs this same device sign-in on their behalf. OAuth exists on that
+    host only. This API accepts API keys and nothing else.
+
+    ## AI agents: the switch, approvals and the call log
+
+    A key approved through a device or OAuth sign-in is an AI agent's key, and three controls
+    apply to it that apply to no other key:
+
+    - **The switch.** An owner or admin can turn AI agent access off for the whole organisation.
+      Every agent key then gets `403 AGENT_ACCESS_DISABLED` until it is turned back on; nobody
+      has to sign in again. Keys made in the dashboard are unaffected.
+    - **Approvals.** While the organisation requires them (the default), the seven operations
+      marked `x-writavo-approval` (deleting an article, category, tag, author or media asset,
+      unpublishing an article, and requesting a pipeline run) answer an agent's first attempt
+      with `428 APPROVAL_REQUIRED` and a link. A person approves or denies it in the dashboard,
+      and the agent retries the identical request with the `Writavo-Approval` header. An
+      approval is single use, lasts 24 hours, and is bound to that key and that exact request:
+      the same method, path and body.
+    - **The call log.** Every request an agent key makes is recorded (operation, outcome,
+      duration, and the MCP tool named in `Writavo-Mcp-Tool` when one is sent) and shown under
+      Settings > AI agents.
   contact:
     name: Writavo Support
     url: https://writavo.com/support
@@ -603,22 +628,32 @@ paths:
 
         Deleting an article that does not exist returns 404 rather than succeeding, so a
         double delete is visible to you rather than silent.
+
+        **When an AI agent asks.** A key approved for an AI assistant (a device or OAuth sign-in)
+        in an organisation that requires approvals gets `428 APPROVAL_REQUIRED` on the first try,
+        with `error.approval.url` for a person to approve or deny in the dashboard. Retry the same
+        request with `Writavo-Approval: <error.approval.id>` once they have. Every other key is
+        unaffected.
       x-scope: articles:write
       x-permission: articles.write
       x-entitlement: none
       x-spends-credits: false
       x-rate-limit-class: write
       x-publishable: false
+      x-writavo-approval: article.delete
       x-cross-tenant: 404
       parameters:
         - $ref: "#/components/parameters/IfMatch"
+        - $ref: "#/components/parameters/WritavoApproval"
       responses:
         "204":
           description: Deleted. No body.
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/InsufficientScope" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
         "412": { $ref: "#/components/responses/PreconditionFailed" }
+        "428": { $ref: "#/components/responses/ApprovalRequired" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "503": { $ref: "#/components/responses/Maintenance" }
         "500": { $ref: "#/components/responses/InternalError" }
@@ -721,13 +756,22 @@ paths:
         blog's ordering key, so a post that goes back up keeps its place in the archive.
 
         Nothing is deleted and the operation is fully reversible with `POST /articles/{id}/publish`.
+
+        **When an AI agent asks.** A key approved for an AI assistant (a device or OAuth sign-in)
+        in an organisation that requires approvals gets `428 APPROVAL_REQUIRED` on the first try,
+        with `error.approval.url` for a person to approve or deny in the dashboard. Retry the same
+        request with `Writavo-Approval: <error.approval.id>` once they have. Every other key is
+        unaffected.
       x-scope: articles:write
       x-permission: articles.write
       x-entitlement: none
       x-spends-credits: false
       x-rate-limit-class: write
       x-publishable: false
+      x-writavo-approval: article.unpublish
       x-cross-tenant: 404
+      parameters:
+        - $ref: "#/components/parameters/WritavoApproval"
       responses:
         "200":
           description: The article is no longer public.
@@ -743,6 +787,7 @@ paths:
         "403": { $ref: "#/components/responses/InsufficientScope" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
+        "428": { $ref: "#/components/responses/ApprovalRequired" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "503": { $ref: "#/components/responses/Maintenance" }
         "500": { $ref: "#/components/responses/InternalError" }
@@ -769,6 +814,10 @@ paths:
 
         Rescheduling is just another call to this endpoint. Calling it on an already scheduled
         article replaces the time.
+
+        A published article cannot be scheduled: that would take it off the web until the
+        scheduled time. It is refused with `409 CONFLICT` ("This article is live. Unpublish it
+        first."). Unpublish it first if that is what you mean.
       x-scope: articles:write
       x-permission: articles.write
       x-entitlement: none
@@ -822,9 +871,10 @@ paths:
       tags: [Articles]
       summary: Cancel a scheduled publish
       description: |
-        Returns the article to `status: draft` and clears `scheduled_publish_at`. The content is
-        untouched. Calling this on an article that is not scheduled is a no-op that returns the
-        current state.
+        Returns a scheduled article to `status: draft` and clears `scheduled_publish_at`. The
+        content is untouched. Calling this on an article that is not scheduled, including a
+        published one, is a no-op that returns the current state unchanged: it never takes a
+        live article down. Use `POST /articles/{id}/unpublish` for that.
       x-scope: articles:write
       x-permission: articles.write
       x-entitlement: none
@@ -1029,19 +1079,30 @@ paths:
         Articles in this category are **not** deleted. Their `category_id` becomes `null`, so
         they stay published and simply lose their category. Removing a category never removes
         content.
+
+        **When an AI agent asks.** A key approved for an AI assistant (a device or OAuth sign-in)
+        in an organisation that requires approvals gets `428 APPROVAL_REQUIRED` on the first try,
+        with `error.approval.url` for a person to approve or deny in the dashboard. Retry the same
+        request with `Writavo-Approval: <error.approval.id>` once they have. Every other key is
+        unaffected.
       x-scope: taxonomy:write
       x-permission: taxonomy.manage
       x-entitlement: none
       x-spends-credits: false
       x-rate-limit-class: write
       x-publishable: false
+      x-writavo-approval: category.delete
       x-cross-tenant: 404
+      parameters:
+        - $ref: "#/components/parameters/WritavoApproval"
       responses:
         "204":
           description: Deleted. No body.
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/InsufficientScope" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "428": { $ref: "#/components/responses/ApprovalRequired" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "503": { $ref: "#/components/responses/Maintenance" }
         "500": { $ref: "#/components/responses/InternalError" }
@@ -1215,19 +1276,30 @@ paths:
       summary: Delete a tag
       description: |
         The tag is removed from every article that carried it. No article is deleted.
+
+        **When an AI agent asks.** A key approved for an AI assistant (a device or OAuth sign-in)
+        in an organisation that requires approvals gets `428 APPROVAL_REQUIRED` on the first try,
+        with `error.approval.url` for a person to approve or deny in the dashboard. Retry the same
+        request with `Writavo-Approval: <error.approval.id>` once they have. Every other key is
+        unaffected.
       x-scope: taxonomy:write
       x-permission: taxonomy.manage
       x-entitlement: none
       x-spends-credits: false
       x-rate-limit-class: write
       x-publishable: false
+      x-writavo-approval: tag.delete
       x-cross-tenant: 404
+      parameters:
+        - $ref: "#/components/parameters/WritavoApproval"
       responses:
         "204":
           description: Deleted. No body.
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/InsufficientScope" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "428": { $ref: "#/components/responses/ApprovalRequired" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "503": { $ref: "#/components/responses/Maintenance" }
         "500": { $ref: "#/components/responses/InternalError" }
@@ -1409,19 +1481,30 @@ paths:
       description: |
         Articles by this author are **not** deleted. Their `author_id` becomes `null`, so they
         stay published and lose their byline.
+
+        **When an AI agent asks.** A key approved for an AI assistant (a device or OAuth sign-in)
+        in an organisation that requires approvals gets `428 APPROVAL_REQUIRED` on the first try,
+        with `error.approval.url` for a person to approve or deny in the dashboard. Retry the same
+        request with `Writavo-Approval: <error.approval.id>` once they have. Every other key is
+        unaffected.
       x-scope: authors:write
       x-permission: taxonomy.manage
       x-entitlement: none
       x-spends-credits: false
       x-rate-limit-class: write
       x-publishable: false
+      x-writavo-approval: author.delete
       x-cross-tenant: 404
+      parameters:
+        - $ref: "#/components/parameters/WritavoApproval"
       responses:
         "204":
           description: Deleted. No body.
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/InsufficientScope" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "428": { $ref: "#/components/responses/ApprovalRequired" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "503": { $ref: "#/components/responses/Maintenance" }
         "500": { $ref: "#/components/responses/InternalError" }
@@ -1742,19 +1825,30 @@ paths:
         its `featured_image_url`, that reference becomes a broken image on your live blog. Check
         before you delete: `GET /articles?fields=id,featured_image_url` finds featured uses, and
         in body content the URL is plain text you can search for.
+
+        **When an AI agent asks.** A key approved for an AI assistant (a device or OAuth sign-in)
+        in an organisation that requires approvals gets `428 APPROVAL_REQUIRED` on the first try,
+        with `error.approval.url` for a person to approve or deny in the dashboard. Retry the same
+        request with `Writavo-Approval: <error.approval.id>` once they have. Every other key is
+        unaffected.
       x-scope: media:write
       x-permission: media.manage
       x-entitlement: none
       x-spends-credits: false
       x-rate-limit-class: write
       x-publishable: false
+      x-writavo-approval: media.delete
       x-cross-tenant: 404
+      parameters:
+        - $ref: "#/components/parameters/WritavoApproval"
       responses:
         "204":
           description: Deleted. No body.
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/InsufficientScope" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "428": { $ref: "#/components/responses/ApprovalRequired" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "503": { $ref: "#/components/responses/Maintenance" }
         "500": { $ref: "#/components/responses/InternalError" }
@@ -1843,14 +1937,22 @@ paths:
 
         `Idempotency-Key` is required. Two identical requests within the retention window
         produce one run, which is what stops a retried network timeout from spending twice.
+
+        **When an AI agent asks.** A key approved for an AI assistant (a device or OAuth sign-in)
+        in an organisation that requires approvals gets `428 APPROVAL_REQUIRED` on the first try,
+        with `error.approval.url` for a person to approve or deny in the dashboard. Retry the same
+        request with `Writavo-Approval: <error.approval.id>` once they have. Every other key is
+        unaffected.
       x-scope: pipeline:run
       x-permission: pipeline.run
       x-entitlement: ai.article_generation
       x-spends-credits: true
       x-rate-limit-class: pipeline
       x-publishable: false
+      x-writavo-approval: pipeline.run
       parameters:
         - $ref: "#/components/parameters/IdempotencyKeyRequired"
+        - $ref: "#/components/parameters/WritavoApproval"
       requestBody:
         required: false
         content:
@@ -1910,6 +2012,7 @@ paths:
         "403": { $ref: "#/components/responses/InsufficientScope" }
         "409": { $ref: "#/components/responses/Conflict" }
         "422": { $ref: "#/components/responses/ValidationFailed" }
+        "428": { $ref: "#/components/responses/ApprovalRequired" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "503": { $ref: "#/components/responses/Maintenance" }
         "500": { $ref: "#/components/responses/InternalError" }
@@ -2662,6 +2765,10 @@ paths:
         The key is created for the approving person, on the Site they choose, with the scopes you
         asked for that they are allowed to grant, and expires after 90 days. It appears under
         Settings > API keys, where it can be revoked like any other.
+
+        `flow: "oauth"` is reserved for Writavo's own hosted MCP server, which runs this sign-in
+        on a person's behalf behind its OAuth consent. Sent by anything else it is refused with
+        `403 FORBIDDEN`: leave `flow` out.
       security: []
       x-scope: none
       x-permission: none
@@ -2669,6 +2776,8 @@ paths:
       x-spends-credits: false
       x-rate-limit-class: auth
       x-publishable: false
+      parameters:
+        - $ref: "#/components/parameters/McpWorker"
       requestBody:
         required: true
         content:
@@ -2678,6 +2787,22 @@ paths:
               additionalProperties: false
               required: [client_name, key_hash, key_prefix, scopes]
               properties:
+                flow:
+                  type: string
+                  enum: [device, oauth]
+                  default: device
+                  description: |
+                    `device` (the default) for a command line tool or a local MCP client. `oauth`
+                    only from Writavo's hosted MCP server, with its `X-Writavo-Mcp-Worker` header;
+                    from anything else it is `403 FORBIDDEN`.
+                redirect_host:
+                  type: [string, "null"]
+                  minLength: 1
+                  maxLength: 253
+                  description: |
+                    `oauth` only. The host of the AI client's registered redirect URI, shown
+                    prominently on the consent screen so the person can recognise where access is
+                    going. Sent with `flow: device` it is `422 VALIDATION_FAILED`.
                 client_name:
                   type: string
                   minLength: 1
@@ -2735,6 +2860,7 @@ paths:
                             const: 5
                             description: Seconds to wait between polls.
         "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "409": { $ref: "#/components/responses/Conflict" }
         "422": { $ref: "#/components/responses/ValidationFailed" }
         "429": { $ref: "#/components/responses/RateLimited" }
@@ -2807,8 +2933,118 @@ paths:
                             properties:
                               id: { type: string, format: uuid }
                               name: { type: string }
+                          callback_nonce_hash:
+                            type: string
+                            pattern: "^[0-9a-f]{64}$"
+                            description: |
+                              Present only for an OAuth sign-in (Writavo's hosted MCP server), on
+                              `approved`: the SHA-256, as lower-case hex, of the one-time nonce the
+                              dashboard put on the approving browser's callback URL. The server
+                              completes the sign-in only for the browser whose nonce matches. A
+                              device sign-in never carries it.
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /auth/key/extend:
+    post:
+      operationId: extendApiKey
+      tags: [API keys]
+      summary: Extend the calling key's expiry
+      description: |
+        Pushes the expiry of the key you are calling with further out, so a sign-in that is in
+        regular use does not stop working after 90 days. Acts on the calling key only: there is
+        no id to send.
+
+        Only a key obtained through a device or OAuth sign-in can extend itself, and only while
+        it is live, its creator can still manage API keys on the Site, and the organisation has
+        not turned AI agent access off. Anything else is `403 FORBIDDEN` with the reason. A key
+        made in the dashboard keeps the expiry the person chose.
+
+        Nothing changes until the key is within 30 days of expiry; before that you get
+        `extended: false` and the current `expires_at`, so it is safe to call on every start. An
+        extension moves the expiry to 90 days from now, but never past 365 days from the key's
+        creation (`extended: false`, `reason: max_lifetime`), after which a person signs in
+        again. Needs no scope; a publishable key gets `403 INSUFFICIENT_SCOPE`.
+      x-scope: none
+      x-permission: none
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      responses:
+        "200":
+          description: The key's expiry, extended or not.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [key, extended]
+                        properties:
+                          key:
+                            type: object
+                            required: [id, expires_at]
+                            properties:
+                              id: { type: string, format: uuid }
+                              expires_at: { type: [string, "null"], format: date-time }
+                          extended:
+                            type: boolean
+                            description: True when this call moved `expires_at`.
+                          reason:
+                            type: string
+                            enum: [max_lifetime]
+                            description: Present when the key is due and still could not be extended.
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /auth/key/revoke:
+    post:
+      operationId: revokeCurrentApiKey
+      tags: [API keys]
+      summary: Revoke the calling key
+      description: |
+        Revokes the key you are calling with, immediately. It is the last request that key makes;
+        every later one returns `401 API_KEY_REVOKED`. This is what signing out of a command line
+        tool or an MCP client should call, so the credential ends on the server rather than only
+        being forgotten on the machine.
+
+        Any secret key may revoke itself, whatever its scopes. Acts on the calling key only:
+        there is no id to send. To revoke a different key use `DELETE /keys/{id}`.
+      x-scope: none
+      x-permission: none
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      responses:
+        "200":
+          description: Revoked.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [revoked]
+                        properties:
+                          revoked: { type: boolean, const: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "422": { $ref: "#/components/responses/ValidationFailed" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "503": { $ref: "#/components/responses/Maintenance" }
@@ -2894,6 +3130,34 @@ components:
         article cannot silently overwrite each other.
 
         Optional in v1 for compatibility. Omitting it means last write wins. Send it.
+      schema: { type: string }
+    WritavoApproval:
+      name: Writavo-Approval
+      in: header
+      required: false
+      description: |
+        The `error.approval.id` from a `428 APPROVAL_REQUIRED`, sent on the retry once a person
+        has approved it. Only meaningful for a key approved for an AI agent; every other caller
+        can leave it out. It is single use and bound to the key and to the exact request that
+        asked for it (method, path and body): anything else is `409 APPROVAL_INVALID`.
+      schema: { type: string, format: uuid }
+    McpTool:
+      name: Writavo-Mcp-Tool
+      in: header
+      required: false
+      description: |
+        The MCP tool that made this call, such as `delete_article`. Accepted on every operation
+        and recorded in the organisation's AI agent call log for requests made with an agent's
+        key. A label only: it never changes what a request is allowed to do, and a value that is
+        not a lower-case tool name is logged as unknown rather than refused.
+      schema: { type: string, pattern: "^[a-z][a-z0-9_]{0,63}$" }
+    McpWorker:
+      name: X-Writavo-Mcp-Worker
+      in: header
+      required: false
+      description: |
+        Sent only by Writavo's hosted MCP server, and required with `flow: "oauth"`. You do not
+        have one and do not need one: leave it out and leave `flow` out.
       schema: { type: string }
     ArticleId:
       name: id
@@ -2989,10 +3253,33 @@ components:
               description: |
                 Present on `VALIDATION_FAILED`. Maps each offending field to a message you can
                 show next to the input.
+            approval:
+              $ref: "#/components/schemas/ApprovalRef"
             request_id:
               type: string
               description: Quote this when contacting support. It identifies the exact request in our logs.
       description: Every failed response has this shape.
+
+    ApprovalRef:
+      type: object
+      required: [id, url, expires_at, status]
+      description: |
+        Present on `428 APPROVAL_REQUIRED` and `428 APPROVAL_PENDING`. Show `url` to the person
+        who can approve the action; once they have, repeat the identical request with
+        `Writavo-Approval: <id>`.
+      properties:
+        id: { type: string, format: uuid }
+        url:
+          type: string
+          format: uri
+          description: The dashboard page where a person approves or denies this request.
+        expires_at:
+          type: [string, "null"]
+          format: date-time
+          description: After this the approval can no longer be used. Null only if it could not be read.
+        status:
+          type: string
+          enum: [pending]
 
     ErrorCode:
       type: string
@@ -3006,7 +3293,13 @@ components:
         | `INVALID_API_KEY` | 401 | No key, an unparseable key, or one that does not exist. |
         | `API_KEY_REVOKED` | 401 | The key was revoked or rotated past its grace window. |
         | `API_KEY_EXPIRED` | 401 | The key passed its `expires_at`. |
-        | `INSUFFICIENT_SCOPE` | 403 | The key is valid but lacks the scope this operation needs. The only 403 in the API. |
+        | `INSUFFICIENT_SCOPE` | 403 | The key is valid but lacks the scope this operation needs. |
+        | `FORBIDDEN` | 403 | Refused for a reason no scope would change: a key that may not extend itself, or an OAuth sign-in not started by Writavo's MCP server. The message says which. |
+        | `AGENT_ACCESS_DISABLED` | 403 | The key belongs to an AI agent and the organisation has turned AI agent access off. |
+        | `APPROVAL_REQUIRED` | 428 | An AI agent asked for an action a person must approve. `error.approval` has the link and the id to retry with. |
+        | `APPROVAL_PENDING` | 428 | The approval you sent has not been decided yet. Retry once it has. |
+        | `APPROVAL_DENIED` | 403 | A person denied the action. |
+        | `APPROVAL_INVALID` | 409 | The approval you sent cannot be used for this request: expired, already used, for a different request, or unknown. |
         | `NOT_ENTITLED` | 402 | Your plan does not include this AI pipeline capability. Upgrade. CMS capabilities are on every plan and never return this. |
         | `INSUFFICIENT_CREDITS` | 402 | The organisation cannot afford the next unit of work. Top up. |
         | `SPEND_CAP_REACHED` | 402 | This Site hit its own monthly ceiling. Raise it or wait. |
@@ -3041,6 +3334,12 @@ components:
         - RATE_LIMIT_EXCEEDED
         - MAINTENANCE
         - INTERNAL_ERROR
+        - FORBIDDEN
+        - AGENT_ACCESS_DISABLED
+        - APPROVAL_REQUIRED
+        - APPROVAL_PENDING
+        - APPROVAL_DENIED
+        - APPROVAL_INVALID
 
     Page:
       type: object
@@ -3745,6 +4044,18 @@ components:
         expires_at: { type: [string, "null"], format: date-time }
         revoked_at: { type: [string, "null"], format: date-time, readOnly: true }
         created_at: { type: string, format: date-time, readOnly: true }
+        origin:
+          type: string
+          enum: [dashboard, api, device, oauth]
+          readOnly: true
+          description: |
+            How the key came to exist: made in the dashboard, made through this API, or approved
+            for a tool through a device sign-in or an AI assistant's OAuth sign-in. `device` and
+            `oauth` keys are AI agent keys, subject to the organisation's agent controls.
+        client_name:
+          type: [string, "null"]
+          readOnly: true
+          description: The client name a person approved, for a `device` or `oauth` key. Null otherwise.
 
     Webhook:
       type: object
@@ -3841,9 +4152,31 @@ components:
         `INSUFFICIENT_SCOPE`. The key is valid but does not carry the scope this operation
         requires, or its creator's permissions no longer cover it.
 
-        This is the **only** 403 in the API. In particular it is never returned for an object
-        belonging to another Site: that case is always 404, so this response never reveals that
-        something exists.
+        It is never returned for an object belonging to another Site: that case is always 404, so
+        this response never reveals that something exists.
+
+        For a key an AI agent holds, a 403 may also be `AGENT_ACCESS_DISABLED` (the organisation
+        turned agent access off) or `APPROVAL_DENIED` (a person denied this action). Neither is
+        about scope, and neither reveals anything about another Site.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+    Forbidden:
+      description: |
+        `FORBIDDEN`, or `INSUFFICIENT_SCOPE` for a publishable key. Refused for a reason that no
+        scope would change; the message says which and what to do instead.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+    ApprovalRequired:
+      description: |
+        `APPROVAL_REQUIRED` or `APPROVAL_PENDING`. Only ever returned to a key an AI agent holds,
+        in an organisation that requires approvals. Nothing has happened yet. Show
+        `error.approval.url` to a person; once they approve, repeat the identical request with
+        `Writavo-Approval: <error.approval.id>`. Do not change the body or the path: the approval
+        is bound to the exact request, and a different one is `409 APPROVAL_INVALID`.
       content:
         application/json:
           schema: { $ref: "#/components/schemas/ErrorEnvelope" }
@@ -3866,6 +4199,10 @@ components:
         The request is valid but collides with the current state: a slug is taken, an
         idempotency key was reused with a different body or is still in flight, or the object
         moved while you were working on it. Read `code` to tell which, then re-read and retry.
+
+        On an approval-gated operation it may also be `APPROVAL_INVALID`: the `Writavo-Approval`
+        you sent is expired, used, for a different request or unknown. Retry without it to ask
+        for a new approval.
       content:
         application/json:
           schema: { $ref: "#/components/schemas/ErrorEnvelope" }

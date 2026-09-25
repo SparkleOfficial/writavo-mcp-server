@@ -1,23 +1,30 @@
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
 import { API_BASE_URL as SPEC_BASE_URL } from "./generated/operations.js";
 import { readCredentials, type StoredCredentials } from "./credentials.js";
+import { MAX_RETRY_WAIT_MS, REQUEST_TIMEOUT_MS } from "./core/constants.js";
+import { rememberSecret } from "./core/redact.js";
+import { NO_API_KEY_MESSAGE } from "./core/messages.js";
+import { VERSION } from "./core/version.js";
 
 /**
- * Server version, read from package.json at runtime so it can never drift from what npm
- * published. package.json sits one level up from this file in the source tree (src/), in the
- * compiled output (dist/) and inside the installed package, so "../package.json" resolves in
- * every case.
+ * THE STDIO HOST'S CONFIGURATION. This module reads the environment and the saved sign-in, so it
+ * belongs to the npm server alone; nothing under src/core imports it. The hosted server gets the
+ * same values from CoreOptions instead.
  */
-function readVersion(): string {
-  try {
-    const pkgPath = join(dirname(fileURLToPath(import.meta.url)), "..", "package.json");
-    return String(JSON.parse(readFileSync(pkgPath, "utf8")).version ?? "0.0.0");
-  } catch {
-    return "0.0.0";
-  }
-}
+
+export { VERSION };
+export { redact, rememberSecret } from "./core/redact.js";
+export { NO_API_KEY_MESSAGE } from "./core/messages.js";
+export {
+  BILLING_URL,
+  DASHBOARD_URL,
+  DEVICE_URL,
+  DOCS_URL,
+  KEYS_URL,
+  SIGNUP_URL,
+} from "./core/constants.js";
+
+/** What this server calls itself on every request. */
+export const USER_AGENT = `writavo-mcp-server/${VERSION}`;
 
 /**
  * The base URL is the one in openapi.yaml and nowhere else.
@@ -45,24 +52,14 @@ function resolveBaseUrl(): { url: string; overridden: boolean; rejected: string 
 
 const base = resolveBaseUrl();
 
-export const VERSION = readVersion();
-
 export const CONFIG = {
   apiBaseUrl: base.url,
   /** True only when the base URL points at loopback, which is the test harness. */
   baseUrlOverridden: base.overridden,
   rejectedBaseUrl: base.rejected,
-  /** One retry, honouring Retry-After, capped so a tool call cannot hang a client for minutes. */
-  maxRetryWaitMs: 30_000,
-  requestTimeoutMs: 60_000,
+  maxRetryWaitMs: MAX_RETRY_WAIT_MS,
+  requestTimeoutMs: REQUEST_TIMEOUT_MS,
 };
-
-export const DASHBOARD_URL = "https://app.writavo.com";
-export const DOCS_URL = "https://writavo.com/docs";
-export const KEYS_URL = `${DASHBOARD_URL}/settings/api-keys`;
-export const BILLING_URL = `${DASHBOARD_URL}/billing`;
-export const SIGNUP_URL = `${DASHBOARD_URL}/signup`;
-export const DEVICE_URL = `${DASHBOARD_URL}/device`;
 
 // ---------------------------------------------------------------------------
 // The active key
@@ -98,9 +95,6 @@ const ENV_KEY = (process.env.WRITAVO_API_KEY ?? "").trim();
 
 /** Why there is no key, when the reason is worth telling someone. */
 let inactiveReason: string | null = null;
-
-/** Every secret this process has held, so the redactor can mask one after it stops being active. */
-const secretsSeen = new Set<string>();
 
 function identityOf(credentials: StoredCredentials, path: string | null): LoginIdentity {
   return {
@@ -187,9 +181,12 @@ export function clearKey(): void {
   inactiveReason = null;
 }
 
-/** Register a secret with the redactor before it is ever active, as `login` does with a pending one. */
-export function rememberSecret(secret: string): void {
-  if (secret.length >= 8) secretsSeen.add(secret);
+/**
+ * Keep a saved sign-in's identity in step after its expiry moved (the key was extended). Only the
+ * login key's identity changes; the key itself does not.
+ */
+export function updateLoginExpiry(expiresAt: string | null): void {
+  if (active.source === "login" && active.identity) active.identity = { ...active.identity, expiresAt };
 }
 
 export type KeyKind = "secret" | "publishable" | "unknown";
@@ -204,53 +201,6 @@ export function keyKind(): KeyKind {
 export function hasApiKey(): boolean {
   return apiKey().length > 0;
 }
-
-/**
- * NON-NEGOTIABLE 2: a raw key must never reach stdout, stderr or an error message. Every string
- * this server emits passes through here, so a key that ends up somewhere by accident, in a URL an
- * API echoed back or in a stack trace, is masked on the way out rather than relied upon never to
- * arrive.
- */
-export function redact(text: string): string {
-  // The negative lookahead is the same placeholder convention scripts/check-docs-drift.mjs uses
-  // to tell a documented example from a real credential. Without it the instructions for someone
-  // who has no key would have their own placeholder masked out.
-  let out = text.replace(
-    /wv_(sk|pub)_(?!your_|YOUR_|EXAMPLE|REDACTED)[A-Za-z0-9_-]{8,}/g,
-    (_m, kind: string) => `wv_${kind}_REDACTED`,
-  );
-  for (const secret of secretsSeen) {
-    out = out.split(secret).join("[redacted key]");
-  }
-  return out;
-}
-
-export const NO_API_KEY_MESSAGE = `No Writavo API key is configured, so this tool cannot reach your Site.
-
-The quickest fix is to call the login tool. It returns a link for the user to open in their
-browser, where they sign in (or create an account), pick a Site and approve. This server then
-starts using the new key by itself: no key to copy and no restart.
-
-Or configure a key by hand:
-
-1. Sign up or sign in at ${SIGNUP_URL}
-2. Create a secret key at ${KEYS_URL} and give it the scopes you want the assistant to have
-3. Put the key in your MCP client config and restart the client:
-
-   {
-     "mcpServers": {
-       "writavo": {
-         "command": "npx",
-         "args": ["-y", "@writavo/mcp-server"],
-         "env": { "WRITAVO_API_KEY": "wv_sk_your_key_here" }
-       }
-     }
-   }
-
-A secret key (wv_sk_) can read and write content. A publishable key (wv_pub_) can only read
-published content, so it cannot create or publish anything.
-
-The get_api_docs tool works without a key, so you can read the whole API reference first.`;
 
 /** The no-key reply, led by the reason when there is one worth knowing (an expired sign-in). */
 export function noKeyMessage(): string {

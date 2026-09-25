@@ -1,7 +1,8 @@
 import { apiRequest } from "../api/client.js";
 import { ERROR_CATALOG } from "../generated/errors.js";
 import { referenceSection } from "../generated/reference.js";
-import { hasApiKey, redact } from "../config.js";
+import { hasKey, type ToolContext } from "../core/context.js";
+import { redact } from "../core/redact.js";
 import { importFormatDocument } from "../import/format.js";
 
 export interface ResourceDefinition {
@@ -70,15 +71,17 @@ export const contentTypesResource: ResourceDefinition = {
   mimeType: "application/json",
 };
 
-export async function readContentTypes(): Promise<ResourceContents> {
-  if (!hasApiKey()) {
+export async function readContentTypes(ctx: ToolContext): Promise<ResourceContents> {
+  if (!hasKey(ctx)) {
     return contents(
       contentTypesResource,
       JSON.stringify(
         {
           available: false,
           reason:
-            "No API key is configured, and content types are per Site. Call the login tool, or configure WRITAVO_API_KEY, to read the real list.",
+            ctx.host === "stdio"
+              ? "No API key is configured, and content types are per Site. Call the login tool, or configure WRITAVO_API_KEY, to read the real list."
+              : "This connection has no Writavo credentials, and content types are per Site. Reconnect Writavo in the assistant to read the real list.",
           reference: "writavo://api-reference",
         },
         null,
@@ -87,7 +90,7 @@ export async function readContentTypes(): Promise<ResourceContents> {
     );
   }
   try {
-    const response = await apiRequest<{ items: unknown[] }>({ method: "GET", path: "/content-types" });
+    const response = await apiRequest<{ items: unknown[] }>(ctx, { method: "GET", path: "/content-types" });
     return contents(contentTypesResource, JSON.stringify(response.data, null, 2));
   } catch (err) {
     return contents(

@@ -19,20 +19,30 @@
  *  13  the plan purchase link
  *  14  the importer: validation, dry run, apply, re-run as a no-op, update, and content kept
  *      verbatim except for re-hosted image URLs
+ *  15  MCP-2: the runtime-agnostic core as the hosted server mounts it (the tool list minus the
+ *      sign-in tools, annotations on every tool, inline import and base64 upload), approvals
+ *      (approval_id on gated tools, a 428 turned into an instruction, the refusal codes), the
+ *      Writavo-Mcp-Tool header, logout revoking the key, the key auto-extension, the generator's
+ *      handling of x-writavo-approval and of the host-owned /auth/key/* routes, and the core's
+ *      import graph staying free of the filesystem and the environment
  *
  * The live round trip is scripts/integration.ts, which needs a real key and a deployed API.
  *
  *   pnpm --filter @writavo/mcp-server smoke
  */
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import type { AddressInfo } from "node:net";
+
+// upload_media and import_content fetch images from URLs the caller names, which is exactly what
+// openWorldHint describes. Every other tool only ever talks to the Writavo API.
+const OPEN_WORLD_TOOLS = new Set(["upload_media", "import_content"]);
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = join(HERE, "..");
@@ -65,6 +75,10 @@ interface StubRequest {
   hasAuth: boolean;
   authorization: string | null;
   idempotencyKey: string | null;
+  approval: string | null;
+  mcpTool: string | null;
+  worker: string | null;
+  userAgent: string | null;
   body: string;
 }
 
@@ -87,6 +101,10 @@ class StubApi {
         hasAuth: Boolean(req.headers.authorization),
         authorization: req.headers.authorization ?? null,
         idempotencyKey: (req.headers["idempotency-key"] as string | undefined) ?? null,
+        approval: (req.headers["writavo-approval"] as string | undefined) ?? null,
+        mcpTool: (req.headers["writavo-mcp-tool"] as string | undefined) ?? null,
+        worker: (req.headers["x-writavo-mcp-worker"] as string | undefined) ?? null,
+        userAgent: (req.headers["user-agent"] as string | undefined) ?? null,
         body,
       };
       this.requests.push(record);
@@ -206,7 +224,12 @@ async function clientProbe(): Promise<void> {
 
     send({ jsonrpc: "2.0", id: 2, method: "tools/list" });
     const listed = await waitFor(2);
-    const tools = (listed.result?.tools ?? []) as { name: string; description: string; inputSchema: unknown }[];
+    const tools = (listed.result?.tools ?? []) as {
+      name: string;
+      description: string;
+      inputSchema: { properties?: Record<string, unknown> };
+      annotations?: Record<string, unknown>;
+    }[];
     const { OPERATIONS } = await import("../src/generated/operations.js");
     const { LOCAL_TOOL_NAMES } = await import("../src/server.js");
     check(
@@ -223,6 +246,18 @@ async function clientProbe(): Promise<void> {
       "every tool carries a description and an input schema",
       tools.every((t) => t.description && t.description.length > 40 && t.inputSchema),
       tools.filter((t) => !t.description || t.description.length <= 40).map((t) => t.name).join(", "),
+    );
+
+    check(
+      "every stdio tool carries annotations",
+      tools.every((t) => typeof t.annotations?.readOnlyHint === "boolean" && t.annotations?.openWorldHint === OPEN_WORLD_TOOLS.has(t.name)),
+      tools.filter((t) => !t.annotations).map((t) => t.name).join(", "),
+    );
+    const props = (name: string) => Object.keys(tools.find((t) => t.name === name)?.inputSchema?.properties ?? {});
+    check(
+      "the stdio import_content and upload_media also take a local path",
+      ["data", "path"].every((p) => props("import_content").includes(p)) && ["path", "url", "base64"].every((p) => props("upload_media").includes(p)),
+      `${props("import_content").join(",")} | ${props("upload_media").join(",")}`,
     );
 
     send({ jsonrpc: "2.0", id: 3, method: "resources/list" });
@@ -330,13 +365,17 @@ async function main(): Promise<void> {
   const { ERROR_CATALOG } = await import("../src/generated/errors.js");
   const { REFERENCE_SECTIONS } = await import("../src/generated/reference.js");
   const { callOperation } = await import("../src/tools/call.js");
+  const { STDIO_CONTEXT } = await import("../src/stdio/context.js");
+  const { IMPORT_FILES, MEDIA_FILES } = await import("../src/stdio/files.js");
   const { handleGetApiDocs } = await import("../src/tools/api-docs.js");
   const { handleUploadMedia } = await import("../src/tools/upload-media.js");
   const { inputShapeFor } = await import("../src/tools/schema.js");
-  const { keySource, hasApiKey } = await import("../src/config.js");
+  const { keySource, hasApiKey, loginIdentity } = await import("../src/config.js");
   const { LOGIN, LOGIN_STATUS, LOGOUT, handleLogin, handleLoginStatus, handleLogout } = await import("../src/tools/login.js");
   const { START_PLAN_PURCHASE, handleStartPlanPurchase } = await import("../src/tools/plan-purchase.js");
-  const { IMPORT_CONTENT, handleImportContent } = await import("../src/tools/import-content.js");
+  const { IMPORT_CONTENT, handleImportContent, importContentTool } = await import("../src/tools/import-content.js");
+  const { UPLOAD_MEDIA, uploadMediaTool } = await import("../src/tools/upload-media.js");
+  const { NOT_SIGNED_IN_REMOTE } = await import("../src/core/messages.js");
   const { DEFAULT_SCOPES } = await import("../src/auth/device.js");
   const { credentialsPath, deleteCredentials, readCredentials, writeCredentials } = await import("../src/credentials.js");
   const { IMPORT_FORMAT_GUIDE, IMPORT_SAMPLE, ImportDocumentSchema, importFormatJsonSchema } = await import("../src/import/format.js");
@@ -390,7 +429,9 @@ async function main(): Promise<void> {
     ...ERROR_CATALOG.flatMap((e) => [e.meaning, e.action, ...e.links.map((l) => l.label)]),
     ...REFERENCE_SECTIONS.map((s) => s.body),
     NO_API_KEY_MESSAGE,
-    ...[LOGIN, LOGIN_STATUS, LOGOUT, START_PLAN_PURCHASE, IMPORT_CONTENT].map((t) => t.description),
+    ...[LOGIN, LOGIN_STATUS, LOGOUT, START_PLAN_PURCHASE, IMPORT_CONTENT, importContentTool(IMPORT_FILES), UPLOAD_MEDIA, uploadMediaTool(MEDIA_FILES)].map((t) => t.description),
+    NOT_SIGNED_IN_REMOTE,
+    migrateContentPrompt({}, "remote").messages[0]!.content.text,
     IMPORT_FORMAT_GUIDE,
     migrateContentPrompt({}).messages[0]!.content.text,
   ];
@@ -401,7 +442,7 @@ async function main(): Promise<void> {
   console.log("\n[ 4. The no-key experience ]");
   clearKey();
   stub.reset();
-  const noKey = await callOperation(operation("list_articles"), {});
+  const noKey = await callOperation(STDIO_CONTEXT, operation("list_articles"), {});
   check(
     "a key-requiring tool explains how to get a key",
     noKey.isError === true &&
@@ -413,14 +454,14 @@ async function main(): Promise<void> {
   check("get_api_docs still works", !handleGetApiDocs({ section: "authentication" }).isError);
   check(
     "upload_media explains the same thing",
-    (await handleUploadMedia({ file_path: "/tmp/x.png" })).isError === true,
+    (await handleUploadMedia(STDIO_CONTEXT, { path: "/tmp/x.png" }, MEDIA_FILES)).isError === true,
   );
 
   // -- 5. the scope probe ----------------------------------------------------
   console.log("\n[ 5. The scope probe ]");
   activateKey(PUBLISHABLE_KEY, "env");
   stub.reset();
-  const scoped = await callOperation(operation("publish_article"), { id: "00000000-0000-4000-8000-000000000000", confirm: true });
+  const scoped = await callOperation(STDIO_CONTEXT, operation("publish_article"), { id: "00000000-0000-4000-8000-000000000000", confirm: true });
   const scopedBody = bodyOf(scoped);
   check(
     "a publishable key naming the scope it lacks, not a raw 401 or 403",
@@ -439,7 +480,7 @@ async function main(): Promise<void> {
     status: 403,
     body: { ok: false, error: { code: "INSUFFICIENT_SCOPE", message: "This key does not carry the scope this operation needs." } },
   });
-  const apiScope = await callOperation(operation("list_media"), {});
+  const apiScope = await callOperation(STDIO_CONTEXT, operation("list_media"), {});
   check(
     "a 403 from the API maps to the same actionable answer",
     apiScope.isError === true &&
@@ -458,7 +499,7 @@ async function main(): Promise<void> {
       error: { code: "INSUFFICIENT_CREDITS", message: "This organisation cannot afford the next unit of work.", request_id: "req_smoke" },
     },
   });
-  const credits = await callOperation(operation("trigger_pipeline_run"), { confirm: true });
+  const credits = await callOperation(STDIO_CONTEXT, operation("trigger_pipeline_run"), { confirm: true });
   const creditsBody = bodyOf(credits);
   check(
     "an exhausted balance produces an actionable message with a billing link",
@@ -475,7 +516,7 @@ async function main(): Promise<void> {
     status: 402,
     body: { ok: false, error: { code: "NOT_ENTITLED", message: "This plan does not include AI generation." } },
   });
-  const entitlement = await callOperation(operation("trigger_pipeline_run"), { confirm: true });
+  const entitlement = await callOperation(STDIO_CONTEXT, operation("trigger_pipeline_run"), { confirm: true });
   check(
     "a plan failure names the plan feature",
     bodyOf(entitlement).includes("ai.article_generation") && bodyOf(entitlement).includes("app.writavo.com/billing"),
@@ -488,7 +529,7 @@ async function main(): Promise<void> {
   for (const tool of ["publish_article", "delete_article", "trigger_pipeline_run", "schedule_article"]) {
     stub.reset();
     const op = operation(tool);
-    const unconfirmed = await callOperation(op, { id: "00000000-0000-4000-8000-000000000000", scheduled_publish_at: "2030-01-01T00:00:00Z" });
+    const unconfirmed = await callOperation(STDIO_CONTEXT, op, { id: "00000000-0000-4000-8000-000000000000", scheduled_publish_at: "2030-01-01T00:00:00Z" });
     const body = bodyOf(unconfirmed);
     check(
       `${tool} does nothing without confirm: true`,
@@ -497,7 +538,7 @@ async function main(): Promise<void> {
     );
   }
   stub.reset();
-  const confirmed = await callOperation(operation("publish_article"), { id: "00000000-0000-4000-8000-000000000000", confirm: true });
+  const confirmed = await callOperation(STDIO_CONTEXT, operation("publish_article"), { id: "00000000-0000-4000-8000-000000000000", confirm: true });
   check(
     "and it does act once confirmed",
     stub.requests.length === 1 && confirmed.isError !== true,
@@ -514,10 +555,10 @@ async function main(): Promise<void> {
     status: 500,
     body: { ok: false, error: { code: "INTERNAL_ERROR", message: `Upstream rejected key ${SECRET_KEY} at gateway.` } },
   });
-  transcript.push(bodyOf(await callOperation(operation("list_articles"), {})));
-  transcript.push(bodyOf(await callOperation(operation("get_article"), { id: "00000000-0000-4000-8000-000000000000" })));
+  transcript.push(bodyOf(await callOperation(STDIO_CONTEXT, operation("list_articles"), {})));
+  transcript.push(bodyOf(await callOperation(STDIO_CONTEXT, operation("get_article"), { id: "00000000-0000-4000-8000-000000000000" })));
   stub.respond = () => ({ status: 200, body: { ok: true, data: { echo: SECRET_KEY } } });
-  transcript.push(bodyOf(await callOperation(operation("get_usage"), {})));
+  transcript.push(bodyOf(await callOperation(STDIO_CONTEXT, operation("get_usage"), {})));
   transcript.push(redact(`a stray log line with ${SECRET_KEY} in it`));
 
   check(
@@ -615,6 +656,7 @@ async function main(): Promise<void> {
     replays: new Map<string, { status: number; body: unknown }>(),
   };
   const device = { mode: "approve" as "approve" | "deny", polls: 0, started: [] as Row[] };
+  const keyRoutes = { revoke: "ok" as "ok" | "fail", extendTo: null as string | null };
   const ok = (data: unknown, status = 200) => ({ status, body: { ok: true, data } });
   const fail = (status: number, code: string, message: string) => ({ status, body: { ok: false, error: { code, message } } });
   const project = (row: Row, fields: string | null): Row =>
@@ -655,6 +697,14 @@ async function main(): Promise<void> {
         },
         website: { id: "00000000-0000-4000-8000-0000000051e1", name: "Smoke Site" },
       });
+    }
+    if (path === "/auth/key/revoke" && req.method === "POST") {
+      return keyRoutes.revoke === "ok" ? ok({ revoked: true }) : fail(503, "MAINTENANCE", "Down for a moment.");
+    }
+    if (path === "/auth/key/extend" && req.method === "POST") {
+      return keyRoutes.extendTo
+        ? ok({ key: { id: "00000000-0000-4000-8000-0000000000aa", expires_at: keyRoutes.extendTo }, extended: true })
+        : ok({ key: { id: "00000000-0000-4000-8000-0000000000aa", expires_at: null }, extended: false, reason: "max_lifetime" });
     }
     if (req.method === "GET" && path === "/site") return ok({ id: "00000000-0000-4000-8000-0000000051e1", name: "Smoke Site" });
     if (req.method === "GET" && path === "/usage") {
@@ -777,7 +827,11 @@ async function main(): Promise<void> {
     "it asks for the default scopes, never keys or webhooks",
     JSON.stringify(startBody.scopes) === JSON.stringify(DEFAULT_SCOPES) && !JSON.stringify(startBody.scopes).match(/keys:|webhooks:/),
   );
-  check("it names the client", startBody.client_name === "Writavo MCP server");
+  check(
+    "with no handshake name yet, the key is named for an AI assistant on this machine",
+    startBody.client_name === "AI assistant (local MCP)" && typeof startBody.client_host === "string" && String(startBody.client_host).length > 0,
+    JSON.stringify({ client_name: startBody.client_name, client_host: startBody.client_host }),
+  );
   check("nothing is saved or in use while it is pending", !existsSync(credentialsPath()) && !hasApiKey());
 
   const approved = await waitUntil(() => bodyOf(handleLoginStatus()).startsWith("Approved"));
@@ -794,7 +848,7 @@ async function main(): Promise<void> {
   check("the saved file names the Site", (savedLogin.website as Row | undefined)?.name === "Smoke Site");
   check("the key is in use at once, with no restart", keySource() === "login" && hasApiKey());
   stub.reset();
-  leakTranscript.push(bodyOf(await callOperation(operation("get_site_info"), {})));
+  leakTranscript.push(bodyOf(await callOperation(STDIO_CONTEXT, operation("get_site_info"), {})));
   check("the next tool call sends the new key", stub.requests[0]?.authorization === `Bearer ${String(savedLogin.api_key)}`);
 
   stub.reset();
@@ -806,14 +860,31 @@ async function main(): Promise<void> {
     again.slice(0, 200),
   );
 
-  const loggedOut = bodyOf(handleLogout());
+  stub.reset();
+  const loggedOut = bodyOf(await handleLogout());
   leakTranscript.push(loggedOut);
+  const revokeCall = stub.requests.find((r) => r.path.endsWith("/auth/key/revoke"));
+  check(
+    "logout revokes the key on Writavo first, authenticated as that key",
+    revokeCall !== undefined && revokeCall.method === "POST" && revokeCall.authorization === `Bearer ${String(savedLogin.api_key)}`,
+    stub.requests.map((r) => `${r.method} ${r.path}`).join(", "),
+  );
   check("logout deletes the saved sign-in", !existsSync(credentialsPath()));
   check("logout stops using the key", !hasApiKey() && keySource() === "none");
+  check("logout says the key was revoked", /was revoked on Writavo/.test(loggedOut), loggedOut.slice(0, 300));
+
+  // A revoke that cannot reach Writavo still signs out locally, and says what to do by hand.
+  writeCredentials({ ...credentials, api_key: fileKey, expires_at: new Date(Date.now() + 86_400_000).toISOString() });
+  activateKey(fileKey, "login", { ...credentials, api_key: fileKey }, credentialsPath());
+  keyRoutes.revoke = "fail";
+  stub.reset();
+  const failedLogout = bodyOf(await handleLogout());
+  leakTranscript.push(failedLogout);
+  keyRoutes.revoke = "ok";
   check(
-    "logout says the key lives on until revoked, and where",
-    loggedOut.includes("app.writavo.com/settings/api-keys") && /revoke/i.test(loggedOut),
-    loggedOut.slice(0, 300),
+    "a revoke that fails is reported, with where to revoke by hand, and the file is still deleted",
+    /could NOT be revoked/.test(failedLogout) && failedLogout.includes("app.writavo.com/settings/api-keys") && !existsSync(credentialsPath()),
+    failedLogout.slice(0, 300),
   );
 
   device.mode = "deny";
@@ -829,11 +900,60 @@ async function main(): Promise<void> {
     leakTranscript.find((t) => /wv_sk_[A-Za-z0-9_-]{20,}/.test(t))?.slice(0, 200) ?? "",
   );
 
+  // The key is named after the connected client, from the initialize handshake (Addendum B).
+  {
+    const { friendlyClientName } = await import("../src/core/index.js");
+    const cases: [string | undefined, string][] = [
+      ["claude-code", "Claude Code"],
+      ["codex-mcp-client", "Codex"],
+      ["Codex", "Codex"],
+      ["cursor-vscode", "Cursor"],
+      ["Visual Studio Code", "VS Code"],
+      ["vscode-insiders", "VS Code"],
+      ["claude-ai", "Claude"],
+      ["windsurf-client", "Windsurf"],
+      ["Zed", "Zed"],
+      ["my-agent", "my-agent"],
+      ["  weird\u0000\u00e9name\n", "weird name"],
+      ["x".repeat(80), "x".repeat(60)],
+      ["", "AI assistant"],
+      ["\u00e9\u00e9", "AI assistant"],
+      [undefined, "AI assistant"],
+    ];
+    const wrong = cases.filter(([raw, want]) => friendlyClientName(raw) !== want);
+    check(
+      `friendlyClientName maps ${cases.length} client names, sanitises and falls back`,
+      wrong.length === 0,
+      wrong.map(([raw, want]) => `${JSON.stringify(raw)} -> ${JSON.stringify(friendlyClientName(raw))}, wanted ${want}`).join("; "),
+    );
+
+    // Through the real stdio server: a client that says it is claude-code gets a key named so.
+    const { createServer: createStdioServer } = await import("../src/server.js");
+    const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+    const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+    const stdioServer = createStdioServer();
+    const [c, srv] = InMemoryTransport.createLinkedPair();
+    const named = new Client({ name: "claude-code", version: "2.0.0" });
+    await Promise.all([stdioServer.connect(srv), named.connect(c)]);
+    clearKey();
+    device.mode = "deny";
+    stub.reset();
+    await named.callTool({ name: "login", arguments: { force: true } });
+    const namedStart = JSON.parse(stub.requests.find((r) => r.path.endsWith("/auth/device"))?.body ?? "{}") as Row;
+    check(
+      "login names the key after the connected client: Claude Code (local MCP), on this machine",
+      namedStart.client_name === "Claude Code (local MCP)" && typeof namedStart.client_host === "string" && String(namedStart.client_host).length > 0,
+      JSON.stringify({ client_name: namedStart.client_name, client_host: namedStart.client_host }),
+    );
+    await waitUntil(() => bodyOf(handleLoginStatus()).includes("denied"));
+    await named.close();
+  }
+
   // -- 13. the plan purchase link --------------------------------------------
   console.log("\n[ 13. The plan purchase link ]");
   clearKey();
   stub.reset();
-  const planNoKey = bodyOf(await handleStartPlanPurchase({ plan: "growth", interval: "year" }));
+  const planNoKey = bodyOf(await handleStartPlanPurchase(STDIO_CONTEXT, { plan: "growth", interval: "year" }));
   check(
     "it returns the billing deep link with the plan and interval",
     planNoKey.includes("https://app.writavo.com/billing?plan=growth&interval=year"),
@@ -846,7 +966,7 @@ async function main(): Promise<void> {
   check("it says to confirm with get_usage afterwards", planNoKey.includes("get_usage"));
   check("with no key it makes no request", stub.requests.length === 0);
   activateKey(SECRET_KEY, "env");
-  const planWithKey = bodyOf(await handleStartPlanPurchase({}));
+  const planWithKey = bodyOf(await handleStartPlanPurchase(STDIO_CONTEXT, {}));
   check(
     "with a key it names the current plan",
     planWithKey.includes("Current plan: Free") && planWithKey.includes("https://app.writavo.com/billing\n"),
@@ -926,7 +1046,7 @@ async function main(): Promise<void> {
     }),
   );
   stub.reset();
-  const invalid = bodyOf(await handleImportContent({ file_path: badPath }));
+  const invalid = bodyOf(await handleImportContent(STDIO_CONTEXT, { path: badPath }, IMPORT_FILES));
   importTranscript.push(invalid);
   check(
     "a dry run reports each problem against its external_id",
@@ -946,7 +1066,7 @@ async function main(): Promise<void> {
   check("a dry run writes no progress file", !existsSync(`${badPath}.writavo-progress.json`));
 
   stub.reset();
-  const dry = bodyOf(await handleImportContent({ file_path: fixturePath }));
+  const dry = bodyOf(await handleImportContent(STDIO_CONTEXT, { path: fixturePath }, IMPORT_FILES));
   importTranscript.push(dry);
   check(
     "a clean dry run counts what it would do",
@@ -963,7 +1083,7 @@ async function main(): Promise<void> {
   check("and it wrote nothing, not even progress", writes().length === 0 && !existsSync(progressFile));
 
   stub.reset();
-  const unconfirmed = bodyOf(await handleImportContent({ file_path: fixturePath, dry_run: false }));
+  const unconfirmed = bodyOf(await handleImportContent(STDIO_CONTEXT, { path: fixturePath, dry_run: false }, IMPORT_FILES));
   importTranscript.push(unconfirmed);
   check(
     "an import that publishes does nothing without confirm: true",
@@ -972,7 +1092,7 @@ async function main(): Promise<void> {
   );
 
   stub.reset();
-  const applied = bodyOf(await handleImportContent({ file_path: fixturePath, dry_run: false, confirm: true }));
+  const applied = bodyOf(await handleImportContent(STDIO_CONTEXT, { path: fixturePath, dry_run: false, confirm: true }, IMPORT_FILES));
   importTranscript.push(applied);
   check("the import completes in one batch", applied.includes("Import complete"), applied.slice(0, 600));
   const posts = (suffix: string) => writes().filter((r) => r.method === "POST" && r.path.replace(/\?.*$/, "").endsWith(suffix));
@@ -1027,7 +1147,7 @@ async function main(): Promise<void> {
   check("progress is saved next to the file", existsSync(progressFile));
 
   stub.reset();
-  const rerun = bodyOf(await handleImportContent({ file_path: fixturePath, dry_run: false, confirm: true }));
+  const rerun = bodyOf(await handleImportContent(STDIO_CONTEXT, { path: fixturePath, dry_run: false, confirm: true }, IMPORT_FILES));
   importTranscript.push(rerun);
   check(
     "running it again is a no-op",
@@ -1038,7 +1158,7 @@ async function main(): Promise<void> {
   fixture.articles[1] = { ...fixture.articles[1]!, title: "Winter notes, revised" };
   writeFileSync(fixturePath, JSON.stringify(fixture, null, 2));
   stub.reset();
-  const updated = bodyOf(await handleImportContent({ file_path: fixturePath, dry_run: false, confirm: true }));
+  const updated = bodyOf(await handleImportContent(STDIO_CONTEXT, { path: fixturePath, dry_run: false, confirm: true }, IMPORT_FILES));
   importTranscript.push(updated);
   const draft = byExternal("blog:2");
   check(
@@ -1055,6 +1175,384 @@ async function main(): Promise<void> {
   check(
     "no import reply ever carries the key",
     !importTranscript.some((t) => t.includes(SECRET_KEY) || /wv_sk_(?!REDACTED)[A-Za-z0-9_-]{20,}/.test(t)),
+  );
+
+  // -- 15. MCP-2: the core, approvals, headers, key lifecycle ----------------
+  console.log("\n[ 15. The remote-safe core, approvals and the key lifecycle ]");
+  const { createWritavoMcpServer, CORE_LOCAL_TOOL_NAMES, VERSION } = await import("../src/core/index.js");
+  const { STDIO_TOOL_NAMES } = await import("../src/server.js");
+  const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+  const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+
+  // The version is one constant, and every file that states it agrees.
+  const pkg = JSON.parse(readFileSync(join(PACKAGE_ROOT, "package.json"), "utf8")) as { version: string };
+  const serverJson = JSON.parse(readFileSync(join(PACKAGE_ROOT, "server.json"), "utf8")) as { version: string; packages: { version: string }[]; remotes?: { type: string; url: string }[] };
+  const pluginJson = JSON.parse(readFileSync(join(PACKAGE_ROOT, ".claude-plugin", "plugin.json"), "utf8")) as { version: string };
+  check(
+    `the version is ${VERSION} in the code, package.json, server.json and the Claude plugin`,
+    VERSION === pkg.version && serverJson.version === pkg.version && serverJson.packages.every((p) => p.version === pkg.version) && pluginJson.version === pkg.version,
+    `${VERSION} / ${pkg.version} / ${serverJson.version} / ${pluginJson.version}`,
+  );
+  check(
+    "server.json lists the hosted server as a streamable-http remote",
+    serverJson.remotes?.some((r) => r.type === "streamable-http" && r.url === "https://mcp.writavo.com/mcp") === true,
+  );
+
+  // The core as the Worker mounts it: a key from the grant, no filesystem, no login tools.
+  let remoteKey: string | null = SECRET_KEY;
+  const remote = createWritavoMcpServer({
+    apiKey: () => remoteKey,
+    apiBase: baseUrl,
+    userAgent: "writavo-mcp-smoke-worker/1.0",
+    host: "remote",
+    notSignedInHint: "SMOKE-HINT: reconnect the connector.",
+    // What the Worker sends, plus two it must never be able to set.
+    extraHeaders: () => ({ "X-Writavo-Mcp-Worker": "door-code", Authorization: "Bearer wv_sk_hijack000000000", "writavo-mcp-tool": "hijack" }),
+  });
+  const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "writavo-mcp-smoke", version: "1.0.0" });
+  await Promise.all([remote.connect(serverSide), client.connect(clientSide)]);
+  const remoteTools = (await client.listTools()).tools;
+  check(
+    `the core lists ${remoteTools.length} tools: every generated one plus ${CORE_LOCAL_TOOL_NAMES.join(", ")}`,
+    remoteTools.length === OPERATIONS.length + CORE_LOCAL_TOOL_NAMES.length &&
+      CORE_LOCAL_TOOL_NAMES.every((n) => remoteTools.some((t) => t.name === n)),
+    `${remoteTools.length} vs ${OPERATIONS.length} + ${CORE_LOCAL_TOOL_NAMES.length}`,
+  );
+  check(
+    "the hosted server has no login, login_status or logout",
+    STDIO_TOOL_NAMES.every((n) => !remoteTools.some((t) => t.name === n)),
+  );
+  check(
+    "every tool carries all four annotations, and only the URL-fetching tools claim an open world",
+    remoteTools.every(
+      (t) =>
+        typeof t.annotations?.readOnlyHint === "boolean" &&
+        typeof t.annotations?.destructiveHint === "boolean" &&
+        typeof t.annotations?.idempotentHint === "boolean" &&
+        t.annotations?.openWorldHint === OPEN_WORLD_TOOLS.has(t.name),
+    ),
+    remoteTools.filter((t) => t.annotations?.openWorldHint !== OPEN_WORLD_TOOLS.has(t.name)).map((t) => t.name).join(", "),
+  );
+  const annotationOf = (name: string) => remoteTools.find((t) => t.name === name)?.annotations ?? {};
+  check(
+    "reads are read-only, deletes and unpublish are destructive, and a create is not idempotent",
+    annotationOf("list_articles").readOnlyHint === true &&
+      annotationOf("delete_article").destructiveHint === true &&
+      annotationOf("unpublish_article").destructiveHint === true &&
+      annotationOf("publish_article").destructiveHint === false &&
+      annotationOf("create_article").idempotentHint === false &&
+      annotationOf("update_article").idempotentHint === true,
+    JSON.stringify({ del: annotationOf("delete_article"), unp: annotationOf("unpublish_article") }),
+  );
+  const schemaProps = (name: string) => Object.keys((remoteTools.find((t) => t.name === name)?.inputSchema as { properties?: object })?.properties ?? {});
+  check(
+    "the hosted import_content takes data and no path; upload_media takes url or base64 and no path",
+    schemaProps("import_content").includes("data") && !schemaProps("import_content").includes("path") &&
+      ["url", "base64", "filename"].every((p) => schemaProps("upload_media").includes(p)) && !schemaProps("upload_media").includes("path"),
+    `${schemaProps("import_content").join(",")} | ${schemaProps("upload_media").join(",")}`,
+  );
+
+  // The same tool calls, through the core, against the stub.
+  stub.reset();
+  stub.respond = siteRespond;
+  const remoteSite = await client.callTool({ name: "get_site_info", arguments: {} });
+  check(
+    "the host's extra headers are sent, and cannot replace Authorization or Writavo-Mcp-Tool",
+    stub.requests[0]?.worker === "door-code",
+    JSON.stringify(stub.requests[0] ?? {}).slice(0, 300),
+  );
+  check(
+    "a core tool call sends the connection's key, the host's user agent and the tool name",
+    stub.requests[0]?.authorization === `Bearer ${SECRET_KEY}` &&
+      stub.requests[0]?.userAgent === "writavo-mcp-smoke-worker/1.0" &&
+      stub.requests[0]?.mcpTool === "get_site_info" &&
+      !remoteSite.isError,
+    JSON.stringify(stub.requests[0] ?? {}).slice(0, 300),
+  );
+  remoteKey = null;
+  stub.reset();
+  const remoteNoKey = await client.callTool({ name: "list_articles", arguments: {} });
+  const remoteNoKeyText = JSON.stringify(remoteNoKey.content);
+  check(
+    "with no key the core says how to reconnect, with the host's hint, and sends nothing",
+    remoteNoKey.isError === true && remoteNoKeyText.includes("Reconnect Writavo") && remoteNoKeyText.includes("SMOKE-HINT") &&
+      !remoteNoKeyText.includes("WRITAVO_API_KEY") && stub.requests.length === 0,
+    remoteNoKeyText.slice(0, 300),
+  );
+  remoteKey = SECRET_KEY;
+
+  // Inline import: limits first, then a real dry run and apply through the core.
+  const tooMany = await client.callTool({
+    name: "import_content",
+    arguments: {
+      data: { format: "writavo-import", version: 1, articles: Array.from({ length: 51 }, (_, i) => ({ external_id: `x:${i}`, status: "draft" })) },
+    },
+  });
+  check(
+    "an inline import over 50 articles is refused before anything is read",
+    tooMany.isError === true && JSON.stringify(tooMany.content).includes("at most 50"),
+    JSON.stringify(tooMany.content).slice(0, 200),
+  );
+  const inlineDoc = {
+    format: "writavo-import",
+    version: 1,
+    articles: [
+      { external_id: "inline:1", status: "draft", title: "Inline one", content: "Body one." },
+      { external_id: "inline:2", status: "draft", title: "Inline two", content: "Body two." },
+    ],
+  };
+  stub.reset();
+  const inlineDry = JSON.stringify((await client.callTool({ name: "import_content", arguments: { data: inlineDoc } })).content);
+  check(
+    "an inline dry run reports what it would do and writes nothing",
+    inlineDry.includes("Dry run of the inline document") && inlineDry.includes("- create: 2") && writes().length === 0,
+    inlineDry.slice(0, 300),
+  );
+  stub.reset();
+  const inlineApply = JSON.stringify((await client.callTool({ name: "import_content", arguments: { data: JSON.stringify(inlineDoc), dry_run: false } })).content);
+  check(
+    "an inline apply, sent as JSON text, creates both drafts and needs no progress file",
+    inlineApply.includes("Import complete") && posts("/articles").length === 2 && site.articles.some((a) => a.external_id === "inline:2") &&
+      stub.requests.every((r) => r.mcpTool === "import_content"),
+    inlineApply.slice(0, 400),
+  );
+  stub.reset();
+  const inlineAgain = JSON.stringify((await client.callTool({ name: "import_content", arguments: { data: inlineDoc, dry_run: false } })).content);
+  check(
+    "sending the same inline document again updates by external_id and duplicates nothing",
+    inlineAgain.includes("Import complete") && posts("/articles").length === 0 && site.articles.filter((a) => String(a.external_id).startsWith("inline:")).length === 2,
+    inlineAgain.slice(0, 300),
+  );
+
+  // base64 upload through the whole handshake.
+  presignedPuts.length = 0;
+  stub.reset();
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 9, 9, 9, 9]).toString("base64");
+  const uploaded = await client.callTool({ name: "upload_media", arguments: { base64: png, filename: "pixel.png", alt_text: "A pixel" } });
+  check(
+    "upload_media with base64 reserves, transfers and registers",
+    uploaded.isError !== true && posts("/media/upload-url").length === 1 && presignedPuts.length === 1 && posts("/media").length === 1,
+    JSON.stringify(uploaded.content).slice(0, 200),
+  );
+  const noName = await client.callTool({ name: "upload_media", arguments: { base64: png } });
+  check("base64 without a filename is refused", noName.isError === true && JSON.stringify(noName.content).includes("filename"));
+  await client.close();
+
+  // Approvals. A gated operation takes approval_id and sends it back as Writavo-Approval.
+  const gated = OPERATIONS.filter((o) => o.approval);
+  if (gated.length > 0) {
+    check(
+      `the ${gated.length} gated tools (x-writavo-approval) take approval_id`,
+      gated.every((o) => "approval_id" in inputShapeFor(o)),
+      gated.filter((o) => !("approval_id" in inputShapeFor(o))).map((o) => o.tool).join(", "),
+    );
+  } else {
+    console.log("        (the vendored openapi.yaml has no x-writavo-approval yet; checked on a synthetic operation below)");
+  }
+  check(
+    "an ungated tool does not take approval_id",
+    OPERATIONS.filter((o) => !o.approval).every((o) => !("approval_id" in inputShapeFor(o))),
+  );
+  const gatedDelete = { ...operation("delete_article"), approval: "article.delete" };
+  check("a synthetic gated operation grows approval_id", "approval_id" in inputShapeFor(gatedDelete));
+
+  const APPROVAL_ID = "11111111-2222-4333-8444-555555555555";
+  stub.reset();
+  stub.respond = () => ({
+    status: 428,
+    body: {
+      ok: false,
+      error: {
+        code: "APPROVAL_REQUIRED",
+        message: "A person has to approve this.",
+        approval: { id: APPROVAL_ID, url: `https://app.writavo.com/approvals/${APPROVAL_ID}`, expires_at: "2030-01-02T00:00:00Z", status: "pending" },
+      },
+    },
+  });
+  const parked = await callOperation(STDIO_CONTEXT, gatedDelete, { id: "00000000-0000-4000-8000-000000000000", confirm: true });
+  const parkedBody = bodyOf(parked);
+  check(
+    "a 428 becomes an ordinary result: open the link, approve, call again with approval_id",
+    parked.isError !== true &&
+      parkedBody.startsWith("Nothing has been done yet.") &&
+      parkedBody.includes(`https://app.writavo.com/approvals/${APPROVAL_ID}`) &&
+      parkedBody.includes(`approval_id: "${APPROVAL_ID}"`) &&
+      parkedBody.includes("exactly the same arguments") &&
+      !/\b428\b/.test(parkedBody),
+    parkedBody.slice(0, 400),
+  );
+  // Links the API might carry that must never reach a person: another host, a tenant's own
+  // <slug>.writavo.com hosted blog, an http downgrade, and the right page for the wrong id.
+  const badLinks = [
+    "https://evil.example.com/approve",
+    `https://acme.writavo.com/approvals/${APPROVAL_ID}`,
+    `http://app.writavo.com/approvals/${APPROVAL_ID}`,
+    `https://app.writavo.com.evil.example/approvals/${APPROVAL_ID}`,
+    "https://app.writavo.com/approvals/99999999-9999-4999-8999-999999999999",
+  ];
+  for (const bad of badLinks) {
+    stub.respond = () => ({
+      status: 428,
+      body: { ok: false, error: { code: "APPROVAL_REQUIRED", message: "x", approval: { id: APPROVAL_ID, url: bad, expires_at: null, status: "pending" } } },
+    });
+    const shown = bodyOf(await callOperation(STDIO_CONTEXT, gatedDelete, { id: "00000000-0000-4000-8000-000000000000", confirm: true }));
+    check(
+      `an approval link other than app.writavo.com/approvals/<id> is replaced: ${bad}`,
+      !shown.includes(bad) && shown.includes(`https://app.writavo.com/approvals/${APPROVAL_ID}`),
+      shown.slice(0, 300),
+    );
+  }
+  stub.reset();
+  stub.respond = () => ({ status: 200, body: { ok: true, data: { id: "x" } } });
+  await callOperation(STDIO_CONTEXT, gatedDelete, { id: "00000000-0000-4000-8000-000000000000", confirm: true, approval_id: APPROVAL_ID });
+  check(
+    "the retry sends the approval as Writavo-Approval, with the tool name",
+    stub.requests[0]?.approval === APPROVAL_ID && stub.requests[0]?.mcpTool === "delete_article",
+    JSON.stringify(stub.requests[0] ?? {}).slice(0, 300),
+  );
+  stub.reset();
+  await callOperation(STDIO_CONTEXT, { ...operation("delete_article"), approval: null }, { id: "00000000-0000-4000-8000-000000000000", confirm: true, approval_id: APPROVAL_ID });
+  check("an ungated tool never sends Writavo-Approval", stub.requests[0]?.approval === null);
+
+  const refusal = async (status: number, code: string) => {
+    stub.respond = () => ({ status, body: { ok: false, error: { code, message: `The API said ${code}.` } } });
+    return callOperation(STDIO_CONTEXT, gatedDelete, { id: "00000000-0000-4000-8000-000000000000", confirm: true, approval_id: APPROVAL_ID });
+  };
+  const deniedApproval = await refusal(403, "APPROVAL_DENIED");
+  check(
+    "APPROVAL_DENIED says a person denied it and not to retry",
+    deniedApproval.isError === true && /denied|said no/.test(bodyOf(deniedApproval)) && /not retry/i.test(bodyOf(deniedApproval)),
+    bodyOf(deniedApproval).slice(0, 300),
+  );
+  const invalidApproval = await refusal(409, "APPROVAL_INVALID");
+  check(
+    "APPROVAL_INVALID says to call again without approval_id",
+    invalidApproval.isError === true && /WITHOUT approval_id/i.test(bodyOf(invalidApproval)),
+    bodyOf(invalidApproval).slice(0, 300),
+  );
+  const agentsOff = await refusal(403, "AGENT_ACCESS_DISABLED");
+  check(
+    "AGENT_ACCESS_DISABLED names Settings > AI agents",
+    agentsOff.isError === true && bodyOf(agentsOff).includes("app.writavo.com/settings/agents"),
+    bodyOf(agentsOff).slice(0, 300),
+  );
+  check(
+    "no approval reply carries a raw status code",
+    ![deniedApproval, invalidApproval, agentsOff].some((r) => /\b(403|409)\b/.test(bodyOf(r))),
+  );
+  stub.respond = siteRespond;
+
+  // Every request an operation makes is labelled with its tool.
+  stub.reset();
+  await callOperation(STDIO_CONTEXT, operation("list_articles"), {});
+  check(
+    "every API request names its tool in Writavo-Mcp-Tool and the user agent carries the version",
+    stub.requests[0]?.mcpTool === "list_articles" && stub.requests[0]?.userAgent === `writavo-mcp-server/${VERSION}`,
+    JSON.stringify(stub.requests[0] ?? {}).slice(0, 200),
+  );
+
+  // The key auto-extension: only when due, at most once a day, and the file follows.
+  const { extendSavedKeyIfDue } = await import("../src/stdio/key-lifecycle.js");
+  const soon = new Date(Date.now() + 10 * 86_400_000).toISOString();
+  const later = new Date(Date.now() + 90 * 86_400_000).toISOString();
+  writeCredentials({ ...credentials, api_key: fileKey, expires_at: soon });
+  activateKey(fileKey, "login", { ...credentials, api_key: fileKey, expires_at: soon }, credentialsPath());
+  keyRoutes.extendTo = later;
+  stub.reset();
+  const extended = await extendSavedKeyIfDue();
+  const afterExtend = readCredentials();
+  check(
+    "a saved key within 30 days of expiry is extended, with that key, and the file is rewritten",
+    extended.state === "extended" &&
+      stub.requests.some((r) => r.path.endsWith("/auth/key/extend") && r.authorization === `Bearer ${fileKey}`) &&
+      afterExtend.state === "valid" && afterExtend.credentials.expires_at === later && Boolean(afterExtend.credentials.extend_checked_at),
+    `${JSON.stringify(extended)} ${afterExtend.state}`,
+  );
+  check("the key in use carries the new expiry", loginIdentity()?.expiresAt === later);
+  stub.reset();
+  const notDue = await extendSavedKeyIfDue();
+  check("a key with more than 30 days left is not sent at all", notDue.state === "skipped" && stub.requests.length === 0, JSON.stringify(notDue));
+  writeCredentials({ ...credentials, api_key: fileKey, expires_at: soon, extend_checked_at: new Date().toISOString() });
+  stub.reset();
+  const twice = await extendSavedKeyIfDue();
+  check("it asks at most once a day", twice.state === "skipped" && stub.requests.length === 0, JSON.stringify(twice));
+  writeCredentials({ ...credentials, api_key: fileKey, expires_at: soon });
+  keyRoutes.extendTo = null;
+  const capped = await extendSavedKeyIfDue();
+  check(
+    "a key at its maximum lifetime is left as it is, and the check is recorded",
+    capped.state === "unchanged" && readCredentials().state === "valid" && (readCredentials() as { credentials: { extend_checked_at?: string } }).credentials.extend_checked_at !== undefined,
+    JSON.stringify(capped),
+  );
+  clearKey();
+  deleteCredentials();
+
+  // The generated surface never exposes the host-owned key routes.
+  check(
+    "no generated tool reaches /auth/*, and every /auth/key/* route is a documented refusal",
+    OPERATIONS.every((o) => !o.path.startsWith("/auth/")) &&
+      REFUSALS.filter((r) => r.path.startsWith("/auth/key/")).every((r) => r.reason.includes("never by an assistant")),
+  );
+
+  // The generator itself, on a synthetic specification: the extension becomes approval_id, and a
+  // /auth/key/* route under a tool tag is withheld anyway.
+  const genDir = mkdtempSync(join(PACKAGE_ROOT, ".smoke-gen-"));
+  try {
+    const { parse, stringify } = await import("yaml");
+    const spec = parse(readFileSync(join(PACKAGE_ROOT, "openapi.yaml"), "utf8")) as { paths: Record<string, Record<string, Record<string, unknown>>> };
+    // Start from no gates at all, so the count below is exactly what this test adds.
+    for (const item of Object.values(spec.paths)) for (const op of Object.values(item)) if (op && typeof op === "object") delete op["x-writavo-approval"];
+    spec.paths["/articles/{id}"]!.delete!["x-writavo-approval"] = "article.delete";
+    spec.paths["/articles/{id}/unpublish"]!.post!["x-writavo-approval"] = "article.unpublish";
+    spec.paths["/auth/key/extend"] = {
+      post: { operationId: "extendApiKeySmoke", tags: ["Device sign-in"], summary: "Extend the key in use", "x-scope": "none", responses: { "200": { description: "ok" } } },
+    };
+    mkdirSync(join(genDir, "scripts"), { recursive: true });
+    for (const f of ["gen-mcp-tools.mjs", "mcp-surface.mjs", "error-guidance.mjs"]) {
+      writeFileSync(join(genDir, "scripts", f), readFileSync(join(PACKAGE_ROOT, "scripts", f)));
+    }
+    writeFileSync(join(genDir, "openapi.yaml"), stringify(spec));
+    const gen = spawnSync(process.execPath, [join(genDir, "scripts", "gen-mcp-tools.mjs")], { cwd: genDir, encoding: "utf8" });
+    const generated = existsSync(join(genDir, "src", "generated", "operations.ts")) ? readFileSync(join(genDir, "src", "generated", "operations.ts"), "utf8") : "";
+    const rows = JSON.parse(generated.slice(generated.indexOf("export const OPERATIONS: McpOperation[] = ") + 42, generated.indexOf(";\n\nexport const REFUSALS"))) as { tool: string; approval: string | null; description: string }[];
+    const synthetic = rows.find((r) => r.tool === "delete_article");
+    check(
+      "the generator reads x-writavo-approval into the operation, and says so in its description",
+      gen.status === 0 && synthetic?.approval === "article.delete" && /approval_id/.test(synthetic?.description ?? "") &&
+        rows.find((r) => r.tool === "unpublish_article")?.approval === "article.unpublish" &&
+        rows.filter((r) => r.approval).length === 2,
+      `${gen.status} ${gen.stderr.slice(0, 300)}`,
+    );
+    check(
+      "a /auth/key/* route is withheld from the tools even under a tool tag",
+      !rows.some((r) => r.tool === "extend_api_key_smoke") && generated.includes('"operationId": "extendApiKeySmoke"'),
+    );
+  } finally {
+    rmSync(genDir, { recursive: true, force: true });
+  }
+
+  // The core must run where there is no filesystem and no environment: walk what it imports.
+  const coreGraph = new Set<string>();
+  const forbidden: string[] = [];
+  const walk = (file: string): void => {
+    if (coreGraph.has(file)) return;
+    coreGraph.add(file);
+    // Comments may mention process.env or src/stdio; code may not.
+    const source = readFileSync(file, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    for (const m of source.matchAll(/^\s*(?:import|export)\s[^;]*?from\s+"([^"]+)"/gms)) {
+      const spec = m[1]!;
+      if (/^node:(fs|os|child_process|net|http|https|worker_threads)/.test(spec)) forbidden.push(`${file.replace(PACKAGE_ROOT, "")} imports ${spec}`);
+      if (spec.startsWith(".")) walk(join(dirname(file), spec.replace(/\.js$/, ".ts")));
+    }
+    if (/process\.(env|argv|cwd|exit|platform)/.test(source)) forbidden.push(`${file.replace(PACKAGE_ROOT, "")} reads process`);
+    if (/\/(config|credentials)\.js"|\/stdio\/|\/auth\/device\.js"|\/tools\/login\.js"/.test(source)) forbidden.push(`${file.replace(PACKAGE_ROOT, "")} imports a stdio-only module`);
+  };
+  walk(join(PACKAGE_ROOT, "src", "core", "index.ts"));
+  check(
+    `the core's ${coreGraph.size} modules touch no filesystem, no environment and no stdio-only module`,
+    forbidden.length === 0 && coreGraph.size > 15,
+    forbidden.join("; "),
   );
   globalThis.fetch = realFetch;
 

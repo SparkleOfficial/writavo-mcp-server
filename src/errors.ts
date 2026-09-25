@@ -1,6 +1,7 @@
-import { WritavoApiError } from "./api/client.js";
+import { WritavoApiError, type ApprovalInfo } from "./api/client.js";
 import { ERRORS_BY_CODE } from "./generated/errors.js";
-import { BILLING_URL, KEYS_URL, redact } from "./config.js";
+import { AGENTS_URL, BILLING_URL, KEYS_URL } from "./core/constants.js";
+import { redact } from "./core/redact.js";
 
 export interface ToolResult {
   content: { type: "text"; text: string }[];
@@ -17,6 +18,19 @@ export function text(body: string): ToolResult {
 export function toolError(body: string): ToolResult {
   return { content: [{ type: "text", text: redact(body) }], isError: true };
 }
+
+/**
+ * What to do about the agent-control codes, for as long as the vendored specification predates
+ * them. The generated catalog wins whenever it has an entry: this is the fallback, not a second
+ * source, and it says the same thing the catalog will once scripts/error-guidance.mjs carries it.
+ */
+const AGENT_GUIDANCE: Record<string, string> = {
+  AGENT_ACCESS_DISABLED: `AI agent access is turned off for this organisation, so no assistant can act on its Sites. Nothing was changed. Tell the user; an owner or admin can turn it back on in Settings > AI agents (${AGENTS_URL}). Do not retry until they have.`,
+  APPROVAL_DENIED: "A person denied this request in the Writavo dashboard. Nothing was changed. Do not retry it; tell the user it was denied and ask what they want to do instead.",
+  APPROVAL_INVALID: "That approval cannot be used for this request: it expired, was already used, or was given for different arguments. Nothing was changed. Call the same tool again WITHOUT approval_id to ask for a new approval.",
+  APPROVAL_REQUIRED: "This action needs a person to approve it in the Writavo dashboard before it runs.",
+  APPROVAL_PENDING: "The approval for this action has not been given yet.",
+};
 
 export interface ErrorContext {
   /** The tool the user asked for, so the first line says what failed rather than that something did. */
@@ -45,10 +59,17 @@ export function formatApiError(err: unknown, ctx: ErrorContext): ToolResult {
     return toolError(`${ctx.tool} could not run. ${err.message}`);
   }
 
+  // A 428 is not a failure. The request is parked until a person approves it, and the model's job
+  // is to hand them the link, so it is answered as an ordinary result the model acts on.
+  if (err.status === 428 || err.code === "APPROVAL_REQUIRED" || err.code === "APPROVAL_PENDING") {
+    return approvalNeeded(ctx.tool, err);
+  }
+
   const entry = ERRORS_BY_CODE[err.code];
   const lines = [`${ctx.tool} failed: ${err.message}`, ""];
 
   if (entry?.action) lines.push(`What to do. ${entry.action}`);
+  else if (AGENT_GUIDANCE[err.code]) lines.push(`What to do. ${AGENT_GUIDANCE[err.code]}`);
   else lines.push(`What to do. This is the ${err.code} condition. Check ${KEYS_URL} and retry.`);
 
   // The specifics the catalog cannot know, because they belong to the operation rather than the code.
@@ -57,6 +78,13 @@ export function formatApiError(err: unknown, ctx: ErrorContext): ToolResult {
   }
   if (err.code === "NOT_ENTITLED" && ctx.entitlement && ctx.entitlement !== "none") {
     lines.push("", `The plan feature this needs is ${ctx.entitlement}. Upgrade at ${BILLING_URL}.`);
+  }
+  // The catalog speaks HTTP (the Writavo-Approval header); a model speaks tool arguments.
+  if (err.code === "APPROVAL_INVALID") {
+    lines.push("", `Call ${ctx.tool} again WITHOUT approval_id to ask for a new approval.`);
+  }
+  if (err.code === "APPROVAL_DENIED") {
+    lines.push("", `Do not call ${ctx.tool} again with that approval_id; tell the user it was denied.`);
   }
   if (err.code === "RATE_LIMIT_EXCEEDED" && err.retryAfter) {
     lines.push("", `Retry after ${err.retryAfter} seconds.`);
@@ -69,6 +97,40 @@ export function formatApiError(err: unknown, ctx: ErrorContext): ToolResult {
   if (err.requestId) lines.push("", `Quote this if you contact support: ${err.requestId}`);
 
   return toolError(lines.join("\n"));
+}
+
+/**
+ * The reply to a 428: nothing has happened, a person has to approve it, and here is exactly how
+ * the model carries on afterwards. The API binds an approval to the method, the path and the
+ * exact body, so the retry must repeat the arguments unchanged, with approval_id added.
+ */
+export function approvalNeeded(tool: string, err: WritavoApiError): ToolResult {
+  const approval: ApprovalInfo | undefined = err.approval;
+  const pending = err.code === "APPROVAL_PENDING";
+  const lead = pending
+    ? `Nothing has been done yet. ${tool} is still waiting for a person to approve it in the Writavo dashboard.`
+    : `Nothing has been done yet. ${tool} needs a person to approve it in the Writavo dashboard before it runs. The organisation requires approval for actions like this one when an AI assistant asks for them.`;
+  if (!approval) {
+    return text(
+      [
+        lead,
+        "",
+        `Ask the user to open ${AGENTS_URL}, find the pending approval under AI agents, and approve it. Then call ${tool} again with exactly the same arguments.`,
+      ].join("\n"),
+    );
+  }
+  return text(
+    [
+      lead,
+      "",
+      "Ask the user to open this link, check what it describes, and approve it:",
+      "",
+      `  ${approval.url}`,
+      "",
+      approval.expires_at ? `The approval request expires at ${approval.expires_at}.` : "The approval request expires in a day.",
+      `Once the user says they have approved it, call ${tool} again with exactly the same arguments plus approval_id: "${approval.id}". It can be used once, for this exact request. If they deny it, do not retry.`,
+    ].join("\n"),
+  );
 }
 
 /**

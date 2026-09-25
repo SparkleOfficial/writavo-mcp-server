@@ -1,14 +1,14 @@
-import { randomBytes } from "node:crypto";
-import { readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
-
 /**
- * What an import has done so far, kept next to the import file as <file>.writavo-progress.json.
+ * What an import has done so far. The stdio host keeps it next to the import file as
+ * <file>.writavo-progress.json (src/stdio/files.ts); an import sent inline has nowhere to keep it,
+ * so its progress lives for one call and a re-run is made safe by external_id matching instead.
  *
- * It is what makes an import resumable across tool calls (each call does one batch) and across
+ * It is what makes a file import resumable across tool calls (each call does one batch) and across
  * restarts, and what makes a finished import a no-op when it is run again. It is bound to one
  * Site: article ids and re-hosted image URLs mean nothing on another, so a progress file written
  * for Site A is refused when the key belongs to Site B.
+ *
+ * This module is the shape only, with no filesystem in it, because the core runs in a Worker.
  */
 
 export type ItemOutcome =
@@ -58,10 +58,6 @@ export interface ImportProgress {
   items: Record<string, ProgressItem>;
 }
 
-export function progressPath(filePath: string): string {
-  return `${filePath}.writavo-progress.json`;
-}
-
 export function newProgress(filePath: string, website: { id: string; name: string }): ImportProgress {
   const now = new Date().toISOString();
   return {
@@ -80,40 +76,24 @@ export function newProgress(filePath: string, website: { id: string; name: strin
   };
 }
 
-/** Null when there is none; a string when there is one that cannot be used. */
-export function readProgress(path: string): ImportProgress | null | string {
-  let raw: string;
-  try {
-    raw = readFileSync(path, "utf8");
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
-    return `it could not be read (${(err as NodeJS.ErrnoException).code ?? "error"})`;
-  }
-  try {
-    const value = JSON.parse(raw) as ImportProgress;
-    if (value?.version !== 1 || typeof value.website_id !== "string" || typeof value.items !== "object") {
-      return "it is not a progress file this version understands";
-    }
-    value.categories ??= {};
-    value.tags ??= {};
-    value.authors ??= {};
-    value.images ??= {};
-    value.created ??= { categories: 0, tags: 0, authors: 0 };
-    return value;
-  } catch {
-    return "it is not valid JSON";
-  }
+/** Where an import's progress persists between calls, when the host has somewhere to keep it. */
+export interface ProgressStore {
+  /** Where it lives, as replies name it. */
+  location: string;
+  /** Null when there is none; a string when there is one that cannot be used. */
+  read(): ImportProgress | null | string;
+  /** Replace it. Atomic, so an interrupted call leaves the previous progress intact. */
+  write(progress: ImportProgress): void;
 }
 
-/** Atomic, so an interrupted call leaves the previous progress intact rather than half a file. */
-export function writeProgress(path: string, progress: ImportProgress): void {
-  progress.updated_at = new Date().toISOString();
-  const tmp = join(dirname(path), `.${basename(path)}.${randomBytes(6).toString("hex")}.tmp`);
-  try {
-    writeFileSync(tmp, `${JSON.stringify(progress, null, 2)}\n`, { flag: "wx" });
-    renameSync(tmp, path);
-  } catch (err) {
-    rmSync(tmp, { force: true });
-    throw err;
-  }
+/** Fill in what an older progress file may lack. Null when it is not one this version reads. */
+export function normaliseProgress(value: unknown): ImportProgress | null {
+  const p = value as ImportProgress | null;
+  if (!p || p.version !== 1 || typeof p.website_id !== "string" || typeof p.items !== "object") return null;
+  p.categories ??= {};
+  p.tags ??= {};
+  p.authors ??= {};
+  p.images ??= {};
+  p.created ??= { categories: 0, tags: 0, authors: 0 };
+  return p;
 }

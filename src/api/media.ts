@@ -1,5 +1,4 @@
-import { randomUUID } from "node:crypto";
-import { basename } from "node:path";
+import type { ToolContext } from "../core/context.js";
 import { apiRequest, putPresigned } from "./client.js";
 
 /**
@@ -36,6 +35,22 @@ const EXTENSION_BY_TYPE: Record<string, string> = {
 };
 
 export const ACCEPTED_TYPES = [...new Set(Object.values(TYPE_BY_EXTENSION))];
+
+/** The last path segment. Written out rather than taken from node:path, which a Worker lacks. */
+export function lastSegment(path: string): string {
+  const parts = path.split(/[\\/]/);
+  return parts[parts.length - 1] ?? "";
+}
+
+/** A name safe to send as file_name: word characters, dots and dashes, at most 200 characters. */
+export function safeFileName(name: string): string {
+  return name.replace(/[^\w.\-]+/g, "-").slice(-200) || "image";
+}
+
+/** The extension an accepted type is stored under. */
+export function extensionFor(contentType: string): string | undefined {
+  return EXTENSION_BY_TYPE[contentType];
+}
 
 export function contentTypeFor(fileName: string): string | undefined {
   const extension = fileName.includes(".") ? (fileName.split(".").pop()?.toLowerCase() ?? "") : "";
@@ -114,11 +129,11 @@ export async function fetchImage(sourceUrl: string, maxBytes = MAX_IMAGE_BYTES, 
 
     let fileName = "image";
     try {
-      fileName = basename(decodeURIComponent(parsed.pathname)) || "image";
+      fileName = lastSegment(decodeURIComponent(parsed.pathname)) || "image";
     } catch {
-      fileName = basename(parsed.pathname) || "image";
+      fileName = lastSegment(parsed.pathname) || "image";
     }
-    fileName = fileName.replace(/[^\w.\-]+/g, "-").slice(-200) || "image";
+    fileName = safeFileName(fileName);
 
     const headerType = (response.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
     const contentType = contentTypeFor(fileName) ?? (ACCEPTED_TYPES.includes(headerType) ? headerType : undefined);
@@ -139,12 +154,12 @@ export interface UploadInput {
 }
 
 /** Reserve, transfer, register. Returns the registered asset, whose `url` is the public one. */
-export async function uploadImage(input: UploadInput): Promise<Record<string, unknown>> {
+export async function uploadImage(ctx: ToolContext, input: UploadInput): Promise<Record<string, unknown>> {
   // Step 1: reserve.
-  const reservation = await apiRequest<UploadReservation>({
+  const reservation = await apiRequest<UploadReservation>(ctx, {
     method: "POST",
     path: "/media/upload-url",
-    headers: { "Idempotency-Key": randomUUID() },
+    headers: { "Idempotency-Key": crypto.randomUUID() },
     body: {
       file_name: input.fileName,
       content_type: input.contentType,
@@ -171,10 +186,10 @@ export async function uploadImage(input: UploadInput): Promise<Record<string, un
   });
 
   // Step 3: register. Until this lands the object is swept and is not part of the library.
-  const asset = await apiRequest<Record<string, unknown>>({
+  const asset = await apiRequest<Record<string, unknown>>(ctx, {
     method: "POST",
     path: "/media",
-    headers: { "Idempotency-Key": randomUUID() },
+    headers: { "Idempotency-Key": crypto.randomUUID() },
     body: {
       upload_id: reservation.data.upload_id,
       ...(input.altText === undefined ? {} : { alt_text: input.altText }),

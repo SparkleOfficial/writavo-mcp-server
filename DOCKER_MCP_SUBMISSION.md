@@ -2,6 +2,13 @@
 
 Everything a reviewer needs, in the order they will want it.
 
+**Status: prepared, not submitted.** It waits for `@writavo/mcp-server@0.3.0` to be published.
+
+The image is the local, stdio flavour of the server. The same tools are also hosted at
+`https://mcp.writavo.com/mcp` (Streamable HTTP, OAuth 2.1), which is what most people should use;
+the catalog entry is for people who want the server on their own machine or in their own
+container. `server.json` lists both: the npm package and the remote.
+
 ## Build
 
 This repository is self-contained. It vendors `openapi.yaml` and the generator scripts, so the
@@ -36,7 +43,7 @@ see the whole tool surface without an account.
 | Transport | stdio |
 | Secrets | `WRITAVO_API_KEY`, optional |
 | Network egress | `api.writavo.com` only, plus the presigned storage URL that API returns during an upload |
-| Filesystem | Reads a file only when `upload_media` is called with an explicit absolute path |
+| Filesystem | Reads a file only when `upload_media` or `import_content` is called with an explicit absolute `path`; `import_content` then writes its progress file next to that file. Writes the saved sign-in to `~/.config/writavo/credentials.json` after a browser `login` (not used when `WRITAVO_API_KEY` is set) |
 | Runs as | `node`, not root |
 
 ## Security posture
@@ -50,6 +57,9 @@ see the whole tool surface without an account.
   before the server starts.
 - Key management and webhook configuration are not exposed as tools at all.
 - Publishing, deleting and the one billable operation refuse to act until the user confirms.
+- When the organisation requires it, deletes, unpublishing and pipeline runs made with a key an
+  agent signed in with also wait for a person's approval in the dashboard.
+- `logout` revokes the key on Writavo before deleting the saved sign-in.
 
 Full detail in [SECURITY.md](SECURITY.md).
 
@@ -60,6 +70,7 @@ npm install
 npm test
 ```
 
-Forty four checks, all offline. They include a real MCP client handshake over stdio asserting that
-nothing but protocol messages reaches standard output, the no-key experience, the scope and credit
-messages, the confirmation gate, and a leak probe against an API that echoes the key back.
+About a hundred and sixty checks, all offline. They include a real MCP client handshake over stdio
+asserting that nothing but protocol messages reaches standard output, the no-key experience, the
+scope and credit messages, the confirmation gate, a leak probe against an API that echoes the key
+back, the approval flow, and the shared core as the hosted server mounts it.

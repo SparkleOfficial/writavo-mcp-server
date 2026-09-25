@@ -21,6 +21,12 @@ export interface StoredCredentials {
   scopes: string[];
   expires_at: string | null;
   created_at: string;
+  /**
+   * When this server last asked the API to extend the key (POST /v1/auth/key/extend), so it asks
+   * at most once a day however often the client restarts it. Absent in files written before 0.3.0
+   * and by the CLI, which is fine: absent means "not asked yet".
+   */
+  extend_checked_at?: string | null;
 }
 
 export type CredentialsRead =
@@ -74,6 +80,7 @@ function parse(raw: string): StoredCredentials | string {
     scopes: Array.isArray(c.scopes) ? c.scopes.map(String) : [],
     expires_at: isString(c.expires_at) ? c.expires_at : null,
     created_at: String(c.created_at ?? ""),
+    ...(isString(c.extend_checked_at) ? { extend_checked_at: c.extend_checked_at } : {}),
   };
 }
 

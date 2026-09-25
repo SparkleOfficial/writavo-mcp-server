@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { apiRequest } from "../api/client.js";
-import { BILLING_URL, hasApiKey, keyKind } from "../config.js";
+import { BILLING_URL } from "../core/constants.js";
+import { forTool, hasKey, keyKindOf, type ToolContext } from "../core/context.js";
 import { text, type ToolResult } from "../errors.js";
 import type { ToolArgs } from "./call.js";
 
@@ -41,20 +42,23 @@ export function planPurchaseLink(plan?: string, interval?: string): string {
   return qs ? `${BILLING_URL}?${qs}` : BILLING_URL;
 }
 
-export async function handleStartPlanPurchase(rawArgs: ToolArgs): Promise<ToolResult> {
+export async function handleStartPlanPurchase(ctx: ToolContext, rawArgs: ToolArgs): Promise<ToolResult> {
   const args = (rawArgs ?? {}) as { plan?: string; interval?: string };
   const plan = args.plan && PLAN_NAMES[args.plan] ? args.plan : undefined;
   const interval = args.interval === "month" || args.interval === "year" ? args.interval : undefined;
   const link = planPurchaseLink(plan, interval);
 
   let current: string;
-  if (!hasApiKey()) {
-    current = "Not signed in, so the current plan is unknown. Call login first if you want it checked.";
-  } else if (keyKind() === "publishable") {
+  if (!hasKey(ctx)) {
+    current =
+      ctx.host === "stdio"
+        ? "Not signed in, so the current plan is unknown. Call login first if you want it checked."
+        : "Not signed in, so the current plan is unknown.";
+  } else if (keyKindOf(ctx) === "publishable") {
     current = "The configured key is publishable, which cannot read the plan, so the current plan is unknown.";
   } else {
     try {
-      const usage = await apiRequest<UsageSnapshot>({ method: "GET", path: "/usage" });
+      const usage = await apiRequest<UsageSnapshot>(forTool(ctx, START_PLAN_PURCHASE.name), { method: "GET", path: "/usage" });
       const name = usage.data?.plan?.name ?? usage.data?.plan?.key ?? "unknown";
       const balance = usage.data?.credits?.balance;
       current = `Current plan: ${name}${usage.data?.plan?.key ? ` (${usage.data.plan.key})` : ""}.${typeof balance === "number" ? ` Credit balance: ${balance}.` : ""}`;

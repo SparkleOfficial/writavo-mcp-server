@@ -34,14 +34,20 @@ usable credential, and the secret never crosses the network until it is used as 
 
 - The person approving sees the requesting machine's name and a short code, chooses the Site, and
   can deny. The key is limited to that one Site, carries only the scopes asked for (never key or
-  webhook management), and expires after 90 days.
+  webhook management), and expires after 90 days. While the server is in use it asks the API, at
+  most once a day, to extend a key within 30 days of expiry; the API extends only keys an agent
+  signed in with, only while their creator still holds the permission to manage keys, and never
+  past a year from creation.
 - On approval the key is saved to `$XDG_CONFIG_HOME/writavo/credentials.json` (else
   `~/.config/writavo/credentials.json`, or `%APPDATA%\writavo\credentials.json` on Windows). The
   directory is created `0700` and the file `0600`, and it is replaced atomically.
 - `WRITAVO_API_KEY` always outranks the saved sign-in. A key set deliberately in a client config is
   never silently replaced by a browser login.
-- `logout` deletes the file and stops using the key. The key itself stays valid until it is revoked
-  at <https://app.writavo.com/settings/api-keys> or expires.
+- `logout` revokes the key on Writavo (`POST /v1/auth/key/revoke`, authenticated as that key), then
+  deletes the file and stops using the key. If the revoke cannot reach Writavo it says so, and the
+  key stays valid until it is revoked at <https://app.writavo.com/settings/agents> or expires.
+- The hosted server at `https://mcp.writavo.com/mcp` never runs this flow: its clients sign in with
+  OAuth 2.1, and the key behind a connection lives only in the encrypted grant on the server.
 
 ## What an assistant can and cannot reach
 

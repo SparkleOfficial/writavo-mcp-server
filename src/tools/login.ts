@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { WritavoApiError } from "../api/client.js";
 import {
-  CLIENT_NAME,
+  clientName,
   DEFAULT_SCOPES,
   clientHost,
   generateDeviceSecret,
@@ -20,8 +20,9 @@ import {
   keySource,
   loginIdentity,
 } from "../config.js";
-import { deleteCredentials, writeCredentials, type StoredCredentials } from "../credentials.js";
+import { deleteCredentials, readCredentials, writeCredentials, type StoredCredentials } from "../credentials.js";
 import { formatApiError, text, toolError, type ToolResult } from "../errors.js";
+import { revokeKey, type RevokeOutcome } from "../stdio/key-lifecycle.js";
 import type { ToolArgs } from "./call.js";
 
 /**
@@ -31,6 +32,8 @@ import type { ToolArgs } from "./call.js";
  * the background picks up the approval, saves the key and puts it into use, so the very next tool
  * call works. `login_status` is how the model finds out. Nothing blocks a tool call for the
  * minutes a person may spend signing up, confirming an email and finishing onboarding.
+ *
+ * Stdio host only. The hosted server has no login tool: its client signs in with OAuth.
  */
 
 export const LOGIN = {
@@ -62,7 +65,7 @@ export const LOGIN_STATUS = {
 export const LOGOUT = {
   name: "logout",
   description:
-    "Sign this assistant out: delete the saved sign-in from this machine and stop using its key. The key itself keeps working until it is revoked in the dashboard or expires, and the reply says where to revoke it. Does not touch a key set with WRITAVO_API_KEY in the client config.",
+    "Sign this assistant out: revoke the signed-in key on Writavo, delete the saved sign-in from this machine and stop using the key. If the revoke cannot reach Writavo the reply says so and where to revoke the key by hand. Does not touch a key set with WRITAVO_API_KEY in the client config.",
   inputSchema: {},
 };
 
@@ -227,7 +230,7 @@ function pendingInstructions(pending: Extract<LoginState, { phase: "pending" }>,
     "",
     "What the user does there:",
     `1. Sign in to Writavo. Someone without an account creates one from the same page (or at ${SIGNUP_URL}), confirms their email and finishes onboarding first; the code is kept for them through all of that. Someone moving an existing blog to Writavo should choose "Bring my existing articles" during onboarding.`,
-    `2. Check that the request is from "${CLIENT_NAME}${host ? ` on ${host}` : ""}" and shows the code ${pending.userCode}. Only approve a request they started; if the code differs, deny it.`,
+    `2. Check that the request is from "${clientName()}${host ? ` on ${host}` : ""}" and shows the code ${pending.userCode}. Only approve a request they started; if the code differs, deny it.`,
     "3. Choose the Site this assistant should work on, and approve.",
     "",
     `The request expires in about ${minutes} minutes. This server checks for the approval in the background and starts using the new key by itself, with no restart. Call login_status every few seconds to see when it lands.`,
@@ -355,11 +358,22 @@ export function handleLoginStatus(): ToolResult {
   }
 }
 
-export function handleLogout(): ToolResult {
+export async function handleLogout(): Promise<ToolResult> {
   const identity = keySource() === "login" ? loginIdentity() : null;
   cancelPending();
   const hadPending = state.phase === "pending";
   state = { phase: "idle" };
+
+  // Revoke first, while the key is still at hand. A saved sign-in that is not the key in use (an
+  // env key outranks it) is revoked too: it is being forgotten here either way, and a live key
+  // nobody remembers is the kind that leaks.
+  const saved = readCredentials();
+  let revoke: RevokeOutcome | null = null;
+  let revokedPrefix: string | null = null;
+  if (saved.state === "valid") {
+    revoke = await revokeKey(saved.credentials.api_key);
+    revokedPrefix = saved.credentials.key_prefix;
+  }
 
   let deleted = false;
   let deleteError: string | null = null;
@@ -377,10 +391,21 @@ export function handleLogout(): ToolResult {
   else lines.push("There was no saved sign-in on this machine.");
   if (hadPending) lines.push("The sign-in that was waiting for approval was abandoned.");
 
-  if (identity || deleted) {
+  const label = `${revokedPrefix ?? identity?.keyPrefix ?? ""}...`;
+  const named = `"${clientName()}${clientHost() ? ` on ${clientHost()}` : ""}"`;
+  if (revoke?.state === "revoked") {
+    lines.push("", `The key ${label} was revoked on Writavo, so it no longer works anywhere.`);
+  } else if (revoke?.state === "already_invalid") {
+    lines.push("", `The key ${label} was already revoked or expired on Writavo, so there was nothing to revoke.`);
+  } else if (revoke?.state === "failed") {
     lines.push(
       "",
-      `The key${identity ? ` (${identity.keyPrefix}..., for "${identity.websiteName}")` : ""} still exists on Writavo and keeps working until it is revoked or expires. To revoke it now, open ${KEYS_URL} and revoke the key named "MCP: ${CLIENT_NAME}${clientHost() ? ` on ${clientHost()}` : ""}".`,
+      `The key ${label} could NOT be revoked on Writavo (${revoke.reason}), so it keeps working until it expires. Revoke it now at ${KEYS_URL}: it is the key named ${named}.`,
+    );
+  } else if (identity || deleted) {
+    lines.push(
+      "",
+      `If a key from an earlier sign-in is still listed at ${KEYS_URL} as ${named}, revoke it there.`,
     );
   }
   if (envKeyPresent()) {

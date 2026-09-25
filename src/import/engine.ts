@@ -1,19 +1,11 @@
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
-import { isAbsolute } from "node:path";
 import { WritavoApiError } from "../api/client.js";
 import { MediaError, fetchImage, uploadImage } from "../api/media.js";
+import type { ToolContext } from "../core/context.js";
 import { formatApiError, text, toolError, type ToolResult } from "../errors.js";
 import type { ImportArticle, ImportEnvelope } from "./format.js";
 import { articleImages, htmlImageCount, isHttps, rewriteMarkdownImages } from "./images.js";
-import {
-  newProgress,
-  progressPath,
-  readProgress,
-  writeProgress,
-  type ImportProgress,
-  type ProgressItem,
-} from "./progress.js";
+import { newProgress, type ImportProgress, type ProgressItem, type ProgressStore } from "./progress.js";
 import {
   ARTICLE_STATE_FIELDS,
   call,
@@ -41,14 +33,32 @@ import { checkDocument, itemLabel, type ItemCheck } from "./validate.js";
  *     replays rather than duplicates;
  *   - original dates go through the publish verb, which honours them on a first publish only
  *     and accepts the identical value again, so a retried publish is a no-op;
- *   - what is done is recorded in <file>.writavo-progress.json after every article.
+ *   - what is done is recorded in the host's progress store after every article, when the host
+ *     has one (a file next to the import file, on stdio).
  *
  * Nothing is ever deleted or unpublished, and nothing in the customer's prose is rewritten except
  * the URLs of images that were copied into the media library.
+ *
+ * The engine never touches a filesystem. Where the document came from and where progress is kept
+ * are the host's business, passed in as an ImportSource, because the same engine runs in a Worker
+ * that has neither a file to read nor anywhere to write one.
  */
 
+/** The document being imported, and what the host can do for it. */
+export interface ImportSource {
+  /** How replies name the document: its file path, or "the inline document". */
+  label: string;
+  /** The parsed JSON, not yet validated. */
+  document: unknown;
+  /** Where progress persists between calls. Null for inline data, which is re-sent each call. */
+  store: ProgressStore | null;
+  /** The argument that names this document again in a follow-up call; null for inline data. */
+  reference: Record<string, unknown> | null;
+  /** Serialises two applies of the same document in one process. Null when there is nothing to share. */
+  lockKey: string | null;
+}
+
 export interface ImportOptions {
-  filePath: string;
   dryRun: boolean;
   confirm: boolean;
   batchSize: number;
@@ -84,12 +94,13 @@ interface ValidItem {
 }
 
 interface Loaded {
+  api: ToolContext;
+  source: ImportSource;
   envelope: ImportEnvelope;
   items: ItemCheck[];
   valid: ValidItem[];
   site: SiteInfo;
   progress: ImportProgress;
-  progressFile: string;
   progressExisted: boolean;
   siteCategories: Map<string, string>;
   siteTags: Map<string, string>;
@@ -133,32 +144,23 @@ function isSettled(entry: ProgressItem | undefined, item: ValidItem, opts: Impor
 // ---------------------------------------------------------------------------
 // Loading: the file, the Site, and the checks that need both
 // ---------------------------------------------------------------------------
-async function load(opts: ImportOptions): Promise<Loaded | ToolResult> {
-  if (!isAbsolute(opts.filePath)) {
-    return toolError("import_content needs an absolute file_path, so there is no ambiguity about which file is meant.");
-  }
-  let raw: string;
-  try {
-    raw = await readFile(opts.filePath, "utf8");
-  } catch (err) {
-    return toolError(`Cannot read ${opts.filePath}: ${err instanceof Error ? err.message : String(err)}`);
-  }
-  let value: unknown;
-  try {
-    value = JSON.parse(raw);
-  } catch (err) {
-    return toolError(`${opts.filePath} is not valid JSON: ${err instanceof Error ? err.message : String(err)}`);
-  }
+/** Where progress is, or why there is none, for the closing line of a reply. */
+function progressNote(ctx: Loaded): string {
+  return ctx.source.store
+    ? `Progress is saved in ${ctx.source.store.location}.`
+    : "Nothing is saved between calls for an inline document; articles are matched by external_id, so sending one again updates it rather than duplicating it.";
+}
 
-  const checked = checkDocument(value);
+async function load(api: ToolContext, source: ImportSource): Promise<Loaded | ToolResult> {
+  const checked = checkDocument(source.document);
   if (!checked.envelope || checked.envelopeErrors.length > 0) {
     return toolError(
       [
-        `${opts.filePath} is not a valid Writavo import document, so nothing was checked against the Site and nothing was written.`,
+        `${source.label} is not a valid Writavo import document, so nothing was checked against the Site and nothing was written.`,
         "",
         ...listed(checked.envelopeErrors.map((e) => `- ${e}`)),
         "",
-        "Read the resource writavo://import-format, or call import_content with no file_path, for the format.",
+        "Read the resource writavo://import-format, or call import_content with no document, for the format.",
       ].join("\n"),
     );
   }
@@ -170,12 +172,12 @@ async function load(opts: ImportOptions): Promise<Loaded | ToolResult> {
   let siteAuthors: Map<string, string>;
   let formats: Map<string, string>;
   try {
-    site = await getSite();
+    site = await getSite(api);
     const [categories, tags, authors, types] = await Promise.all([
-      listAll<SiteTerm>("/categories", [["fields", "id,name,slug"]]),
-      listAll<SiteTerm>("/tags", [["fields", "id,name,slug"]]),
-      listAll<SiteAuthor>("/authors", [["fields", "id,name"]]),
-      call<{ items: SiteContentType[] }>({ method: "GET", path: "/content-types" }),
+      listAll<SiteTerm>(api, "/categories", [["fields", "id,name,slug"]]),
+      listAll<SiteTerm>(api, "/tags", [["fields", "id,name,slug"]]),
+      listAll<SiteAuthor>(api, "/authors", [["fields", "id,name"]]),
+      call<{ items: SiteContentType[] }>(api, { method: "GET", path: "/content-types" }),
     ]);
     siteCategories = new Map(categories.map((c) => [c.slug, c.id]));
     siteTags = new Map(tags.map((t) => [t.slug, t.id]));
@@ -187,19 +189,20 @@ async function load(opts: ImportOptions): Promise<Loaded | ToolResult> {
     return formatApiError(err, { tool: "import_content" });
   }
 
-  const progressFile = progressPath(opts.filePath);
-  const existing = readProgress(progressFile);
-  if (typeof existing === "string") {
+  const store = source.store;
+  const existing = store ? store.read() : null;
+  if (store && typeof existing === "string") {
     return toolError(
-      `The progress file ${progressFile} cannot be used because ${existing}. Move it aside to start the import over; articles already imported are found again by external_id, so nothing is duplicated.`,
+      `The progress file ${store.location} cannot be used because ${existing}. Move it aside to start the import over; articles already imported are found again by external_id, so nothing is duplicated.`,
     );
   }
-  if (existing && existing.website_id !== site.id) {
+  if (store && existing && typeof existing !== "string" && existing.website_id !== site.id) {
     return toolError(
-      `The progress file ${progressFile} belongs to an import into a different Site ("${existing.website_name}"). This key is for "${site.name}". If importing into "${site.name}" is intended, move the progress file aside and run again; otherwise sign in to the right Site (login with force: true).`,
+      `The progress file ${store.location} belongs to an import into a different Site ("${existing.website_name}"). This key is for "${site.name}". If importing into "${site.name}" is intended, move the progress file aside and run again; otherwise sign in to the right Site (login with force: true).`,
     );
   }
-  const progress = existing ?? newProgress(opts.filePath, site);
+  const saved = typeof existing === "string" ? null : existing;
+  const progress = saved ?? newProgress(source.label, site);
 
   // Checks that need the Site: every reference must resolve to something that exists or will.
   const fileCategories = new Set((envelope.categories ?? []).map((c) => c.slug));
@@ -223,13 +226,14 @@ async function load(opts: ImportOptions): Promise<Loaded | ToolResult> {
   }
 
   return {
+    api,
+    source,
     envelope,
     items: checked.items,
     valid,
     site,
     progress,
-    progressFile,
-    progressExisted: existing !== null,
+    progressExisted: saved !== null,
     siteCategories,
     siteTags,
     siteAuthors,
@@ -237,13 +241,16 @@ async function load(opts: ImportOptions): Promise<Loaded | ToolResult> {
   };
 }
 
-function nextCall(opts: ImportOptions, overrides: Record<string, unknown>): string {
-  const args: Record<string, unknown> = { file_path: opts.filePath, dry_run: false };
+/** The follow-up call, spelled out. An inline document cannot be quoted back, so it is referred to. */
+function nextCall(source: ImportSource, opts: ImportOptions, overrides: Record<string, unknown>): string {
+  const args: Record<string, unknown> = { ...(source.reference ?? {}), dry_run: false };
   if (!opts.publish) args.publish = false;
   if (!opts.rehostImages) args.rehost_images = false;
-  if (opts.batchSize !== 20) args.batch_size = opts.batchSize;
+  if (source.reference && opts.batchSize !== 20) args.batch_size = opts.batchSize;
   Object.assign(args, overrides);
-  return `import_content ${JSON.stringify(args)}`;
+  return source.reference
+    ? `import_content ${JSON.stringify(args)}`
+    : `import_content with the same data and ${JSON.stringify(args)}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -254,7 +261,7 @@ async function dryRun(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
 
   let index: SiteArticle[];
   try {
-    index = await listAll<SiteArticle>("/articles", [["fields", ARTICLE_STATE_FIELDS]]);
+    index = await listAll<SiteArticle>(ctx.api, "/articles", [["fields", ARTICLE_STATE_FIELDS]]);
   } catch (err) {
     return formatApiError(err, { tool: "import_content" });
   }
@@ -335,7 +342,7 @@ async function dryRun(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
 
   let documents = "";
   try {
-    const usage = await call<{ limits?: { key: string; limit: number | null; used: number }[] }>({ method: "GET", path: "/usage" });
+    const usage = await call<{ limits?: { key: string; limit: number | null; used: number }[] }>(ctx.api, { method: "GET", path: "/usage" });
     const row = usage.data?.limits?.find((l) => l.key === "documents");
     if (row) {
       const after = row.used + counts.create;
@@ -363,7 +370,7 @@ async function dryRun(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
   const published = valid.filter((v) => v.article.status === "published").length;
 
   const lines = [
-    `Dry run of ${opts.filePath} for the Site "${site.name}". Nothing was written.`,
+    `Dry run of ${ctx.source.label} for the Site "${site.name}". Nothing was written.`,
     "",
     `Articles in the file: ${ctx.items.length} (${published} published, ${plural(valid.length - published, "draft")}${invalid.length ? `, ${invalid.length} with problems` : ""}).`,
     `- create: ${counts.create}`,
@@ -385,7 +392,7 @@ async function dryRun(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
     documents,
     `Estimate: about ${reads} reads, ${writes} writes and ${uploads} upload calls, so at least ${minutes} minute${minutes === 1 ? "" : "s"} at the API's rate limits (${RATE.read} reads, ${RATE.write} writes, ${RATE.upload} uploads per minute), over about ${calls} call${calls === 1 ? "" : "s"} of import_content at batch_size ${opts.batchSize}.`,
   ];
-  if (ctx.progressExisted) lines.push(`Progress from an earlier run is in ${ctx.progressFile}.`);
+  if (ctx.progressExisted && ctx.source.store) lines.push(`Progress from an earlier run is in ${ctx.source.store.location}.`);
 
   if (invalid.length > 0) {
     lines.push("", `Problems (${invalid.length} articles). These are not imported until fixed:`);
@@ -395,18 +402,20 @@ async function dryRun(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
 
   lines.push("");
   if (pending.length === 0) {
-    lines.push(invalid.length > 0 ? "Nothing else to import. Fix the problems above and run the dry run again." : "Nothing to import: everything in the file is already on the Site.");
+    lines.push(invalid.length > 0 ? "Nothing else to import. Fix the problems above and run the dry run again." : "Nothing to import: everything in the document is already on the Site.");
   } else {
     const needsConfirm = opts.publish && pending.some((p) => p.article.status === "published");
     if (invalid.length > 0) {
-      lines.push("Fix the problems above in the file and run the dry run again. Or apply now: the articles with problems are skipped and reported, and everything else is imported.");
+      lines.push("Fix the problems above in the document and run the dry run again. Or apply now: the articles with problems are skipped and reported, and everything else is imported.");
     }
     lines.push(
       needsConfirm
         ? `To apply, first ask the user: this publishes ${plural(counts.publish, "article")} on their live site with their original dates${counts.update ? `, and updates to articles already live take effect immediately` : ""}. If they agree, call:`
         : "To apply, call:",
-      nextCall(opts, needsConfirm ? { confirm: true } : {}),
-      "Then call it again with the same arguments until it reports the import is complete.",
+      nextCall(ctx.source, opts, needsConfirm ? { confirm: true } : {}),
+      ctx.source.store
+        ? "Then call it again with the same arguments until it reports the import is complete."
+        : "If a call stops before the end, it lists the articles still to do; send only those in the next call.",
     );
   }
   return text(lines.join("\n"));
@@ -426,7 +435,8 @@ interface ApplyState {
 }
 
 function save(state: ApplyState): void {
-  writeProgress(state.ctx.progressFile, state.ctx.progress);
+  state.ctx.progress.updated_at = new Date().toISOString();
+  state.ctx.source.store?.write(state.ctx.progress);
 }
 
 /** Copy one image, once per import. Undefined means keep the original URL. */
@@ -444,7 +454,7 @@ async function rehost(state: ApplyState, url: string, alt: string | undefined, b
     const fetched = await fetchImage(url, undefined, Math.max(5_000, Math.min(30_000, state.deadline + 20_000 - Date.now())));
     if (!fetched.contentType) throw new MediaError("it is not one of the accepted image types");
     const asset = await retrying(state, () =>
-      uploadImage({ bytes: fetched.bytes, fileName: fetched.fileName, contentType: fetched.contentType!, altText: alt || undefined, bucket }),
+      uploadImage(state.ctx.api, { bytes: fetched.bytes, fileName: fetched.fileName, contentType: fetched.contentType!, altText: alt || undefined, bucket }),
     );
     const hosted = typeof asset.url === "string" ? asset.url : "";
     if (!hosted) throw new MediaError("the media library returned no URL");
@@ -496,6 +506,7 @@ async function ensureTaxonomy(state: ApplyState): Promise<boolean> {
       let id: string | undefined;
       try {
         const created = await call<{ id: string }>(
+          ctx.api,
           { method: "POST", path: `/${kind}`, body, headers: { "Idempotency-Key": `import-${kind}-${sha256(JSON.stringify(body))}` } },
           state.deadline + 20_000,
         );
@@ -504,7 +515,7 @@ async function ensureTaxonomy(state: ApplyState): Promise<boolean> {
       } catch (err) {
         if (!(err instanceof WritavoApiError && err.code === "SLUG_CONFLICT")) throw err;
         // Created meanwhile, by someone else or by an earlier call that did not get to record it.
-        const all = await listAll<SiteTerm>(`/${kind}`, [["fields", "id,name,slug"]]);
+        const all = await listAll<SiteTerm>(ctx.api, `/${kind}`, [["fields", "id,name,slug"]]);
         id = all.find((t) => t.slug === term.slug)?.id;
       }
       if (!id) throw new ItemProblem(`the ${kind === "categories" ? "category" : "tag"} "${term.slug}" could not be created`);
@@ -533,6 +544,7 @@ async function ensureTaxonomy(state: ApplyState): Promise<boolean> {
       is_default: false,
     };
     const created = await call<{ id: string }>(
+      ctx.api,
       { method: "POST", path: "/authors", body, headers: { "Idempotency-Key": `import-author-${sha256(JSON.stringify(body))}` } },
       state.deadline + 20_000,
     );
@@ -626,7 +638,7 @@ async function processArticle(state: ApplyState, item: ValidItem): Promise<void>
     }
     const body = buildBody(article, ctx, (url) => (opts.rehostImages ? ctx.progress.images[url]?.url : undefined));
 
-    current = await findByExternalId(article.external_id, state.deadline + 20_000);
+    current = await findByExternalId(ctx.api, article.external_id, state.deadline + 20_000);
     let action: "created" | "updated";
     if (current) {
       if (current.status === "published" && !state.mayTouchLive) {
@@ -643,13 +655,14 @@ async function processArticle(state: ApplyState, item: ValidItem): Promise<void>
       if (current.status === "published" && article.slug && current.slug && current.slug !== article.slug) {
         warnings.push(`its live URL changed from /${current.slug} to /${article.slug}; nothing redirects the old one`);
       }
-      await call({ method: "PATCH", path: `/articles/${encodeURIComponent(current.id)}`, body }, state.deadline + 20_000);
+      await call(ctx.api, { method: "PATCH", path: `/articles/${encodeURIComponent(current.id)}`, body }, state.deadline + 20_000);
       articleId = current.id;
       action = "updated";
       state.counts.updated += 1;
     } else {
       try {
         const created = await call<SiteArticle>(
+          ctx.api,
           {
             method: "POST",
             path: "/articles",
@@ -664,8 +677,8 @@ async function processArticle(state: ApplyState, item: ValidItem): Promise<void>
         current = { id: created.data.id, slug: created.data.slug ?? null, status: "draft", published_at: null };
       } catch (err) {
         if (err instanceof WritavoApiError && err.code === "SLUG_CONFLICT") {
-          const owner = article.slug ? await findBySlug(article.slug, state.deadline + 20_000).catch(() => null) : null;
-          const reason = `slug "${article.slug}" is already used on the Site by article ${owner?.id ?? "(unknown)"}${owner?.external_id ? ` (external_id ${owner.external_id})` : owner ? ", which has no external_id" : ""}. Change the slug in the file, or change that article, then run again with retry_failed: true.`;
+          const owner = article.slug ? await findBySlug(ctx.api, article.slug, state.deadline + 20_000).catch(() => null) : null;
+          const reason = `slug "${article.slug}" is already used on the Site by article ${owner?.id ?? "(unknown)"}${owner?.external_id ? ` (external_id ${owner.external_id})` : owner ? ", which has no external_id" : ""}. Change the slug in the document, or change that article, then run again${ctx.source.store ? " with retry_failed: true" : ""}.`;
           record(state, item, { outcome: "skipped", error: reason });
           state.counts.skipped += 1;
           state.problems.push(`- ${label}: skipped, ${reason}`);
@@ -690,13 +703,14 @@ async function processArticle(state: ApplyState, item: ValidItem): Promise<void>
   }
 
   if (needsPublish && !(previous && previous.hash === item.hash && previous.published)) {
-    current ??= await getArticleState(articleId!, state.deadline + 20_000);
+    current ??= await getArticleState(ctx.api, articleId!, state.deadline + 20_000);
     if (current.status !== "published") {
       const firstPublish = !current.published_at;
       if (!firstPublish && article.published_at && Date.parse(current.published_at!) !== Date.parse(article.published_at)) {
         warnings.push(`it keeps its existing publish date ${current.published_at} (the file says ${article.published_at})`);
       }
       await call(
+        ctx.api,
         {
           method: "POST",
           path: `/articles/${encodeURIComponent(articleId!)}/publish`,
@@ -732,7 +746,7 @@ async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
         `It publishes ${plural(toPublish, "article")} on the Site "${ctx.site.name}" with their original dates, where search engines and readers will see them, and updates to articles already live take effect immediately.${pending.length > toPublish ? ` Drafts imported as drafts: ${pending.length - toPublish}.` : ""}`,
         "",
         "Ask the user whether to go ahead. If they agree, call:",
-        nextCall(opts, { confirm: true }),
+        nextCall(ctx.source, opts, { confirm: true }),
         "To import everything as drafts instead, with nothing made public, pass publish: false.",
       ].join("\n"),
     );
@@ -753,7 +767,7 @@ async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
     if (!(await ensureTaxonomy(state))) stopped = "the time for this call ran out while creating categories, tags and authors";
   } catch (err) {
     save(state);
-    if (err instanceof ItemProblem) return toolError(`import_content stopped: ${err.message}. Nothing after it was imported. Progress is saved in ${ctx.progressFile}.`);
+    if (err instanceof ItemProblem) return toolError(`import_content stopped: ${err.message}. Nothing after it was imported. ${progressNote(ctx)}`);
     if (isTransient(err)) stopped = `the API was busy (${apiProblem(err)})`;
     else return stopReport(state, err);
   }
@@ -811,22 +825,24 @@ async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
     const entries = Object.entries(ctx.progress.items);
     const tally = (pred: (e: ProgressItem) => boolean) => entries.filter(([, e]) => pred(e)).length;
     lines.push(
-      `Import complete for the Site "${ctx.site.name}". Every valid article in ${opts.filePath} has been processed.`,
+      `Import complete for the Site "${ctx.site.name}". Every valid article in ${ctx.source.label} has been processed.`,
       "",
       thisCall,
-      `Across the whole import: created ${tally((e) => e.action === "created")}, updated ${tally((e) => e.action === "updated")}, published ${tally((e) => e.published === true)}, left unchanged ${tally((e) => e.outcome === "deferred")}, skipped ${tally((e) => e.outcome === "skipped")}, failed ${tally((e) => e.outcome === "failed")}${invalid.length ? `, not imported because of problems in the file ${invalid.length}` : ""}. Categories created ${created.categories}, tags ${created.tags}, authors ${created.authors}. Images copied ${Object.values(ctx.progress.images).filter((i) => i.url).length}.`,
+      `${ctx.source.store ? "Across the whole import" : "Across this document"}: created ${tally((e) => e.action === "created")}, updated ${tally((e) => e.action === "updated")}, published ${tally((e) => e.published === true)}, left unchanged ${tally((e) => e.outcome === "deferred")}, skipped ${tally((e) => e.outcome === "skipped")}, failed ${tally((e) => e.outcome === "failed")}${invalid.length ? `, not imported because of problems in the document ${invalid.length}` : ""}. Categories created ${created.categories}, tags ${created.tags}, authors ${created.authors}. Images copied ${Object.values(ctx.progress.images).filter((i) => i.url).length}.`,
     );
     const attention = entries
       .filter(([, e]) => e.outcome === "skipped" || e.outcome === "failed" || e.outcome === "deferred")
       .map(([id, e]) => `- ${id}: ${e.outcome}, ${e.error ?? "no reason recorded"}`);
     if (attention.length > 0) lines.push("", "Needs attention:", ...listed(attention));
     if (invalid.length > 0) {
-      lines.push("", "Not imported because of problems in the file:", ...listed(invalid.map((i) => `- ${itemLabel(i)}: ${i.errors.join("; ")}`)));
+      lines.push("", "Not imported because of problems in the document:", ...listed(invalid.map((i) => `- ${itemLabel(i)}: ${i.errors.join("; ")}`)));
     }
     if (state.warnings.length > 0) lines.push("", "Warnings from this call:", ...listed(state.warnings));
     lines.push(
       "",
-      `Progress is saved in ${ctx.progressFile}. Running the same import again is safe: it changes nothing unless the file changed.`,
+      ctx.source.store
+        ? `Progress is saved in ${ctx.source.store.location}. Running the same import again is safe: it changes nothing unless the file changed.`
+        : "Sending the same document again is safe: articles are matched by external_id and updated, never duplicated.",
       "Next: verify with list_articles (for example status published, order published_at.desc, fields id,title,slug,published_at) that the counts, slugs and dates match the source.",
     );
   } else {
@@ -839,12 +855,26 @@ async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
     if (stopped) lines.push(`Stopped early: ${stopped}.`);
     if (state.problems.length > 0) lines.push("", "Problems this call:", ...listed(state.problems));
     if (state.warnings.length > 0) lines.push("", "Warnings this call:", ...listed(state.warnings));
-    lines.push(
-      "",
-      `Progress is saved in ${ctx.progressFile}.`,
-      "Next: call import_content again with the same arguments to continue:",
-      nextCall(opts, { ...(opts.confirm ? { confirm: true } : {}) }),
-    );
+    if (ctx.source.store) {
+      lines.push(
+        "",
+        progressNote(ctx),
+        "Next: call import_content again with the same arguments to continue:",
+        nextCall(ctx.source, opts, { ...(opts.confirm ? { confirm: true } : {}) }),
+      );
+    } else {
+      // Inline data has no progress file, so sending the whole document again would redo the
+      // articles already done before reaching new ones. The model is told exactly what is left.
+      const left = ctx.valid
+        .filter((v) => !isSettled(ctx.progress.items[v.article.external_id], v, nextOpts, mayTouchLive))
+        .map((v) => v.article.external_id);
+      lines.push(
+        "",
+        progressNote(ctx),
+        `Next: call import_content again with a document holding ONLY the articles not yet done (keep the authors, categories and tags they use), with ${JSON.stringify({ dry_run: false, ...(opts.confirm ? { confirm: true } : {}), ...(opts.publish ? {} : { publish: false }), ...(opts.rehostImages ? {} : { rehost_images: false }) })}. Still to do (${left.length}):`,
+        ...listed(left.map((id) => `- ${id}`), 60),
+      );
+    }
   }
   return text(lines.join("\n"));
 }
@@ -857,7 +887,7 @@ function stopReport(state: ApplyState, err: unknown): ToolResult {
     [
       guidance,
       "",
-      `Before it stopped, this call created ${c.created}, updated ${c.updated} and published ${c.published} articles. Progress is saved in ${state.ctx.progressFile}; fix the cause and call import_content again with the same arguments to carry on from there.`,
+      `Before it stopped, this call created ${c.created}, updated ${c.updated} and published ${c.published} articles. ${progressNote(state.ctx)} Fix the cause and call import_content again to carry on from there.`,
     ].join("\n"),
   );
 }
@@ -870,21 +900,22 @@ function stopReport(state: ApplyState, err: unknown): ToolResult {
  */
 const running = new Set<string>();
 
-export async function runImport(opts: ImportOptions): Promise<ToolResult> {
+export async function runImport(api: ToolContext, source: ImportSource, opts: ImportOptions): Promise<ToolResult> {
   if (opts.dryRun) {
-    const loaded = await load(opts);
+    const loaded = await load(api, source);
     return "content" in loaded ? loaded : dryRun(opts, loaded);
   }
-  if (running.has(opts.filePath)) {
+  const lock = source.lockKey;
+  if (lock && running.has(lock)) {
     return text(
-      `An import of ${opts.filePath} from an earlier call is still running. Nothing new was started. Wait a few seconds and call import_content again with the same arguments.`,
+      `An import of ${source.label} from an earlier call is still running. Nothing new was started. Wait a few seconds and call import_content again with the same arguments.`,
     );
   }
-  running.add(opts.filePath);
+  if (lock) running.add(lock);
   try {
-    const loaded = await load(opts);
+    const loaded = await load(api, source);
     return "content" in loaded ? loaded : await apply(opts, loaded);
   } finally {
-    running.delete(opts.filePath);
+    if (lock) running.delete(lock);
   }
 }

@@ -2,6 +2,10 @@
   "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
   "mcpServers": {
     "writavo": {
+      "type": "streamable-http",
+      "url": "https://mcp.writavo.com/mcp"
+    },
+    "writavo-local": {
       "type": "stdio",
       "command": "npx",
       "args": ["-y", "@writavo/mcp-server"]

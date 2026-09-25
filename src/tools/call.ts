@@ -1,7 +1,6 @@
-import { randomUUID } from "node:crypto";
 import { apiRequest } from "../api/client.js";
 import type { McpOperation } from "../generated/operations.js";
-import { CONFIG, hasApiKey, keyKind, noKeyMessage } from "../config.js";
+import { forTool, hasKey, keyKindOf, type ToolContext } from "../core/context.js";
 import { formatApiError, publishableKeyRefusal, text, toolError, type ToolResult } from "../errors.js";
 
 export type ToolArgs = Record<string, unknown>;
@@ -20,7 +19,9 @@ function confirmationRequired(operation: McpOperation, args: ToolArgs): ToolResu
       ? "This spends the organisation's credit balance. The engine is charged per unit of work it completes, and the amount depends on what is in the queue."
       : operation.confirmReason === "destructive"
         ? "This permanently deletes content from the customer's Site. There is no trash and no undo."
-        : "This makes content publicly visible on the customer's own live site, where search engines and readers will see it.";
+        : operation.confirmReason === "approval"
+          ? "This takes live content down from the customer's Site: readers and search engines stop seeing it."
+          : "This makes content publicly visible on the customer's own live site, where search engines and readers will see it.";
 
   return text(
     [
@@ -38,12 +39,12 @@ function confirmationRequired(operation: McpOperation, args: ToolArgs): ToolResu
  * function bound to a different row of the generated table, which is what makes a new endpoint in
  * openapi.yaml a working tool with no code behind it.
  */
-export async function callOperation(operation: McpOperation, rawArgs: ToolArgs): Promise<ToolResult> {
+export async function callOperation(ctx: ToolContext, operation: McpOperation, rawArgs: ToolArgs): Promise<ToolResult> {
   const args = rawArgs ?? {};
 
-  if (!hasApiKey()) return toolError(noKeyMessage());
+  if (!hasKey(ctx)) return toolError(ctx.notSignedIn());
 
-  if (keyKind() === "publishable" && !operation.publishable) {
+  if (keyKindOf(ctx) === "publishable" && !operation.publishable) {
     return publishableKeyRefusal(operation.tool, operation.scope);
   }
 
@@ -88,14 +89,19 @@ export async function callOperation(operation: McpOperation, rawArgs: ToolArgs):
   if (operation.idempotency) {
     // Generated here rather than asked of the model. A model that invents one reuses it, and a
     // reused key with a different body is a 409 rather than the retry safety it exists to give.
-    headers["Idempotency-Key"] = randomUUID();
+    headers["Idempotency-Key"] = crypto.randomUUID();
   }
   if (operation.ifMatch && typeof args.if_match === "string" && args.if_match.length > 0) {
     headers["If-Match"] = args.if_match;
   }
+  if (operation.approval && typeof args.approval_id === "string" && args.approval_id.length > 0) {
+    // The retry of a request a person has approved. The API matches it to the approval by method,
+    // path and exact body, so nothing else about the request may differ from the first call.
+    headers["Writavo-Approval"] = args.approval_id;
+  }
 
   try {
-    const response = await apiRequest<unknown>({
+    const response = await apiRequest<unknown>(forTool(ctx, operation.tool), {
       method: operation.method,
       path,
       query,
@@ -121,6 +127,3 @@ export async function callOperation(operation: McpOperation, rawArgs: ToolArgs):
     });
   }
 }
-
-/** Exposed for the smoke test, which asserts the base URL cannot be repointed off loopback. */
-export const effectiveBaseUrl = () => CONFIG.apiBaseUrl;

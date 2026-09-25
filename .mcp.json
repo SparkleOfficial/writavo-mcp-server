@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "writavo": {
+      "type": "http",
+      "url": "https://mcp.writavo.com/mcp"
+    }
+  }
+}

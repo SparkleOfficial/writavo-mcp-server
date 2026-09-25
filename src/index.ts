@@ -3,6 +3,7 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createServer } from "./server.js";
 import { CONFIG, redact } from "./config.js";
+import { startKeyExtension } from "./stdio/key-lifecycle.js";
 
 /**
  * NON-NEGOTIABLE 2. On a stdio MCP server, stdout IS the protocol channel: one stray line written
@@ -50,6 +51,10 @@ async function main(): Promise<void> {
   const server = createServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
+
+  // A browser sign-in's key is extended while it is in use, checked now and then daily. After
+  // connect, so a slow or unreachable API can never delay the handshake.
+  startKeyExtension((line) => console.error(line));
 }
 
 main().catch((err: unknown) => {

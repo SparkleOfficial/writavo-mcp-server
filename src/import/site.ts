@@ -1,4 +1,5 @@
 import { apiRequest, WritavoApiError, type ApiRequest, type ApiResponse } from "../api/client.js";
+import type { ToolContext } from "../core/context.js";
 
 /**
  * The reads and writes the importer makes, with the patience a long import needs.
@@ -24,10 +25,10 @@ export function isTransient(err: unknown): boolean {
   return err instanceof WritavoApiError && (TRANSIENT_CODES.has(err.code) || err.status >= 500);
 }
 
-export async function call<T>(request: ApiRequest, deadline = Number.POSITIVE_INFINITY): Promise<ApiResponse<T>> {
+export async function call<T>(ctx: ToolContext, request: ApiRequest, deadline = Number.POSITIVE_INFINITY): Promise<ApiResponse<T>> {
   for (let attempt = 0; ; attempt += 1) {
     try {
-      return await apiRequest<T>(request);
+      return await apiRequest<T>(ctx, request);
     } catch (err) {
       if (!isTransient(err) || attempt >= 3) throw err;
       const retryAfter = err instanceof WritavoApiError && err.retryAfter ? Number.parseInt(err.retryAfter, 10) * 1000 : NaN;
@@ -44,12 +45,13 @@ interface Page<T> {
 }
 
 /** Every row of a cursor paginated list, a hundred at a time. */
-export async function listAll<T>(path: string, query: [string, string][] = [], deadline?: number): Promise<T[]> {
+export async function listAll<T>(ctx: ToolContext, path: string, query: [string, string][] = [], deadline?: number): Promise<T[]> {
   const rows: T[] = [];
   let cursor: string | null = null;
   // A cursor that never ends is a server bug, not a big Site. Ten thousand pages is a million rows.
   for (let page = 0; page < 10_000; page += 1) {
     const response: ApiResponse<Page<T>> = await call<Page<T>>(
+      ctx,
       {
         method: "GET",
         path,
@@ -96,8 +98,8 @@ export interface SiteArticle {
 
 export const ARTICLE_STATE_FIELDS = "id,slug,external_id,status,published_at";
 
-export async function getSite(): Promise<SiteInfo> {
-  const response = await call<SiteInfo>({ method: "GET", path: "/site" });
+export async function getSite(ctx: ToolContext): Promise<SiteInfo> {
+  const response = await call<SiteInfo>(ctx, { method: "GET", path: "/site" });
   return { id: String(response.data?.id ?? ""), name: String(response.data?.name ?? "") };
 }
 
@@ -105,8 +107,9 @@ export async function getSite(): Promise<SiteInfo> {
  * The article with this external_id, or null. The match is checked here as well as by the API:
  * a server that ignored the filter would otherwise hand back an unrelated article to overwrite.
  */
-export async function findByExternalId(externalId: string, deadline?: number): Promise<SiteArticle | null> {
+export async function findByExternalId(ctx: ToolContext, externalId: string, deadline?: number): Promise<SiteArticle | null> {
   const response = await call<Page<SiteArticle>>(
+    ctx,
     {
       method: "GET",
       path: "/articles",
@@ -121,8 +124,9 @@ export async function findByExternalId(externalId: string, deadline?: number): P
   return (response.data?.items ?? []).find((a) => a.external_id === externalId) ?? null;
 }
 
-export async function findBySlug(slug: string, deadline?: number): Promise<SiteArticle | null> {
+export async function findBySlug(ctx: ToolContext, slug: string, deadline?: number): Promise<SiteArticle | null> {
   const response = await call<Page<SiteArticle>>(
+    ctx,
     {
       method: "GET",
       path: "/articles",
@@ -137,8 +141,9 @@ export async function findBySlug(slug: string, deadline?: number): Promise<SiteA
   return (response.data?.items ?? []).find((a) => a.slug === slug) ?? null;
 }
 
-export async function getArticleState(id: string, deadline?: number): Promise<SiteArticle> {
+export async function getArticleState(ctx: ToolContext, id: string, deadline?: number): Promise<SiteArticle> {
   const response = await call<SiteArticle>(
+    ctx,
     { method: "GET", path: `/articles/${encodeURIComponent(id)}`, query: [["fields", ARTICLE_STATE_FIELDS]] },
     deadline,
   );

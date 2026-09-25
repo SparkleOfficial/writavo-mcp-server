@@ -38,7 +38,80 @@ const OUT_DIR = join(PKG_DIR, "src", "generated");
 const CHECK = process.argv.includes("--check");
 
 const spec = parse(readFileSync(join(ROOT, "openapi.yaml"), "utf8"));
-const { operations, refusals, sections, errorCatalog, baseUrl, problems } = buildMcpSurface(spec);
+
+// -- the calls the server makes for itself ------------------------------------------------------
+// The key self-service routes (extend the key in use, revoke it on logout) are driven by the
+// server's own sign-in lifecycle, never by a model. An assistant that could revoke the key it is
+// running on, or keep a key alive indefinitely, is a tool nobody asked for. They are taken out of
+// the specification the surface is compiled from and recorded as refusals with that reason, so
+// they are accounted for like every other operation whatever tag the specification files them
+// under. Matched by path prefix, so a later /auth/key/* route is withheld without an edit here.
+const HOST_OWNED_PREFIX = "/auth/key/";
+const HOST_OWNED_REASON =
+  "Used by the MCP server itself, never by an assistant: the stdio server extends a signed-in key while it is in use and revokes it on logout, and the hosted server does the same when it refreshes a connection.";
+const hostOwned = [];
+const surfaceSpec = { ...spec, paths: {} };
+for (const [path, item] of Object.entries(spec.paths ?? {})) {
+  if (!path.startsWith(HOST_OWNED_PREFIX)) {
+    surfaceSpec.paths[path] = item;
+    continue;
+  }
+  for (const method of ["get", "post", "put", "patch", "delete"]) {
+    const op = item?.[method];
+    if (!op) continue;
+    hostOwned.push({
+      operationId: String(op.operationId ?? ""),
+      method: method.toUpperCase(),
+      path,
+      tag: String(op.tags?.[0] ?? ""),
+      reason: HOST_OWNED_REASON,
+    });
+  }
+}
+
+const surface = buildMcpSurface(surfaceSpec);
+const { sections, errorCatalog, baseUrl, problems } = surface;
+const refusals = [...surface.refusals, ...hostOwned];
+
+// -- approvals and annotations ------------------------------------------------------------------
+// `x-writavo-approval: <action>` marks an operation the API may park behind a person's approval
+// when an AI agent's key calls it (MCP-2). The tool then takes an optional approval_id, sent back
+// as the Writavo-Approval header on the retry. Read straight from the specification, so a newly
+// gated route grows the argument with no edit here, and a spec without the extension yields none.
+const specOperation = new Map();
+for (const [path, item] of Object.entries(spec.paths ?? {})) {
+  for (const method of ["get", "post", "put", "patch", "delete"]) {
+    const op = item?.[method];
+    if (op?.operationId) specOperation.set(String(op.operationId), { path, method: method.toUpperCase(), op });
+  }
+}
+const APPROVAL_ACTION = /^[a-z]+\.[a-z_]+$/;
+const operations = surface.operations.map((operation) => {
+  const raw = specOperation.get(operation.operationId)?.op?.["x-writavo-approval"];
+  let approval = null;
+  if (raw !== undefined && raw !== null) {
+    if (typeof raw === "string" && APPROVAL_ACTION.test(raw)) approval = raw;
+    else problems.push(`${operation.method} ${operation.path}: x-writavo-approval must be an action like "article.delete", got ${JSON.stringify(raw)}`);
+  }
+  // Destructive means content is removed or taken off the web: every DELETE, and the verbs whose
+  // gate says so (unpublish). Derived rather than listed, like the confirmation gate.
+  const destructive =
+    operation.method === "DELETE" ||
+    /(^|[A-Z_])[uU]npublish/.test(operation.operationId) ||
+    (approval !== null && /\.(delete|unpublish)$/.test(approval));
+  const annotations = {
+    title: operation.summary,
+    readOnlyHint: operation.method === "GET",
+    destructiveHint: destructive,
+    idempotentHint: ["GET", "PUT", "PATCH", "DELETE"].includes(operation.method),
+    // Every tool reaches one closed system, the customer's own Site, through one API.
+    openWorldHint: false,
+  };
+  const description = approval
+    ? `${operation.description} APPROVAL: when the organisation requires it, the first call returns a link for a person to approve instead of acting; after they approve, call again with the same arguments plus approval_id.`
+    : operation.description;
+  return { ...operation, description, approval, annotations };
+});
 
 if (problems.length > 0) {
   console.error("openapi.yaml cannot be turned into an MCP tool surface:");
@@ -80,13 +153,22 @@ export interface McpParam {
 }
 
 /** Why a tool asks before it acts. Null means it does not need to. */
-export type ConfirmReason = "spend" | "destructive" | "public" | null;
+export type ConfirmReason = "spend" | "destructive" | "approval" | "public" | null;
+
+/** MCP tool annotations, derived from the method and the specification's extensions. */
+export interface McpAnnotations {
+  title: string;
+  readOnlyHint: boolean;
+  destructiveHint: boolean;
+  idempotentHint: boolean;
+  openWorldHint: boolean;
+}
 
 export interface McpOperation {
   /** The MCP tool name. */
   tool: string;
   operationId: string;
-  method: "GET" | "POST" | "PATCH" | "DELETE";
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   /** The path template, relative to the base URL. \`{id}\` segments are filled from params. */
   path: string;
   tag: string;
@@ -105,6 +187,12 @@ export interface McpOperation {
   idempotency: boolean;
   /** The API accepts If-Match, so the tool takes an optional if_match argument. */
   ifMatch: boolean;
+  /**
+   * The approval action from \`x-writavo-approval\`, or null. When set, the API may answer an AI
+   * agent's call with 428 and a link for a person, and the tool takes an optional approval_id.
+   */
+  approval: string | null;
+  annotations: McpAnnotations;
   params: McpParam[];
 }
 

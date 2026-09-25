@@ -1,8 +1,8 @@
 {
-  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "writavo",
+  "displayName": "Writavo",
   "version": "0.3.0",
-  "description": "Manage a Writavo Site's content from an AI agent: the Writavo MCP server (hosted, or local over stdio) plus a skill that walks the draft, edit, schedule and publish loop.",
+  "description": "Manage a Writavo Site's content from Claude Code: the hosted Writavo MCP server (sign in once in the browser, no key to paste) plus a skill that walks the draft, edit, schedule and publish loop.",
   "author": { "name": "Writavo", "url": "https://writavo.com" },
   "homepage": "https://writavo.com/docs/mcp",
   "repository": "https://github.com/SparkleOfficial/writavo-mcp-server",

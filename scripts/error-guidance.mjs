@@ -40,7 +40,8 @@ export const ERROR_GUIDANCE = {
     "You reused a key with a different body. That is a bug in the client rather than a retry: generate one key per logical operation and reuse it only to repeat that same operation.",
   IDEMPOTENCY_KEY_IN_FLIGHT:
     "The first request with this key is still running. Wait a moment and retry with the same key; you will get the original response replayed.",
-  CONFLICT: "The object changed under you mid request. Re-read it and retry.",
+  CONFLICT:
+    "The request clashes with the object's current state. Read `error.message` first: when it names the step to take (for example \"This article is live. Unpublish it first.\"), do that step, then retry. Otherwise the object changed mid request: re-read it and retry.",
   PRECONDITION_FAILED:
     "Your `If-Match` did not match, so someone edited the object since you read it. Nothing was written. Re-read, merge your change on top, and retry with the new `ETag`.",
   VALIDATION_FAILED:
@@ -51,6 +52,18 @@ export const ERROR_GUIDANCE = {
     "Writes are paused. Reads usually keep working and your published blog is served from cache, so your site stays up. Retry after the window in `Retry-After`.",
   INTERNAL_ERROR:
     "Ours, not yours. Safe to retry, and safer with the same `Idempotency-Key`, which guarantees you do not create a second object if the first request actually succeeded. Quote the `request_id` if you contact support.",
+  FORBIDDEN:
+    "Read the message: it names the reason and what to do instead. On `POST /auth/key/extend` the key is not one that may extend itself (only a live key from a device or AI-assistant sign-in can), its creator can no longer manage API keys, or AI agent access is off; signing in again gets a fresh key. On `POST /auth/device` it means `flow` was set to `oauth`, which only Writavo's hosted MCP server may do: leave `flow` out.",
+  AGENT_ACCESS_DISABLED:
+    "An owner or admin turned AI agent access off for this organisation. Nothing you send will work until it is turned back on in Settings > AI agents; the key itself is fine and needs no new sign-in once it is. Keys made in the dashboard are not affected.",
+  APPROVAL_REQUIRED:
+    "Nothing has happened yet. Show the person `error.approval.url`, where they can approve or deny this exact request. Once they approve, send the identical request again with the header `Writavo-Approval: <error.approval.id>`. Do not change the path or the body, and do not retry in a loop: an approval lasts 24 hours.",
+  APPROVAL_PENDING:
+    "The person has not decided yet. Wait for them to approve at `error.approval.url`, then retry with the same `Writavo-Approval` id. Polling will not speed it up.",
+  APPROVAL_DENIED:
+    "A person looked at this request and said no. Do not retry it, and do not rephrase it to get around the refusal; ask them what they would like instead.",
+  APPROVAL_INVALID:
+    "The approval id you sent is expired, already used, for a different request, or unknown. Approvals are single use and bound to the exact request. Retry without `Writavo-Approval` to ask for a new one.",
 };
 
 /**
@@ -75,4 +88,6 @@ export const ERROR_LINKS = {
   PAYMENT_METHOD_REQUIRED: [{ label: "Add a payment method", url: `${DASHBOARD}/billing` }],
   RATE_LIMIT_EXCEEDED: [{ label: "The rate limit classes", url: `${DOCS}/rate-limits` }],
   VALIDATION_FAILED: [{ label: "The content lifecycle", url: `${DOCS}/content-lifecycle` }],
+  AGENT_ACCESS_DISABLED: [{ label: "AI agent settings", url: `${DASHBOARD}/settings/agents` }],
+  APPROVAL_PENDING: [{ label: "AI agent settings", url: `${DASHBOARD}/settings/agents` }],
 };

@@ -61,7 +61,7 @@ function describe(param: McpParam): string {
   return parts.join(" ").trim();
 }
 
-/** The tool's whole input shape: the operation's arguments plus the two the client adds. */
+/** The tool's whole input shape: the operation's arguments plus the ones the client adds. */
 export function inputShapeFor(operation: McpOperation): Record<string, z.ZodTypeAny> {
   const shape: Record<string, z.ZodTypeAny> = {};
   for (const param of operation.params) shape[param.name] = zodFor(param);
@@ -72,6 +72,15 @@ export function inputShapeFor(operation: McpOperation): Record<string, z.ZodType
       .optional()
       .describe(
         "The ETag from your last read of this object. Send it and the write is refused if somebody else changed the object in the meantime, rather than silently overwriting their work.",
+      );
+  }
+  if (operation.approval) {
+    shape.approval_id = z
+      .string()
+      .uuid()
+      .optional()
+      .describe(
+        "Only when a previous call to this tool returned an approval link and the user has since approved it: the approval id from that reply. Send exactly the same other arguments as that call. Leave it out otherwise.",
       );
   }
   if (operation.confirm) {
