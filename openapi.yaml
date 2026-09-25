@@ -3235,9 +3235,11 @@ paths:
         strongest option for SEO. This records the domain and returns three ready-to-paste snippets: a
         Cloudflare Worker, a Next.js rewrite and an Nginx block. A reverse proxy is free. Nothing on the
         live web changes until the customer installs one; then run `POST /delivery/health-checks` with
-        `method: subdirectory_proxy`. It cannot verify until the blog resolves requests arriving through
-        the proxy for this domain to this Site, which starts once this call has recorded the domain.
-        The check only passes when the page served at the domain carries this Site's own
+        `method: subdirectory_proxy`. Each snippet forwards `/blog/*` to this Site's own address on the
+        Writavo blog (`https://blog.writavo.com/_proxy/<id>/...`), so the blog knows which Site a
+        forwarded request is for without the customer's Host; it renders links under `/blog` and puts
+        canonical URLs on the customer's domain itself, and pages stay out of search indexes until the
+        health check passes. The check only passes when the page served at the domain carries this Site's own
         `<meta name="writavo-site" content="...">` marker (the first 32 hex characters of sha256 of `writavo-site:` plus the Site id), so a proxy pointed at another Site's blog never verifies.
 
         `domain` is a bare hostname; a Writavo hosted address is `422`. Changing the domain resets the
@@ -3368,9 +3370,12 @@ paths:
       tags: [Delivery]
       summary: Connect a custom domain
       description: |
-        Serve the blog at a hostname the customer owns, such as `blog.example.com`. Returns the CNAME
-        record to add at their DNS provider; the domain verifies and gets its certificate on its own once
-        the record resolves (Writavo checks every 10 minutes), and `GET /delivery` shows the status.
+        Serve the blog at a hostname the customer owns, such as `blog.example.com`. Returns the DNS
+        records to add at their DNS provider (`dns_records`: a CNAME for a subdomain, an A record for an
+        apex domain, and a TXT record only when the domain is already in use on another hosting account);
+        the domain verifies and gets its HTTPS certificate on its own once the records resolve (Writavo
+        checks every 10 minutes), and `GET /delivery` shows the status. The records must be DNS only,
+        not proxied through a CDN.
 
         A custom domain costs 5 US dollars a month from the day it verifies. One still `pending` or
         `failed` 14 days after it was connected is deleted and released automatically; connect it again
@@ -9658,10 +9663,14 @@ components:
           enum: [pending, verified, failed]
           description: '`pending` until the DNS record resolves and Writavo verifies it (checked every 10 minutes), then `verified`; `failed` if it could not be verified. Pending or failed for 14 days means it is deleted and released.'
         ssl_status: {type: [string, "null"]}
-        cname_target: {type: string, description: Where the CNAME record must point.}
+        cname_target: {type: string, description: 'The routing record''s value: where the CNAME points, or the IPv4 address for an apex domain.'}
+        dns_records:
+          type: array
+          description: Every DNS record still to add, routing record first. Empty once DNS is right.
+          items: {$ref: "#/components/schemas/DnsRecord"}
         last_error:
           type: [string, "null"]
-          description: 'Why verification has not succeeded: the certificate provider''s reason. Cleared once it verifies. A domain still pending or failed 14 days after it was connected is deleted and released, and then no longer appears here.'
+          description: 'Why verification has not succeeded: the hosting provider''s reason. Cleared once it verifies. A domain still pending or failed 14 days after it was connected is deleted and released, and then no longer appears here.'
         created_at: {type: string, format: date-time}
 
     DeliveryStatus:
@@ -9735,13 +9744,29 @@ components:
 
     CustomDomainConnected:
       type: object
-      required: [hostname, verification_status, cname_target, instructions]
+      required: [hostname, verification_status, cname_target, dns_records, instructions]
       properties:
         hostname: {type: string}
         verification_status: {type: string, enum: [pending, verified, failed]}
         ssl_status: {type: [string, "null"]}
-        cname_target: {type: string}
+        cname_target: {type: string, description: 'The routing record''s value (a CNAME target, or an IPv4 address for an apex domain).'}
+        dns_records:
+          type: array
+          description: Every DNS record still to add, routing record first. Empty once DNS is right.
+          items: {$ref: "#/components/schemas/DnsRecord"}
         instructions: {type: string, description: What the person adds at their DNS provider.}
+
+    DnsRecord:
+      type: object
+      required: [type, name, value, purpose]
+      properties:
+        type: {type: string, enum: [CNAME, A, TXT]}
+        name: {type: string, description: The full hostname the record is for.}
+        value: {type: string}
+        purpose:
+          type: string
+          enum: [routing, ownership]
+          description: '`routing` points the domain at Writavo; `ownership` proves the domain may be used here.'
 
     CustomDomainRemoved:
       type: object
