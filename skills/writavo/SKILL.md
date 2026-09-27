@@ -32,14 +32,12 @@ Ghost or Webflow site (use that platform's API).
 | Surface | When |
 |---|---|
 | Hosted MCP `https://mcp.writavo.com/mcp` | You are an assistant with MCP. Sign-in is OAuth in the browser; no key to handle. |
-| Local MCP `@writavo/mcp-server` | You need to import from a file or upload a local image. Same tools, plus file access. |
 | CLI `npx @writavo/cli` | You have a shell. Every command is named after an API operation. |
 | REST `https://api.writavo.com/v1` | Anything else. OpenAPI 3.1 at https://writavo.com/openapi.json. |
 
 MCP setup, hosted: `claude mcp add --transport http writavo https://mcp.writavo.com/mcp` (or add the
-URL as a custom connector); the client opens the browser for sign-in. Local:
-`{"command": "npx", "args": ["-y", "@writavo/mcp-server"]}`, and with no `WRITAVO_API_KEY` set,
-call the `login` tool. The exact command or config for every client (Claude Code, Claude,
+URL as a custom connector); the client opens the browser for sign-in. A client that cannot do
+OAuth can send an API key instead, as an `Authorization: Bearer wv_sk_...` header. The exact command or config for every client (Claude Code, Claude,
 ChatGPT, Codex, Cursor, VS Code, Gemini CLI, Windsurf, Zed) and a troubleshooting table:
 https://writavo.com/docs/mcp.md
 
@@ -55,8 +53,7 @@ instead.
 
 - **The user has a key:** use it. `wv_sk_` keys are secret; never echo one back or commit it.
 - **They do not:** on the hosted MCP server there is nothing to do: the sign-in already happened in
-  the browser. On the local server, run the device sign-in: `login`, then `login_status`.
-  Over REST it is `POST /auth/device` then polling `POST /auth/device/token`. The user approves
+  the browser. Over REST (and in the CLI) it is `POST /auth/device` then polling `POST /auth/device/token`. The user approves
   in their browser and chooses the Site. Details: https://writavo.com/auth.md
 
 Then call `get_site_info` and `verify_api_key` (`GET /ping`, which returns the scopes the key

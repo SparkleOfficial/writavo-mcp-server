@@ -5,11 +5,6 @@
       "type": "streamable-http",
       "url": "https://mcp.writavo.com/mcp"
     },
-    "writavo-local": {
-      "type": "stdio",
-      "command": "npx",
-      "args": ["-y", "@writavo/mcp-server"]
-    },
     "writavo-docs": {
       "type": "streamable-http",
       "url": "https://writavo.com/mcp/docs"

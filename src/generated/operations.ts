@@ -577,6 +577,15 @@ export const OPERATIONS: McpOperation[] = [
         "nullable": true
       },
       {
+        "name": "source",
+        "in": "body",
+        "required": false,
+        "description": "Private provenance for this article. See `ArticleSourceWrite`.",
+        "explode": false,
+        "kind": "string",
+        "nullable": false
+      },
+      {
         "name": "category_id",
         "in": "body",
         "required": false,
@@ -841,6 +850,15 @@ export const OPERATIONS: McpOperation[] = [
         "explode": false,
         "kind": "object",
         "nullable": true
+      },
+      {
+        "name": "source",
+        "in": "body",
+        "required": false,
+        "description": "Private provenance for this article. See `ArticleSourceWrite`.",
+        "explode": false,
+        "kind": "string",
+        "nullable": false
       },
       {
         "name": "category_id",
@@ -1281,6 +1299,15 @@ export const OPERATIONS: McpOperation[] = [
         "explode": false,
         "kind": "string",
         "nullable": true
+      },
+      {
+        "name": "is_active",
+        "in": "body",
+        "required": false,
+        "description": "false archives the term (hidden on the public blog and from the AI; articles keep it). true restores it.",
+        "explode": false,
+        "kind": "boolean",
+        "nullable": false
       }
     ],
     "approval": null,
@@ -1404,6 +1431,15 @@ export const OPERATIONS: McpOperation[] = [
         "explode": false,
         "kind": "string",
         "nullable": true
+      },
+      {
+        "name": "is_active",
+        "in": "body",
+        "required": false,
+        "description": "false archives the term (hidden on the public blog and from the AI; articles keep it). true restores it.",
+        "explode": false,
+        "kind": "boolean",
+        "nullable": false
       }
     ],
     "approval": null,
@@ -1591,6 +1627,15 @@ export const OPERATIONS: McpOperation[] = [
         "explode": false,
         "kind": "string",
         "nullable": true
+      },
+      {
+        "name": "is_active",
+        "in": "body",
+        "required": false,
+        "description": "false archives the term (hidden on the public blog and from the AI; articles keep it). true restores it.",
+        "explode": false,
+        "kind": "boolean",
+        "nullable": false
       }
     ],
     "approval": null,
@@ -1723,6 +1768,15 @@ export const OPERATIONS: McpOperation[] = [
         "explode": false,
         "kind": "string",
         "nullable": true
+      },
+      {
+        "name": "is_active",
+        "in": "body",
+        "required": false,
+        "description": "false archives the term (hidden on the public blog and from the AI; articles keep it). true restores it.",
+        "explode": false,
+        "kind": "boolean",
+        "nullable": false
       }
     ],
     "approval": null,
@@ -2831,14 +2885,14 @@ export const REFUSALS: McpRefusal[] = [
     "method": "POST",
     "path": "/auth/key/extend",
     "tag": "API keys",
-    "reason": "Used by the MCP server itself, never by an assistant: the stdio server extends a signed-in key while it is in use and revokes it on logout, and the hosted server does the same when it refreshes a connection."
+    "reason": "Used by the MCP server itself, never by an assistant: the hosted server extends and revokes a connection's key when it refreshes the connection."
   },
   {
     "operationId": "revokeCurrentApiKey",
     "method": "POST",
     "path": "/auth/key/revoke",
     "tag": "API keys",
-    "reason": "Used by the MCP server itself, never by an assistant: the stdio server extends a signed-in key while it is in use and revokes it on logout, and the hosted server does the same when it refreshes a connection."
+    "reason": "Used by the MCP server itself, never by an assistant: the hosted server extends and revokes a connection's key when it refreshes the connection."
   }
 ];
 

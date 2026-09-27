@@ -453,10 +453,12 @@ async function main(): Promise<void> {
   stub.reset();
   const noKey = await callOperation(STDIO_CONTEXT, operation("list_articles"), {});
   check(
-    "a key-requiring tool explains how to get a key",
+    "a key-requiring tool explains how to get a key, pointing at the hosted server and never at npx",
     noKey.isError === true &&
       bodyOf(noKey).includes("app.writavo.com/settings/api-keys") &&
-      bodyOf(noKey).includes('"WRITAVO_API_KEY": "wv_sk_your_key_here"'),
+      bodyOf(noKey).includes("https://mcp.writavo.com/mcp") &&
+      !bodyOf(noKey).includes("npx") &&
+      !bodyOf(noKey).includes("@writavo/mcp-server"),
     bodyOf(noKey).slice(0, 200),
   );
   check("it made no request at all", stub.requests.length === 0);
@@ -1235,16 +1237,28 @@ async function main(): Promise<void> {
 
   // The version is one constant, and every file that states it agrees.
   const pkg = JSON.parse(readFileSync(join(PACKAGE_ROOT, "package.json"), "utf8")) as { version: string };
-  const serverJson = JSON.parse(readFileSync(join(PACKAGE_ROOT, "server.json"), "utf8")) as { version: string; packages: { version: string }[]; remotes?: { type: string; url: string }[] };
+  const pkgJson = JSON.parse(readFileSync(join(PACKAGE_ROOT, "package.json"), "utf8")) as { private?: boolean; publishConfig?: unknown; scripts?: Record<string, string> };
+  const serverJson = JSON.parse(readFileSync(join(PACKAGE_ROOT, "server.json"), "utf8")) as { version: string; packages?: unknown[]; remotes?: { type: string; url: string }[] };
+  const mcpJson = JSON.parse(readFileSync(join(PACKAGE_ROOT, "mcp.json"), "utf8")) as { mcpServers: Record<string, { type?: string; command?: string }> };
   const pluginJson = JSON.parse(readFileSync(join(PACKAGE_ROOT, ".claude-plugin", "plugin.json"), "utf8")) as { version: string };
   check(
     `the version is ${VERSION} in the code, package.json, server.json and the Claude plugin`,
-    VERSION === pkg.version && serverJson.version === pkg.version && serverJson.packages.every((p) => p.version === pkg.version) && pluginJson.version === pkg.version,
+    VERSION === pkg.version && serverJson.version === pkg.version && pluginJson.version === pkg.version,
     `${VERSION} / ${pkg.version} / ${serverJson.version} / ${pluginJson.version}`,
   );
   check(
     "server.json lists the hosted server as a streamable-http remote",
     serverJson.remotes?.some((r) => r.type === "streamable-http" && r.url === "https://mcp.writavo.com/mcp") === true,
+  );
+  // Owner decision 2026-09-27: the npm package is dropped and the hosted server is the only way in.
+  check(
+    "the package is private and never published (no publishConfig, no prepublishOnly)",
+    pkgJson.private === true && pkgJson.publishConfig === undefined && pkgJson.scripts?.prepublishOnly === undefined,
+  );
+  check("server.json lists no npm/stdio package, only the hosted remote", serverJson.packages === undefined || serverJson.packages.length === 0);
+  check(
+    "mcp.json offers no local stdio server",
+    Object.values(mcpJson.mcpServers).every((server) => server.type !== "stdio" && server.command === undefined),
   );
 
   // The core as the Worker mounts it: a key from the grant, no filesystem, no login tools.

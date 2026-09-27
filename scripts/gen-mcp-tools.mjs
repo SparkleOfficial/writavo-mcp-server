@@ -50,7 +50,7 @@ const spec = parse(readFileSync(join(ROOT, "openapi.yaml"), "utf8"));
 // under. Matched by path prefix, so a later /auth/key/* route is withheld without an edit here.
 const HOST_OWNED_PREFIX = "/auth/key/";
 const HOST_OWNED_REASON =
-  "Used by the MCP server itself, never by an assistant: the stdio server extends a signed-in key while it is in use and revokes it on logout, and the hosted server does the same when it refreshes a connection.";
+  "Used by the MCP server itself, never by an assistant: the hosted server extends and revokes a connection's key when it refreshes the connection.";
 const hostOwned = [];
 const surfaceSpec = { ...spec, paths: {} };
 for (const [path, item] of Object.entries(spec.paths ?? {})) {

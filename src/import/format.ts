@@ -88,6 +88,29 @@ export const ComparisonSchema = z.strictObject({
   rows: z.array(z.array(z.string())),
 });
 
+/** Where the article came from (0120), kept private: never shown on the public blog. With the
+ *  source page's text, Writavo measures how original the article is itself; without it, an
+ *  originality_pct from the old system is kept as reported, not measured. */
+export const ArticleSourceSchema = z.strictObject({
+  url: url.describe("The page the article was written from."),
+  title: text(500).nullable().optional(),
+  competitor: text(253).nullable().optional().describe("The competitor's domain, matched to the Site's competitors."),
+  content: text(80_000).nullable().optional().describe("The source page's text. Lets Writavo measure originality."),
+  originality_pct: z.number().min(0).max(100).nullable().optional().describe("The old system's own originality figure, kept as reported."),
+  target_keywords: z.array(z.string().max(200)).max(50).optional(),
+  metrics: z
+    .strictObject({
+      seo_score: z.number().min(0).nullable().optional(),
+      organic_traffic: z.number().min(0).nullable().optional(),
+      backlinks: z.number().min(0).nullable().optional(),
+      referring_domains: z.number().min(0).nullable().optional(),
+      ranking_keywords: z.number().min(0).nullable().optional(),
+      top10_keywords: z.number().min(0).nullable().optional(),
+    })
+    .optional()
+    .describe("The source page's SEO strength when it was chosen."),
+});
+
 export const FeaturedImageSchema = z.strictObject({
   url,
   alt: z.string().max(LIMITS.alt).optional(),
@@ -122,6 +145,7 @@ const termFields = {
   slug: slug(LIMITS.termSlug).describe("Matched against the Site by slug; created if missing."),
   name: z.string().min(1).max(LIMITS.termName),
   description: text(LIMITS.termDescription).nullable().optional().describe("Shown on the archive page. Filled on an existing term only when it has none."),
+  is_active: z.boolean().optional().describe("false imports it archived: kept, but hidden on the public blog and from the AI. Only applied when the term is created."),
 };
 
 export const CategorySchema = z.strictObject(termFields);
@@ -156,6 +180,7 @@ const articleFields = {
   category: z.string().min(1).optional().describe("A categories[].slug, or the slug of a category already on the Site."),
   tags: z.array(z.string().min(1)).optional().describe("tags[].slug values, or slugs of tags already on the Site."),
   format: z.string().min(1).optional().describe("A content type key on the Site, for example how_to. Optional."),
+  source: ArticleSourceSchema.nullable().optional().describe("Where the article came from. Private."),
   published_at: dateTime.optional().describe("When the article was FIRST published at the source."),
   content_updated_at: dateTime.optional().describe("When its content last changed at the source. Not before published_at."),
 };
@@ -282,10 +307,12 @@ Top level:
   changes its slug or name. socials is { network: https URL } with network one of
   ${AUTHOR_SOCIAL_NETWORKS.join(", ")}. author_type is ${AUTHOR_TYPES.join(", ")} (default user).
   is_ai_generated defaults to false, which is right for a real person.
-- categories: [{ slug, name, description? }] and tags: [{ slug, name, description?,
-  group_label? }]. Matched on the Site by slug, created when missing. Slugs are ${SLUG_RULE}, at
+- categories: [{ slug, name, description?, is_active? }] and tags: [{ slug, name, description?,
+  group_label?, is_active? }]. Matched on the Site by slug, created when missing. Slugs are ${SLUG_RULE}, at
   most ${LIMITS.termSlug} characters. On a term already on the Site, description and group_label
-  are filled only when it has none; nothing else about it changes.
+  are filled only when it has none; nothing else about it changes. is_active: false creates the
+  term ARCHIVED (kept and still on its articles, but hidden on the public blog and never chosen by
+  the AI), for a term that was switched off at the source.
 - articles: processed in file order. Each one:
   - external_id (required): your stable id from the source system, for example "blog:1234".
     1 to 255 printable ASCII characters. Never reuse one for a different article.
@@ -304,6 +331,12 @@ Top level:
     per header.
   - author: an authors[].ref. category: a category slug. tags: tag slugs.
   - format: a content type key on the Site (see get_content_types). Optional.
+  - source: optional, private (never on the public blog). The page the article was written from:
+    { url, title?, competitor?, content?, originality_pct?, target_keywords?, metrics? }. With
+    content (the source page's text, max 80,000 characters) Writavo measures how original the
+    article is and labels it inspiration (85%+ original) or rewrite; without it, originality_pct
+    is kept as the old system's reported figure. metrics: seo_score, organic_traffic, backlinks,
+    referring_domains, ranking_keywords, top10_keywords.
   - published_at: required when published. When the article was FIRST published at the source,
     ISO 8601 with a timezone, in the past, not before 1990.
   - content_updated_at: optional. When its content last changed. Not before published_at.

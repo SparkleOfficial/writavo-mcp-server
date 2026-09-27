@@ -8978,7 +8978,7 @@ paths:
                   enum: [device, oauth]
                   default: device
                   description: |
-                    `device` (the default) for a command line tool or a local MCP client. `oauth`
+                    `device` (the default) for a command line tool. `oauth`
                     only from Writavo's hosted MCP server, with its `X-Writavo-Mcp-Worker` header;
                     from anything else it is `403 FORBIDDEN`.
                 redirect_host:
@@ -9899,10 +9899,13 @@ components:
         An article. `content` is **markdown**, not HTML, in both directions: what you send is
         what is stored, and it is rendered at publish time. Send markdown.
 
+        Where the article came from is `source` (see `ArticleSource`): returned on
+        `GET /articles/{id}` to a secret key only, never to a publishable key, never in a list and
+        never in a webhook payload, because it is private provenance, not content.
+
         Several pipeline columns are deliberately absent from this schema rather than exposed as
         read only, because they describe the engine's internal working rather than your content:
-        the source URL and competitor a draft was researched from (provenance about a third
-        party page, not about your article), the image job handle and image ladder stage (vendor
+        the image job handle and image ladder stage (vendor
         job state that changes shape when we change provider), the raw quality critique (an
         unstable model output), the source page's SEO score (a number about someone else's page),
         the dispatcher's priority ordering knob, and the rewrite attempt counter. Exposing any of
@@ -10031,6 +10034,80 @@ components:
             bookkeeping, so it is the honest value for `dateModified` and a sitemap `lastmod`.
         created_at: { type: string, format: date-time, readOnly: true }
         updated_at: { type: string, format: date-time, readOnly: true }
+        source:
+          readOnly: true
+          description: |
+            Secret keys only, on `GET /articles/{id}`: where the article came from, or null when it
+            has no source. Absent for a publishable key, in lists and in webhook payloads.
+          oneOf:
+            - $ref: '#/components/schemas/ArticleSource'
+            - type: "null"
+
+    ArticleSource:
+      type: object
+      description: |
+        Private provenance: the page an article was written from and how that page was used.
+        `usage` is derived from `originality_pct` (the share of the article's 5-word phrases not
+        found in the source text): `inspiration` at 85% or more, `rewrite` below, `unmeasured`
+        when there is no figure. `originality_method` says whether Writavo measured it against the
+        stored source text or kept a figure reported by another system on import.
+      properties:
+        url: { type: [string, "null"], format: uri }
+        title: { type: [string, "null"] }
+        origin:
+          type: [string, "null"]
+          enum: [competitor, feed, import, null]
+          description: competitor = found by the pipeline; feed = a news feed item; import = recorded with an imported article.
+        usage: { type: string, enum: [inspiration, rewrite, unmeasured] }
+        originality_pct: { type: [number, "null"], minimum: 0, maximum: 100 }
+        originality_method: { type: [string, "null"], enum: [measured, reported, null] }
+        competitor:
+          type: [object, "null"]
+          properties:
+            name: { type: [string, "null"] }
+            domain: { type: string }
+        metrics:
+          type: [object, "null"]
+          description: The source page's SEO strength when it was chosen.
+          properties:
+            seo_score: { type: [number, "null"] }
+            organic_traffic: { type: [integer, "null"] }
+            backlinks: { type: [integer, "null"] }
+            referring_domains: { type: [integer, "null"] }
+            ranking_keywords: { type: [integer, "null"] }
+            top10_keywords: { type: [integer, "null"] }
+        target_keywords: { type: array, items: { type: string } }
+        has_source_text:
+          type: boolean
+          description: Whether the source page's text is stored (kept permanently), so originality can be re-measured.
+
+    ArticleSourceWrite:
+      type: object
+      additionalProperties: false
+      required: [url]
+      description: |
+        Record where an article came from (typically on import). Private: never shown on the public
+        blog. With `content` (the source page's text) Writavo measures originality itself and
+        re-measures whenever the article body changes through the API; without it,
+        `originality_pct` is kept as `reported`. The page is matched to a competitor on the Site by
+        `competitor` or the URL's host. Send `source: null` to detach.
+      properties:
+        url: { type: string, format: uri, maxLength: 2048 }
+        title: { type: [string, "null"], maxLength: 500 }
+        competitor: { type: [string, "null"], maxLength: 253, description: The competitor's domain. }
+        content: { type: [string, "null"], maxLength: 80000, description: The source page's text. }
+        originality_pct: { type: [number, "null"], minimum: 0, maximum: 100, description: A figure from the old system, kept as reported. }
+        target_keywords: { type: array, maxItems: 50, items: { type: string, maxLength: 200 } }
+        metrics:
+          type: object
+          additionalProperties: false
+          properties:
+            seo_score: { type: [number, "null"], minimum: 0 }
+            organic_traffic: { type: [number, "null"], minimum: 0 }
+            backlinks: { type: [number, "null"], minimum: 0 }
+            referring_domains: { type: [number, "null"], minimum: 0 }
+            ranking_keywords: { type: [number, "null"], minimum: 0 }
+            top10_keywords: { type: [number, "null"], minimum: 0 }
 
     ArticleCreate:
       type: object
@@ -10067,6 +10144,11 @@ components:
         comparison:
           type: [object, "null"]
           description: '`{ title?, headers: [string], rows: [[string]] }`.'
+        source:
+          description: Private provenance for this article. See `ArticleSourceWrite`.
+          oneOf:
+            - $ref: '#/components/schemas/ArticleSourceWrite'
+            - type: "null"
         category_id: { type: [string, "null"], format: uuid }
         author_id: { type: [string, "null"], format: uuid }
         format_id: { type: [string, "null"], format: uuid }
@@ -10108,6 +10190,11 @@ components:
         comparison:
           type: [object, "null"]
           description: '`{ title?, headers: [string], rows: [[string]] }`.'
+        source:
+          description: Private provenance for this article. See `ArticleSourceWrite`.
+          oneOf:
+            - $ref: '#/components/schemas/ArticleSourceWrite'
+            - type: "null"
         category_id: { type: [string, "null"], format: uuid }
         author_id: { type: [string, "null"], format: uuid }
         format_id: { type: [string, "null"], format: uuid }
@@ -10144,6 +10231,9 @@ components:
           type: [string, "null"]
           maxLength: 2000
           description: Shown on the category's page and used as its meta description.
+        is_active:
+          type: boolean
+          description: false = archived. Kept and still on its articles, but hidden on the public blog, from publishable keys and from the AI pipeline.
         article_count:
           type: integer
           readOnly: true
@@ -10167,6 +10257,9 @@ components:
           type: [string, "null"]
           maxLength: 80
           description: A label that groups related tags, for a theme's tag index. Tags only.
+        is_active:
+          type: boolean
+          description: false = archived. Kept and still on its articles, but hidden on the public blog, from publishable keys and from the AI pipeline.
         article_count:
           type: integer
           readOnly: true
@@ -10187,6 +10280,9 @@ components:
           type: [string, "null"]
           maxLength: 2000
           description: An empty string clears it, the same as null.
+        is_active:
+          type: boolean
+          description: false archives the term (hidden on the public blog and from the AI; articles keep it). true restores it.
 
     TaxonomyTermUpdate:
       type: object
@@ -10201,6 +10297,9 @@ components:
           type: [string, "null"]
           maxLength: 2000
           description: An empty string clears it, the same as null.
+        is_active:
+          type: boolean
+          description: false archives the term (hidden on the public blog and from the AI; articles keep it). true restores it.
 
     TagWrite:
       type: object
@@ -10221,6 +10320,9 @@ components:
           type: [string, "null"]
           maxLength: 80
           description: An empty string clears it, the same as null.
+        is_active:
+          type: boolean
+          description: false archives the term (hidden on the public blog and from the AI; articles keep it). true restores it.
 
     TagUpdate:
       type: object
@@ -10239,6 +10341,9 @@ components:
           type: [string, "null"]
           maxLength: 80
           description: An empty string clears it, the same as null.
+        is_active:
+          type: boolean
+          description: false archives the term (hidden on the public blog and from the AI; articles keep it). true restores it.
 
     AuthorType:
       type: string

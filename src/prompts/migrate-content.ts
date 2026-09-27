@@ -21,9 +21,10 @@ export function migrateContentPrompt(args: MigrateContentArgs, host: PromptHost 
    "Bring my existing articles" (the AI pipeline then stays off).`
       : `1. Connect. Call get_site_info. If it says this assistant is not signed in, ask me to reconnect
    the Writavo connector in this assistant (it signs in through the browser; I may need to create
-   an account and finish onboarding first, choosing "Bring my existing articles"). This hosted
-   server cannot read files on my machine: if the export ends up as files here, or the images are
-   local files, tell me to add the local server (npx -y @writavo/mcp-server) and use that instead.`;
+   an account and finish onboarding first, choosing "Bring my existing articles"). This server
+   does not read files from my machine: you read the export and send it to import_content inline,
+   at most 50 articles and 2 MB per call, so split a bigger import into several documents. Images
+   are copied from https URLs only.`;
   const dryRun =
     host === "stdio"
       ? `7. Dry run. Write the JSON document to the export folder and call import_content with its
@@ -88,13 +89,16 @@ ${signIn}
    - published_at: the ORIGINAL first publication date, with its timezone. Not the export date, not
      today, not the last modified date. content_updated_at is the last content change.
    - content: markdown, words unchanged. Images as ![alt](https://...) so they are copied; relative
-     image paths need their absolute https URL${host === "stdio" ? " or an upload_media call with the local path" : ""}.
+     image paths need their absolute https URL${host === "stdio" ? " or an upload_media call with the local path" : " (a local image file can be uploaded with upload_media as base64 and its returned URL used)"}.
    - authors (a ref each; is_ai_generated false for real people), categories and tags (slug,
      name and description; a tag also its group_label), and each post's author, ONE category and
      its tags.
    - excerpt, seo_title, seo_description, seo_keywords, featured_image, faqs, key_takeaways,
      howto_steps (with its own name and description when it has them) and comparison (with its
      title) wherever the source has them.
+   - source, when the old system recorded the page an article was written from: its url, title,
+     competitor, the page's text (content, so Writavo can measure originality) and metrics. It
+     stays private. Categories and tags switched off at the source: is_active false.
    Some things have no place in the format: a second category, category parents, author emails,
    a how-to's time or supplies,
    canonical URLs, custom fields, comments, embeds and shortcodes, and non-https or non-image

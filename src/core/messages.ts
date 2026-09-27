@@ -12,24 +12,19 @@ The quickest fix is to call the login tool. It returns a link for the user to op
 browser, where they sign in (or create an account), pick a Site and approve. This server then
 starts using the new key by itself: no key to copy and no restart.
 
-Or configure a key by hand:
-
-1. Sign up or sign in at ${SIGNUP_URL}
-2. Create a secret key at ${KEYS_URL} and give it the scopes you want the assistant to have
-3. Put the key in your MCP client config and restart the client:
+Or connect to the hosted Writavo MCP server, ${REMOTE_MCP_URL}, which is the supported way to use
+Writavo over MCP. There is nothing to install: add the URL to your MCP client and sign in through
+the browser.
 
    {
      "mcpServers": {
-       "writavo": {
-         "command": "npx",
-         "args": ["-y", "@writavo/mcp-server"],
-         "env": { "WRITAVO_API_KEY": "wv_sk_your_key_here" }
-       }
+       "writavo": { "type": "http", "url": "${REMOTE_MCP_URL}" }
      }
    }
 
-A secret key (wv_sk_) can read and write content. A publishable key (wv_pub_) can only read
-published content, so it cannot create or publish anything.
+The exact command or config for every client is at ${MCP_DOCS_URL}. A client that cannot sign in
+through the browser can send a secret key (wv_sk_, created at ${KEYS_URL}) as an
+"Authorization: Bearer" header instead. Sign up or sign in at ${SIGNUP_URL}.
 
 The get_api_docs tool works without a key, so you can read the whole API reference first.`;
 

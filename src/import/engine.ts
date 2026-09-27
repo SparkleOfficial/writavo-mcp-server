@@ -568,7 +568,7 @@ async function ensureTaxonomy(state: ApplyState): Promise<boolean> {
         continue;
       }
       if (Date.now() > state.deadline) return false;
-      const body = { name: term.name, slug: term.slug, ...extras };
+      const body = { name: term.name, slug: term.slug, ...extras, ...(term.is_active === false ? { is_active: false } : {}) };
       let id: string | undefined;
       try {
         const created = await call<{ id: string }>(
@@ -686,6 +686,7 @@ function buildBody(article: ImportArticle, ctx: Loaded, imageUrl: (url: string) 
           };
   }
   if (article.comparison !== undefined) body.comparison = article.comparison;
+  if (article.source !== undefined) body.source = article.source;
 
   if (article.category !== undefined) {
     const id = progress.categories[article.category] ?? ctx.siteCategories.get(article.category);

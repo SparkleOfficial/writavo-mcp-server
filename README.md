@@ -1,29 +1,26 @@
-# @writavo/mcp-server
+# Writavo MCP server
 
 Your Writavo Site's content, inside an AI assistant. Sign in from the browser, bring an existing
 blog across, draft a post, set its category and byline, attach an image, schedule it, publish it,
 all from a conversation.
 
-There are two ways to run it, with the same tools in both:
-
-- **Hosted** at `https://mcp.writavo.com/mcp` (Streamable HTTP, OAuth 2.1). Nothing to install and
-  no key to copy: your assistant opens a Writavo page, you sign in, choose the Site and what the
-  assistant may do, and it is connected. Works from Claude Code, Claude.ai, ChatGPT, Cursor, VS Code
-  and any client that speaks remote MCP.
-- **Local**, this npm package over stdio, as a subprocess of your client. It adds reading import
-  files and images from your own disk.
+It is hosted at `https://mcp.writavo.com/mcp` (Streamable HTTP, OAuth 2.1), and that is the one way
+to use Writavo over MCP. Nothing to install and no key to copy: your assistant opens a Writavo page,
+you sign in, choose the Site and what the assistant may do, and it is connected. Works from Claude
+Code, Claude.ai, ChatGPT, Cursor, VS Code and any client that speaks remote MCP. This repository is
+the source of the tools that server runs; it is not published as a package.
 
 **Full setup guide, for people and for AI assistants:** <https://writavo.com/docs/mcp> (markdown:
 <https://writavo.com/docs/mcp.md>). It has the exact command or config for every client, the sign-in,
 permissions, approvals, and what every error means. Moving a blog in:
 <https://writavo.com/docs/migrate>.
 
-> **If you are an AI assistant asked to install Writavo:** use the hosted server unless the task
-> needs files on this machine; add it with your client's command below; the person then signs in
+> **If you are an AI assistant asked to install Writavo:** add the hosted server with your client's
+> command below; the person then signs in
 > through the browser (nothing to paste); then call `get_site_info` and `verify_api_key` and tell
 > them which Site you are connected to and what you may do there.
 
-## Connect the hosted server (recommended)
+## Connect
 
 **Claude Code:**
 
@@ -69,6 +66,11 @@ the URL `https://mcp.writavo.com/mcp`, then Connect.
 }
 ```
 
+A client that cannot do OAuth can send a Writavo secret key as the bearer token instead
+(`Authorization: Bearer wv_sk_...`, created at <https://app.writavo.com/settings/api-keys>). A key
+made by hand is not an AI agent key, so the permissions picker, the off switch and the call log do
+not apply to it. Prefer the sign-in.
+
 When you connect, Writavo shows which assistant is asking and where it will send you back, the
 Site to connect, and what it may do: for articles, for categories, tags and authors, for media and
 for the AI pipeline, you choose No access, Read, or Read and write ("Read and run" for the
@@ -78,69 +80,20 @@ key limited to that Site and those permissions, named after the app ("Claude Cod
 You can see every connected assistant, what it called, and revoke it, at
 <https://app.writavo.com/settings/agents>.
 
-## Or run it locally
-
-Add the server to your MCP client. No key is needed to start:
-
-```json
-{
-  "mcpServers": {
-    "writavo": {
-      "command": "npx",
-      "args": ["-y", "@writavo/mcp-server"]
-    }
-  }
-}
-```
-
-Then ask the assistant to sign you in to Writavo. It calls `login`, which gives you a link and a
-short code. Open the link, sign in (or create an account and finish onboarding; choose "Bring my
-existing articles" if you are moving a blog), pick the Site, and approve. The assistant picks the
-key up by itself, with no restart and nothing to copy.
-
-The key is made on your machine and only its hash is sent for approval. It is limited to the Site
-you chose, never carries key or webhook management, expires after 90 days unless it is in use (the
-server extends it while you keep using it, up to a year from sign-in), and is saved to
-`~/.config/writavo/credentials.json` (`$XDG_CONFIG_HOME` is honoured; `%APPDATA%\writavo` on
-Windows) with owner-only permissions. `logout` revokes the key on Writavo and deletes the file.
-
-### Or use a key you created
-
-```json
-{
-  "mcpServers": {
-    "writavo": {
-      "command": "npx",
-      "args": ["-y", "@writavo/mcp-server"],
-      "env": { "WRITAVO_API_KEY": "wv_sk_your_key_here" }
-    }
-  }
-}
-```
-
-Create the key at <https://app.writavo.com/settings/api-keys> and give it only the scopes you want
-the assistant to have. `WRITAVO_API_KEY` always takes precedence over a browser sign-in. A key
-never outranks the person who made it: narrowing your own permissions narrows every key you
-created, on the next request.
-
-Without a key the server still starts, and `login`, `get_api_docs` and the import format
-description all work, so you can read the whole API reference before signing up.
-
 ## What it can do
 
 Thirty six tools are compiled from Writavo's published OpenAPI specification, plus seven written by
-hand on both servers and three more (`login`, `login_status`, `logout`) on the local one:
+hand:
 
 - **Articles.** List, read, create, update, delete, publish, unpublish, schedule, cancel a schedule.
 - **Taxonomy and people.** Categories, tags and authors: list, read, create, update, delete.
 - **Media.** List, read, update, delete, and `upload_media`, which drives the whole three step
   presigned upload in one call so the assistant does not have to orchestrate it. It takes a public
-  `url` or the bytes as `base64` with a `filename`; the local server also takes a `path`.
+  `url` or the bytes as `base64` with a `filename`.
 - **Pipeline.** Trigger a run, read its status, read the queue.
 - **Meta.** Site information, content types, plan usage and balances, and `get_api_docs`, which
   needs no key at all.
-- **Sign-in (local only).** `login`, `login_status` and `logout`, described above. The hosted
-  server signs in with OAuth when you connect it.
+- **Sign-in.** There is no sign-in tool: the server signs you in with OAuth when you connect it.
 - **Plans.** `start_plan_purchase` returns the billing link with a plan preselected. Payment
   happens on Stripe's page in your browser, never in the chat. The CMS (storing, publishing and
   importing content) is pay-as-you-go and needs no plan; a plan buys the AI article pipeline.
@@ -164,14 +117,14 @@ every tool reaches one closed system, your Site.
 
 ## Importing a blog
 
-The `migrate-content` prompt walks an assistant through the whole move: sign in, inspect your
+The `migrate-content` prompt walks an assistant through the whole move: connect, inspect your
 current system with the access you already have, write an import file, dry run, fix, import, and
 verify. Slugs are kept so URLs do not change, published posts keep their original publication
 dates, drafts stay drafts, and images are copied into your media library.
 
-The document is the **Writavo Import Format v1**, a single JSON document. Pass it inline as `data`
-(up to 50 articles and 2 MB per call, which works on the hosted server), or, on the local server,
-as the absolute `path` of a file of any size:
+The document is the **Writavo Import Format v1**, a single JSON document, passed inline as `data`,
+up to 50 articles and 2 MB per call. The assistant reads your export and splits a bigger blog into
+several documents:
 
 ```json
 {
@@ -202,11 +155,9 @@ is what makes a second run update rather than duplicate.
 
 `import_content` is a dry run unless told otherwise: it checks every article against the Site and
 reports what it would create, update and publish, every problem by `external_id`, the images to
-copy and a time estimate, and writes nothing. An import that publishes needs `confirm: true`. From
-a file it runs one batch per call, saves its progress next to the file
-(`<file>.writavo-progress.json`), and is safe to run again: a finished import changes nothing.
-Inline, a call that runs out of time lists the articles still to do, and sending an article again
-updates it rather than duplicating it. It never deletes or unpublishes anything, and it changes
+copy and a time estimate, and writes nothing. An import that publishes needs `confirm: true`. A call that
+runs out of time lists the articles still to do, and sending an article again updates it rather
+than duplicating it, so an import is safe to run again. It never deletes or unpublishes anything, and it changes
 nothing in your content except the URLs of the images it copied.
 
 ## What it will not do without asking
@@ -221,8 +172,7 @@ the live site, removes something or changes the team, and waits for `confirm: tr
 
 Some things are not reachable from an assistant at all, whatever scopes the key carries:
 
-- **API keys.** A server that can mint a secret key is a server whose compromise mints secret keys,
-  and the key it would use to do so is in a config file on the same machine.
+- **API keys.** A server that can mint a secret key is a server whose compromise mints secret keys.
 - **Webhooks.** An assistant that can repoint delivery URLs can quietly redirect your event stream.
 - **The AI agent controls, approving its own requests, payment details, plan changes, ownership,
   deleting a Site or the organisation, the outreach policy and mailbox, and CMS or Bing
@@ -232,7 +182,7 @@ All of these stay in the dashboard.
 
 ### Approvals, and turning agents off
 
-When an assistant signed in through the browser (either server) deletes something or unpublishes an
+When an assistant signed in through the browser deletes something or unpublishes an
 article, your organisation can require a person to approve it first. This is on by default. Actions
 that spend money or change the team (pipeline runs and turning the pipeline up, paid SEO scans,
 custom domains, publishing the hosted site, CMS connections and pushes, auto-refill, raising a
@@ -246,17 +196,14 @@ call they made. Keys you create yourself in the dashboard are not subject to eit
 
 ## What it never writes down
 
-- Your key is sent to `https://api.writavo.com/v1` as a bearer header and to nothing else. No
+- The connection's key is sent to `https://api.writavo.com/v1` as a bearer header and to nothing else. No
   telemetry, no analytics, no third-party host. Each request names the tool that made it
-  (`Writavo-Mcp-Tool`), which is what fills the call log in Settings > AI agents. The base URL is read from the specification and
-  cannot be repointed off `api.writavo.com` by an environment variable. The only other requests
+  (`Writavo-Mcp-Tool`), which is what fills the call log in Settings > AI agents. The base URL is
+  read from the specification. The only other requests
   are the presigned storage upload during `upload_media` or an import, and, during an import, the
   image URLs in your own file, fetched to copy them.
 - Every reply, log line and error is passed through a redactor, so a key cannot reach your
   transcript even if the API echoed it back inside an error message.
-- Standard output carries protocol messages and nothing else. Every console channel is rebound to
-  standard error before the server starts, because one stray line on stdout is a dropped
-  connection.
 
 ## Errors you might see
 
@@ -274,7 +221,7 @@ Each one is answered with what to change rather than a status code.
 | `APPROVAL_PENDING` | Nobody has decided yet | Ask them to open the link; call again once approved |
 | `APPROVAL_DENIED` | A person denied the approval | Nothing to retry; decide what to do instead |
 | `APPROVAL_INVALID` | The approval expired, was used, or was for a different request | Call the tool again without `approval_id` |
-| `API_KEY_REVOKED` / `API_KEY_EXPIRED` | The connection's key was revoked or expired | Sign in again |
+| `API_KEY_REVOKED` / `API_KEY_EXPIRED` | The connection's key was revoked or expired | Reconnect and sign in again |
 | `PAYMENT_METHOD_REQUIRED` | The included CMS allowance is used up and no card is on file | Add a card at <https://app.writavo.com/billing>; not a plan limit |
 
 The full catalog is in `get_api_docs` under `errors`, and at <https://writavo.com/docs/errors>.
@@ -293,8 +240,9 @@ to choose, and so on) are covered at <https://writavo.com/docs/mcp#troubleshooti
 
 ## Development
 
-This package lives in the Writavo monorepo. The tools live once, in `src/core/`, exported as
-`@writavo/mcp-server/core`:
+This package lives in the Writavo monorepo as a private workspace package (it is not published to
+npm). The tools live once, in `src/core/`, exported as `@writavo/mcp-server/core`, which the hosted
+server bundles:
 
 ```ts
 import { createWritavoMcpServer } from "@writavo/mcp-server/core";
@@ -307,9 +255,9 @@ const server = createWritavoMcpServer({
 ```
 
 Nothing reachable from that entry reads the environment, touches a filesystem or keeps a key in
-module state, so it runs in a Cloudflare Worker (the hosted server mounts exactly this) as well as
-in Node. The stdio entry (`src/index.ts`) is the core plus the local extras. Tool schemas,
-descriptions and reference text are generated, not written:
+module state, so it runs in a Cloudflare Worker (the hosted server mounts exactly this). The stdio
+entry (`src/index.ts`) is kept only as a test harness for the offline smoke checks; it is not
+distributed. Tool schemas, descriptions and reference text are generated, not written:
 
 ```
 npm run gen         regenerate from the vendored openapi.yaml
@@ -329,11 +277,11 @@ the tag), which `search_writavo_actions`, `read_writavo_action` and `run_writavo
 
 **MIT** ([LICENSE](LICENSE)). Fork it, modify it, vendor it, ship it inside something else.
 
-The MIT grant covers **this client package only**. It is not a licence to the Writavo Content API
+The MIT grant covers **this client code only**. It is not a licence to the Writavo Content API
 that the package calls, or to any other part of Writavo. Using the API still requires your own
 credentials and is governed by the terms at <https://writavo.com/terms>, and `openapi.yaml` (the
 specification this package is compiled from) remains the proprietary contract it always was.
 
-That split is deliberate. This package is a thin, generated client: there is nothing in it worth
-restricting, and an MIT client is easier to trust, audit, package and list in a registry. The
+That split is deliberate. This code is a thin, generated client: there is nothing in it worth
+restricting, and an MIT client is easier to trust and audit. The
 product is the API behind it.

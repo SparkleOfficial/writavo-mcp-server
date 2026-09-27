@@ -5,14 +5,18 @@ Writavo from inside another project.
 
 ## What this repository is
 
-`@writavo/mcp-server`: the MCP tools for the Writavo Content API (`https://api.writavo.com/v1`).
+The MCP tools for the Writavo Content API (`https://api.writavo.com/v1`), served by the hosted
+Writavo MCP server at `https://mcp.writavo.com/mcp`. The workspace package is named
+`@writavo/mcp-server` but is private: it is not published to npm, and the hosted server is the
+only way Writavo is offered over MCP.
 Its tools are **generated** from the OpenAPI specification, so the server cannot expose an
 operation the API does not have.
 
 The tools live once, in `src/core/` (exported as `@writavo/mcp-server/core`), and are mounted by
-two hosts: the stdio server in this package (`src/index.ts`, plus `login`/`login_status`/`logout`
-and the `path` arguments of `import_content` and `upload_media`), and the hosted server at
-`https://mcp.writavo.com/mcp` (the monorepo's `workers/mcp`, a Cloudflare Worker with OAuth 2.1).
+the hosted server at `https://mcp.writavo.com/mcp` (the monorepo's `workers/mcp`, a Cloudflare
+Worker with OAuth 2.1). The stdio entry in this package (`src/index.ts`, plus
+`login`/`login_status`/`logout` and the `path` arguments of `import_content` and `upload_media`)
+is kept only as the offline smoke test's harness; it is not distributed or documented for users.
 
 It also ships as an Agent Plugin (`plugin.json`, `mcp.json`) and a Claude Code plugin
 (`.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`, `.mcp.json`) with one skill,
@@ -23,8 +27,8 @@ It also ships as an Agent Plugin (`plugin.json`, `mcp.json`) and a Claude Code p
 - Add the hosted server: `claude mcp add --transport http writavo https://mcp.writavo.com/mcp`
   (or `{"type": "http", "url": "https://mcp.writavo.com/mcp"}`). The client signs in with OAuth;
   a person approves in their browser.
-- Or run it locally: `{"command": "npx", "args": ["-y", "@writavo/mcp-server"]}`. With no
-  `WRITAVO_API_KEY`, call the `login` tool and a person approves in their browser.
+- A client that cannot do OAuth can send a Writavo secret key as the bearer token instead
+  (`Authorization: Bearer wv_sk_...`).
 - Exact setup for every client (Claude Code, Claude, ChatGPT, Codex, Cursor, VS Code, Gemini CLI,
   Windsurf, Zed), permissions, approvals and troubleshooting: `https://writavo.com/docs/mcp.md`.
   After connecting, call `get_site_info` and `verify_api_key` and tell the person which Site and
@@ -51,6 +55,8 @@ It also ships as an Agent Plugin (`plugin.json`, `mcp.json`) and a Claude Code p
   violation. Node-only code goes in `src/stdio/` (or the existing stdio modules above).
 - The version is `src/core/version.ts`; keep it equal to `package.json`, `server.json` and both
   plugin manifests (the smoke test checks).
+- **Never publish this package.** `package.json` is `"private": true` on purpose (owner decision
+  2026-09-27). `server.json` lists only the hosted remote; do not add an npm `packages` entry.
 - The API version is `/v1` and additive only: tolerate unknown response fields and treat
   read-only enums as open.
 
@@ -64,5 +70,6 @@ It also ships as an Agent Plugin (`plugin.json`, `mcp.json`) and a Claude Code p
 - A 428 (`APPROVAL_REQUIRED` / `APPROVAL_PENDING`) is a result, not an error: hand the person the
   link, then repeat the call with `approval_id`. Operations marked `x-writavo-approval` take it.
 - Every tool carries annotations; every API request sends `Writavo-Mcp-Tool: <tool>`.
-- Never log, print or persist a secret key except to the credentials file, owner-only.
+- Never log, print or persist a secret key (the stdio harness's owner-only credentials file is the
+  one exception).
 - Errors are branched on `error.code`, never on the message.

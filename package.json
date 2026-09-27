@@ -1,8 +1,9 @@
 {
   "name": "@writavo/mcp-server",
   "version": "0.5.0",
+  "private": true,
   "mcpName": "com.writavo/cms",
-  "description": "MCP server for the Writavo Content API. Hosted at https://mcp.writavo.com/mcp (OAuth, no install) or run locally over stdio: sign in from the browser, import an existing blog, and draft, edit, organise, schedule and publish a Site's content from any AI assistant, with tools generated from the published OpenAPI specification.",
+  "description": "MCP server for the Writavo Content API, hosted at https://mcp.writavo.com/mcp (Streamable HTTP, OAuth sign-in in the browser, nothing to install): import an existing blog, and draft, edit, organise, schedule and publish a Site's content from any AI assistant, with tools generated from the published OpenAPI specification. This workspace package is private: the hosted server bundles its ./core export.",
   "keywords": [
     "mcp",
     "model-context-protocol",
@@ -46,7 +47,6 @@
     "README.md",
     "LICENSE",
     "SECURITY.md",
-    "smithery.yaml",
     "server.json"
   ],
   "scripts": {
@@ -57,7 +57,6 @@
     "smoke": "tsx scripts/smoke.ts",
     "integration": "tsx scripts/integration.ts",
     "test": "npm run smoke",
-    "prepublishOnly": "npm run build && npm run smoke",
     "gen": "node scripts/gen-mcp-tools.mjs",
     "gen:check": "node scripts/gen-mcp-tools.mjs --check"
   },
@@ -73,8 +72,5 @@
   },
   "engines": {
     "node": ">=20"
-  },
-  "publishConfig": {
-    "access": "public"
   }
 }
