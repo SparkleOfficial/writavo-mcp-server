@@ -2,7 +2,7 @@ openapi: 3.1.0
 
 info:
   title: Writavo Content API
-  version: "1.3.0"
+  version: "1.4.0"
   summary: The CMS control plane for a Writavo Site.
   description: |
     The Writavo Content API is the programmable half of the CMS. It lets you create, edit,
@@ -262,9 +262,9 @@ tags:
   - name: Billing
     x-mcp-surface: action
     description: |
-      The plan, credit balance, allowances, overage estimate, invoices, credit packs, auto-refill
-      and the Site's credit cap. Payment details and plan changes are never taken here: they are
-      links a person opens.
+      The plan, credit balance, USD account balance and its activity, allowances, overage
+      estimate, invoices, credit packs, auto-refill and the Site's credit cap. Payment details and
+      plan changes are never taken here: they are links a person opens.
   - name: Insights
     x-mcp-surface: action
     description: |
@@ -551,9 +551,31 @@ paths:
           schema: { type: string, format: uuid }
         - name: tag_id
           in: query
-          description: Return only articles carrying this tag.
+          description: |
+            Return only articles carrying this tag. Repeat the parameter (or separate ids with
+            commas) to match articles carrying ANY of the tags, at most 20. An article carrying
+            several of them is still returned once.
           required: false
-          schema: { type: string, format: uuid }
+          schema:
+            type: array
+            maxItems: 20
+            items: { type: string, format: uuid }
+          style: form
+          explode: true
+        - name: q
+          in: query
+          description: |
+            Text search. Matches the words in the title, excerpt and body (English stemming, so
+            `transcribing` finds `transcription`; web search syntax, so `"exact phrase"` and
+            `-excluded` work), or a substring of the title, for the partial word a stemmer cannot
+            match. It is a filter, not a ranking: results keep the `order` sort, so cursor
+            pagination stays exact. It combines with every other filter, including `status`, so a
+            secret key can search drafts; a publishable key only ever searches published articles.
+            For ranked, best match first search of published posts, use the blog's
+            `/api/v1/search`.
+          required: false
+          schema: { type: string, minLength: 1, maxLength: 200 }
+          example: podcast transcription
         - name: slug
           in: query
           description: Exact slug match. Slugs are unique within a Site, so this returns at most one article.
@@ -1099,7 +1121,8 @@ paths:
         - name: fields
           in: query
           description: |
-            Comma separated field allow list. Default projection: `id, name, slug, article_count`.
+            Comma separated field allow list. Default projection:
+            `id, name, slug, description, article_count`.
           required: false
           schema: { type: string }
       responses:
@@ -1305,7 +1328,8 @@ paths:
         - name: fields
           in: query
           description: |
-            Comma separated field allow list. Default projection: `id, name, slug, article_count`.
+            Comma separated field allow list. Default projection:
+            `id, name, slug, description, group_label, article_count`.
           required: false
           schema: { type: string }
       responses:
@@ -1349,7 +1373,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/TaxonomyTermWrite" }
+            schema: { $ref: "#/components/schemas/TagWrite" }
       responses:
         "201":
           description: The tag was created.
@@ -1423,7 +1447,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/TaxonomyTermUpdate" }
+            schema: { $ref: "#/components/schemas/TagUpdate" }
       responses:
         "200":
           description: The updated tag.
@@ -1505,7 +1529,8 @@ paths:
           in: query
           description: |
             Comma separated field allow list. Default projection:
-            `id, name, bio, avatar_url, is_ai_generated, is_default, created_at`.
+            `id, name, slug, bio, avatar_url, job_title, socials, author_type, is_ai_generated,
+            is_default, created_at`.
           required: false
           schema: { type: string }
       responses:
@@ -1648,6 +1673,7 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/InsufficientScope" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
         "412": { $ref: "#/components/responses/PreconditionFailed" }
         "422": { $ref: "#/components/responses/ValidationFailed" }
         "429": { $ref: "#/components/responses/RateLimited" }
@@ -1850,7 +1876,7 @@ paths:
           application/json:
             schema:
               type: object
-              required: [file_name, content_type]
+              required: [file_name, content_type, size_bytes]
               additionalProperties: false
               properties:
                 file_name:
@@ -1871,9 +1897,11 @@ paths:
                 size_bytes:
                   type: integer
                   minimum: 1
+                  maximum: 10485760
                   description: |
-                    Declared size, so an over limit upload can be refused before the bytes move.
-                    Also verified after the fact.
+                    Declared size in bytes (required, at most 10 MB), so an over limit upload can be
+                    refused before the bytes move. Also verified after the fact: registration refuses
+                    an upload larger than what was declared here.
                 bucket:
                   $ref: "#/components/schemas/MediaBucket"
       responses:
@@ -2352,6 +2380,100 @@ paths:
         "503": { $ref: "#/components/responses/Maintenance" }
         "500": { $ref: "#/components/responses/InternalError" }
 
+  /pipeline/sources:
+    get:
+      operationId: listPipelineSources
+      tags: [Pipeline]
+      summary: List competitor source articles
+      description: |
+        The source queue, newest first. When the Site has competitors with a blog URL, the engine
+        finds their articles (`discovered`), scores each one on its search traffic, ranking keywords
+        and links (`scored`, or `skipped` below the Site's `source_score_threshold`), reads it
+        (`scraped`, or `rejected` / `failed`), and then writes an original article that beats it
+        (`used`, with `article_id` set).
+
+        Metadata and scores only. The text read from the competitor page is never returned by
+        this API.
+
+        A metric that could not be measured is `null`, never `0`.
+      x-scope: pipeline:read
+      x-permission: pipeline.run
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: false
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+        - name: status
+          in: query
+          required: false
+          schema: { $ref: "#/components/schemas/PipelineSourceStatus" }
+        - name: competitor_id
+          in: query
+          required: false
+          description: Only sources found on this competitor's blog.
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: A page of source articles.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        allOf:
+                          - $ref: "#/components/schemas/Page"
+                          - type: object
+                            properties:
+                              items:
+                                type: array
+                                items: { $ref: "#/components/schemas/PipelineSource" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /pipeline/sources/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PipelineSourceId"
+    get:
+      operationId: getPipelineSource
+      tags: [Pipeline]
+      summary: Read one competitor source article
+      description: |
+        One source article with its score breakdown, where it is in the queue, and the article it
+        produced once written. The text read from the competitor page is never returned.
+      x-scope: pipeline:read
+      x-permission: pipeline.run
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: false
+      x-cross-tenant: 404
+      responses:
+        "200":
+          description: The source article.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/PipelineSource" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
   # ==========================================================================
   # PIPELINE: CONFIGURATION, CONTENT PLAN AND REQUEUE (MCP-3)
   # ==========================================================================
@@ -2362,8 +2484,9 @@ paths:
       summary: Read the pipeline configuration
       description: |
         Whether the AI pipeline runs on its own for this Site, and how hard: the publish mode, the daily
-        publish limit, the batch size, the rewrite attempts and the quality threshold, plus when it next
-        runs and whether a run is in flight. Read this before `PATCH /pipeline/config`.
+        publish limit, the batch size, the rewrite attempts and the quality threshold, the competitor
+        source pass mark and its weights and the minimum originality, plus when it next runs and whether
+        a run is in flight. Read this before `PATCH /pipeline/config`.
       x-scope: pipeline:read
       x-permission: none
       x-entitlement: none
@@ -2403,8 +2526,21 @@ paths:
         without review, up to `articles_per_day` a day.
 
         Turning it on checks the plan first: a plan without AI generation is `402 NOT_ENTITLED` rather
-        than a switch that silently does nothing. Turning it off, lowering a number, or any change while
-        it stays off is never gated and never spends anything.
+        than a switch that silently does nothing. Turning it off, or any change while it stays off, is
+        never gated and never spends anything.
+
+        **These settings are a shortcut into the article recipe** (see `GET /pipeline/recipe`). Since
+        openapi 1.4.0 the recipe is what the pipeline follows: every field here except
+        `pipeline_enabled` and `batch_size` is written as a new live recipe version (the equivalent of a
+        draft switched on), which is refused with `409 CONFLICT` while a recipe draft is open. A field
+        the Site's recipe cannot carry is `422` (for example `source_score_threshold` when its ideas do
+        not come from competitor blogs).
+
+        The three competitor source knobs: `source_score_threshold` (0-100) is the SEO score a
+        competitor article must reach before it is scraped and rewritten, `seo_score_weights` says how
+        much each metric counts toward that score, and `min_originality_pct` (0-100) is the share of
+        5-word phrases that must not be copied from the competitor article before an article can
+        publish.
 
         Send `If-Match` with the `ETag` from your last read.
 
@@ -2412,8 +2548,9 @@ paths:
         client, always gets `428 APPROVAL_REQUIRED` on the first try, whatever the organisation's
         approvals switch says, because it spends money or credits. Asked only when the result is a
         running pipeline that does more than before: turning it on, raising `batch_size`,
-        `articles_per_day`, `max_auto_improve_attempts` or `quality_score_threshold`, or switching
-        `publish_mode` to `auto`. Turning it off or lowering anything is never asked. Give the person
+        `articles_per_day`, `max_auto_improve_attempts`, `quality_score_threshold` or
+        `min_originality_pct`, lowering `source_score_threshold`, changing `seo_score_weights`, or
+        switching `publish_mode` to `auto`. Turning it off is never asked. Give the person
         `error.approval.url`; once they approve, repeat the identical request with `Writavo-Approval:
         <error.approval.id>`. The approval is void if what the request would do changes before the
         retry. A key made in the dashboard is asked only when the request comes from an MCP client.
@@ -2426,7 +2563,7 @@ paths:
       x-writavo-approval: pipeline.configure
       x-writavo-approval-kind: money
       x-writavo-approval-always: true
-      x-writavo-approval-when: 'Asked only when the result is a running pipeline that does more than before: turning it on, raising `batch_size`, `articles_per_day`, `max_auto_improve_attempts` or `quality_score_threshold`, or switching `publish_mode` to `auto`. Turning it off or lowering anything is never asked.'
+      x-writavo-approval-when: 'Asked only when the result is a running pipeline that does more than before: turning it on, raising `batch_size`, `articles_per_day`, `max_auto_improve_attempts`, `quality_score_threshold` or `min_originality_pct`, lowering `source_score_threshold`, changing `seo_score_weights`, or switching `publish_mode` to `auto`. Turning it off is never asked.'
       x-agent-consequence: The AI pipeline writes more articles, or starts writing them, and spends the organisation's credits on each one; in auto mode they go live without review.
       x-mcp-surface: action
       parameters:
@@ -2458,6 +2595,530 @@ paths:
         "403": { $ref: "#/components/responses/InsufficientScope" }
         "409": { $ref: "#/components/responses/Conflict" }
         "412": { $ref: "#/components/responses/PreconditionFailed" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "428": { $ref: "#/components/responses/ApprovalRequired" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /pipeline/steps:
+    get:
+      operationId: listRecipeSteps
+      tags: [Pipeline]
+      summary: List the steps a recipe can use
+      description: |
+        The step catalogue for article recipes. A recipe is the Site's pipeline as data: steps in seven
+        fixed sections (where ideas come from, which ideas to keep, research, writing, checks, finishing
+        touches, publishing). Every step here is one Writavo built and priced; there is no custom code.
+
+        Each step lists its section, what it works with (`produces` for an ideas step, `accepts` for the
+        rest, `only_with_ideas` / `only_with_writers` where it needs a particular partner), its settings
+        (type, range, default, a plain label) and what one run costs in credits. `locked` steps are
+        added by Writavo wherever they apply and cannot be removed. A step whose `status` is
+        `coming_soon` cannot be used yet.
+
+        Read this before writing a recipe with `POST /pipeline/recipe/draft`.
+      x-scope: pipeline:read
+      x-permission: none
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: false
+      x-mcp-surface: action
+      responses:
+        "200":
+          description: The step catalogue.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [steps]
+                        properties:
+                          steps:
+                            type: array
+                            items: { $ref: "#/components/schemas/RecipeStep" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /pipeline/templates:
+    get:
+      operationId: listRecipeTemplates
+      tags: [Pipeline]
+      summary: List the starting recipes
+      description: |
+        One ready-made recipe per goal ("Win traffic from competitors", "Cover the news in my niche",
+        "Write the topics I plan", "Build pages from a list", "Keep old articles fresh", "Let AI pick my
+        topics"), each with its spec, its plain sentences and what it costs per article. `needs` lists
+        what a person must fill in before the template can be saved (news feed addresses, a CSV link).
+
+        To start from one, send `{"template_key": "..."}` (or the template's `spec`, edited) to
+        `POST /pipeline/recipe/draft`.
+      x-scope: pipeline:read
+      x-permission: none
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: false
+      x-mcp-surface: action
+      responses:
+        "200":
+          description: The templates.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [templates]
+                        properties:
+                          templates:
+                            type: array
+                            items: { $ref: "#/components/schemas/RecipeTemplate" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /pipeline/recipe:
+    get:
+      operationId: getRecipe
+      tags: [Pipeline]
+      summary: Read the Site's article recipe
+      description: |
+        The recipe that is running (`live`), the draft being edited (`draft`, or null) and the last ten
+        versions. Each version carries its `spec`, the plain `sentences` the dashboard shows, advice
+        (`warnings`) and an `estimate` of what it costs per article and per month (based on the Site's
+        own last 14 days once it has that much history).
+
+        Articles already on their way finish on the recipe version they started on, so switching on a
+        new recipe never changes work in flight.
+      x-scope: pipeline:read
+      x-permission: none
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: false
+      x-mcp-surface: action
+      responses:
+        "200":
+          description: The recipe.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Recipe" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /pipeline/recipe/explain:
+    get:
+      operationId: explainRecipe
+      tags: [Pipeline]
+      summary: Explain the recipe in plain words
+      description: |
+        The recipe as the sentences a person sees on the recipe page, one per step, in order, for
+        example "Every 10 minutes, check 3 news feeds". Use these words when you tell a person what
+        their recipe does.
+      x-scope: pipeline:read
+      x-permission: none
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: false
+      x-mcp-surface: action
+      parameters:
+        - name: version
+          in: query
+          required: false
+          description: Which version to explain. Default `live`.
+          schema: {type: string, enum: [live, draft]}
+      responses:
+        "200":
+          description: The sentences.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [version, status, lines, sections]
+                        properties:
+                          version: {type: integer}
+                          status: {type: string, enum: [draft, live, retired]}
+                          lines:
+                            type: array
+                            items: {type: string}
+                            description: '"Section: sentence", one per step.'
+                          sections:
+                            type: array
+                            items: { $ref: "#/components/schemas/RecipeSentence" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /pipeline/recipe/activity:
+    get:
+      operationId: listRecipeActivity
+      tags: [Pipeline]
+      summary: See what the recipe did, step by step
+      description: |
+        The most recent ideas and articles, each with its step-by-step trace (found, kept or dropped
+        and why, read, written, checked, illustrated, published) and the credits each step charged.
+        Pass `item` (an article, source or topic id) for one item's full trace. Test runs are marked
+        `is_test`.
+      x-scope: pipeline:read
+      x-permission: none
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: false
+      x-mcp-surface: action
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - name: item
+          in: query
+          required: false
+          description: One article, source or topic id.
+          schema: {type: string, format: uuid}
+      responses:
+        "200":
+          description: Recent items with their traces.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [items]
+                        properties:
+                          items:
+                            type: array
+                            items: { $ref: "#/components/schemas/RecipeActivityItem" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /pipeline/recipe/estimate:
+    post:
+      operationId: estimateRecipe
+      tags: [Pipeline]
+      summary: Estimate what a recipe costs
+      description: |
+        Credits per article and per month for a spec (send `spec`, validated as for a draft) or for the
+        Site's `live` or `draft` recipe (send `version`). `per_day` overrides how many articles a day
+        the monthly figure assumes. Nothing is saved and nothing is charged.
+      x-scope: pipeline:read
+      x-permission: none
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: false
+      x-mcp-surface: action
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                spec: { $ref: "#/components/schemas/RecipeSpec" }
+                version: {type: string, enum: [live, draft]}
+                per_day: {type: number, minimum: 1, maximum: 500}
+      responses:
+        "200":
+          description: The estimate.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/RecipeEstimate" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /pipeline/recipe/draft:
+    post:
+      operationId: saveRecipeDraft
+      tags: [Pipeline]
+      summary: Save the draft recipe
+      description: |
+        Save (or replace) the Site's draft recipe. Send `spec`, or `template_key` to start from a
+        template. Nothing runs until the draft is switched on with `POST /pipeline/recipe/draft/activate`,
+        so saving a draft never spends anything.
+
+        The spec is validated against the step catalogue: every section's rules, every setting's type
+        and range, and the combinations (for example, a recipe that publishes on its own needs a quality
+        check). A problem is `422 VALIDATION_FAILED` with `error.fields` keyed by the spec path, such as
+        `spec.keep[1].settings.min_score`. The saved spec is normalised: defaults filled in and locked
+        steps (reading the source, originality, category and tags) added where they apply.
+      x-scope: pipeline:config
+      x-permission: pipeline.config
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-agent-consequence: Saves a draft recipe. Nothing changes until a person switches it on.
+      x-mcp-surface: action
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                spec: { $ref: "#/components/schemas/RecipeSpec" }
+                template_key: {type: string, description: A key from `GET /pipeline/templates`.}
+                note: {type: [string, "null"], maxLength: 300}
+      responses:
+        "200":
+          description: The saved draft.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [draft]
+                        properties:
+                          draft: { $ref: "#/components/schemas/RecipeVersion" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    delete:
+      operationId: discardRecipeDraft
+      tags: [Pipeline]
+      summary: Discard the draft recipe
+      description: Throw the draft away. The live recipe is not touched.
+      x-scope: pipeline:config
+      x-permission: pipeline.config
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-agent-consequence: Discards the draft recipe. The recipe that is running is not changed.
+      x-mcp-surface: action
+      responses:
+        "204": {description: Discarded. No body.}
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /pipeline/recipe/draft/test:
+    post:
+      operationId: testRecipeDraft
+      tags: [Pipeline]
+      summary: Test the draft on one real idea
+      description: |
+        **This spends credits.** Takes ONE real idea through every step of the draft recipe and stops at
+        the review queue. The test article is never published. It returns `202` straight away; follow the
+        test with `GET /pipeline/recipe/activity?item=<item_id>`.
+
+        The idea: for news feeds, the newest story from the recipe's feeds; for competitor blogs, the
+        most recently found post (or pass `url`); for topics, `topic` (or the top planned topic); for a
+        refresh, `article_id` (or the oldest published article). If a keep step drops the idea, the test
+        ends there and the trace says why, which is itself useful.
+
+        **When an AI agent asks.** Always `428 APPROVAL_REQUIRED` on the first try: it spends credits.
+        Retry the identical request with `Writavo-Approval: <error.approval.id>` once a person approves.
+      x-scope: pipeline:run
+      x-permission: pipeline.run
+      x-entitlement: ai.article_generation
+      x-spends-credits: true
+      x-rate-limit-class: pipeline
+      x-publishable: false
+      x-writavo-approval: pipeline.run
+      x-writavo-approval-kind: money
+      x-writavo-approval-always: true
+      x-agent-consequence: Writes one test article with the draft recipe and charges its credits. It is held for review, never published.
+      x-mcp-surface: action
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyRequired"
+        - $ref: "#/components/parameters/WritavoApproval"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                topic: {type: string, maxLength: 300}
+                url: {type: string, format: uri, maxLength: 1900}
+                article_id: {type: string, format: uuid}
+      responses:
+        "202":
+          description: The test started.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [test]
+                        properties:
+                          test:
+                            type: object
+                            required: [item_type, item_id, recipe_version, started_at]
+                            properties:
+                              item_type: {type: string, enum: [source, plan_item]}
+                              item_id: {type: string, format: uuid}
+                              recipe_version: {type: integer}
+                              started_at: {type: string, format: date-time}
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "402": { $ref: "#/components/responses/PaymentRequired" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "428": { $ref: "#/components/responses/ApprovalRequired" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /pipeline/recipe/draft/activate:
+    post:
+      operationId: activateRecipeDraft
+      tags: [Pipeline]
+      summary: Switch the draft recipe on
+      description: |
+        The draft becomes the live recipe; the previous one is kept in the history and
+        `POST /pipeline/recipe/undo` goes back to it. New ideas follow the new recipe at once; articles
+        already on their way finish on the version they started on. Returns the recipe as
+        `GET /pipeline/recipe` does.
+
+        **When an AI agent asks.** Always `428 APPROVAL_REQUIRED` on the first try, whatever the
+        organisation's approvals switch says: a recipe decides what the pipeline spends. The approval
+        page shows the new recipe's cost per article next to the current one. The approval is bound to
+        the draft as it is: an edit after the person approved voids it.
+      x-scope: pipeline:config
+      x-permission: pipeline.config
+      x-entitlement: none
+      x-spends-credits: true
+      x-rate-limit-class: write
+      x-publishable: false
+      x-writavo-approval: pipeline.configure
+      x-writavo-approval-kind: money
+      x-writavo-approval-always: true
+      x-agent-consequence: Replaces the recipe the AI pipeline follows, which changes what every new article costs and whether it publishes without review.
+      x-mcp-surface: action
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyRequired"
+        - $ref: "#/components/parameters/WritavoApproval"
+      responses:
+        "200":
+          description: The recipe, with the new version live.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Recipe" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "428": { $ref: "#/components/responses/ApprovalRequired" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /pipeline/recipe/undo:
+    post:
+      operationId: undoRecipe
+      tags: [Pipeline]
+      summary: Go back to the previous recipe
+      description: |
+        Switch the previous recipe back on, as a new version (the history stays in order). Refused with
+        `409 CONFLICT` while a draft is open.
+
+        **When an AI agent asks.** `428 APPROVAL_REQUIRED` only when the previous recipe costs more per
+        article than the current one.
+      x-scope: pipeline:config
+      x-permission: pipeline.config
+      x-entitlement: none
+      x-spends-credits: true
+      x-rate-limit-class: write
+      x-publishable: false
+      x-writavo-approval: pipeline.configure
+      x-writavo-approval-kind: money
+      x-writavo-approval-always: true
+      x-writavo-approval-when: Asked only when the previous recipe costs more per article than the current one.
+      x-agent-consequence: Switches the previous article recipe back on, which can change what each new article costs.
+      x-mcp-surface: action
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyRequired"
+        - $ref: "#/components/parameters/WritavoApproval"
+      responses:
+        "200":
+          description: The recipe, with the restored version live.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Recipe" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
         "422": { $ref: "#/components/responses/ValidationFailed" }
         "428": { $ref: "#/components/responses/ApprovalRequired" }
         "429": { $ref: "#/components/responses/RateLimited" }
@@ -3023,8 +3684,10 @@ paths:
       summary: Read the knowledge profile
       description: |
         What the AI knows about the business it writes for: the brand voice, the product description and
-        the target audience. Every generated article is written from this, so it is the single most
-        effective thing to get right before turning the pipeline on.
+        the target audience, plus the AI writing profile: the product knowledge the writer may cite, the
+        niche keywords that gate which competitor articles get written, and `prompt_vars`, the Site's
+        values for the brand phrases in the platform writing prompts. Every generated article is written
+        from this, so it is the single most effective thing to get right before turning the pipeline on.
 
         `competitors_seed` is the onboarding suggestion list and is read only; the competitors the SEO
         suite tracks are `GET /seo/competitors`.
@@ -3061,10 +3724,13 @@ paths:
       tags: [Site settings]
       summary: Change the knowledge profile
       description: |
-        Change the brand voice, product description or target audience. Send at least one; `null`
-        clears a field. Each is plain text up to 4000 characters. Once edited the profile is marked as
-        written by a person (`is_auto_generated: false`) and the onboarding generator never overwrites
-        it.
+        Change the brand voice, product description or target audience (plain text up to 4000
+        characters each), the product knowledge (up to 20000), the niche keywords (up to 60, each 1 to
+        60 characters) or any of the `prompt_vars`. Send at least one field; `null` clears a text field.
+        `prompt_vars` is merged: only the keys you send change, each value is text up to 600
+        characters, `null` or `""` sets that key back to its generic default, and an unknown key is
+        `422` naming `prompt_vars.<key>`. Once edited the profile is marked as written by a person
+        (`is_auto_generated: false`) and brand discovery only ever fills what is still empty.
 
         Send `If-Match` with the `ETag` from your last read, so an edit a person made in the dashboard
         in the meantime is not silently overwritten (`412 PRECONDITION_FAILED` if it was).
@@ -3910,9 +4576,11 @@ paths:
       summary: Read the SEO overview
       description: |
         The latest site metrics for the Site's own domain and each tracked competitor (domain rank,
-        estimated organic traffic, ranking keywords by position band, backlinks and referring domains),
-        plus the own site's 90-day trend. Free to read; refreshing costs credits
-        (`POST /seo/site-metrics/refresh`). A null snapshot means never measured, not zero.
+        estimated organic traffic and its value, ranking keywords by position band, keyword movement,
+        backlinks and referring domains), plus the own site's 90-day trend. The own site also carries
+        its top pages and backlink breakdown. Free to read; refreshing costs credits
+        (`POST /seo/site-metrics/refresh`). A null snapshot or field means never measured, not zero:
+        domain rank, spam score and gov/edu counts need paid backlink data, which is off by default.
       x-scope: seo:read
       x-permission: seo.view
       x-entitlement: none
@@ -3946,7 +4614,7 @@ paths:
         Measure the Site's own domain and its tracked competitors again now, rather than at the weekly
         refresh.
 
-        It spends about 12 credits. It runs in the background: the response is `202` with `queued: true` and
+        It spends about 27 credits. It runs in the background: the response is `202` with `queued: true` and
         `estimated_credits`, and `check` names the operation that shows the result a few minutes later
         (`getSeoOverview`). A second request of the same kind within 10 minutes is `409 CONFLICT`. That guard is per
         scan kind ("A site metrics scan is already running."), and every page of a detail pull counts.
@@ -3974,7 +4642,7 @@ paths:
       x-writavo-approval: seo.scan
       x-writavo-approval-kind: money
       x-writavo-approval-always: true
-      x-agent-consequence: Runs a paid site metrics scan that spends about 12 credits.
+      x-agent-consequence: Runs a paid site metrics scan that spends about 27 credits.
       x-mcp-surface: action
       parameters:
         - { $ref: "#/components/parameters/IdempotencyKeyRequired" }
@@ -4052,6 +4720,10 @@ paths:
         Add a competitor domain to track. Free: nothing is measured until a scan runs. At most 25 active
         competitors per Site (`422` on `domain` beyond that); the Site's own domain is `422`; a domain
         already tracked is `409 CONFLICT`.
+
+        Optionally make it a content source at the same time: `blog_url` is its blog listing page, and
+        the two selectors override auto-detection when a page defeats it. `max_articles_per_run`
+        (default 5) caps how many of its articles one pipeline run reads.
       x-scope: seo:write
       x-permission: seo.manage
       x-entitlement: none
@@ -4094,8 +4766,10 @@ paths:
       tags: [SEO]
       summary: Change a competitor
       description: |
-        Rename a competitor or pause it (`is_active: false`), which leaves it out of scans without losing
-        its history. The Site's own row is `409 CONFLICT`.
+        Rename a competitor, pause it (`is_active: false`), which leaves it out of scans without losing
+        its history, or change its blog source fields (`blog_url`, `listing_selector`,
+        `content_selector`, `max_articles_per_run`, `notes`; `null` clears one). Omitted fields are left
+        alone. The Site's own row is `409 CONFLICT`.
       x-scope: seo:write
       x-permission: seo.manage
       x-entitlement: none
@@ -4533,7 +5207,11 @@ paths:
       summary: List content gaps
       description: |
         Keywords competitors rank for and this Site does not, best opportunity first. Plan one into the
-        content plan with `POST /seo/content-gaps/{id}/plan`, or dismiss it.
+        content plan with `POST /seo/content-gaps/{id}/plan`, target it, or dismiss it.
+
+        A `targeted` gap is worked into upcoming AI-written articles where it fits, least recently
+        offered first (`last_offered_at`, `offer_count`). It becomes `covered`, with
+        `covered_article_id`, once an article uses it in its title or at least twice in its body.
       x-scope: seo:read
       x-permission: seo.view
       x-entitlement: none
@@ -4547,7 +5225,7 @@ paths:
         - name: status
           in: query
           required: false
-          schema: {type: string, enum: [open, planned, dismissed]}
+          schema: {type: string, enum: [open, planned, targeted, covered, dismissed]}
           description: Filter by status.
       responses:
         "200":
@@ -4648,10 +5326,12 @@ paths:
     patch:
       operationId: updateContentGap
       tags: [SEO]
-      summary: Dismiss or reopen a content gap
+      summary: Target, dismiss or reopen a content gap
       description: |
-        Set a gap to `dismissed` (not interesting) or back to `open`. `planned` is set only by
-        `POST /seo/content-gaps/{id}/plan`, and a gap already planned is `409 CONFLICT`.
+        Set a gap to `targeted` (work this keyword into upcoming articles where it fits),
+        `dismissed` (not interesting) or back to `open`. `planned` is set only by
+        `POST /seo/content-gaps/{id}/plan`, and a gap already planned is `409 CONFLICT`. `covered`
+        is set only by the engine, when an article uses the keyword.
       x-scope: seo:write
       x-permission: seo.manage
       x-entitlement: none
@@ -4760,6 +5440,54 @@ paths:
                   - type: object
                     properties:
                       data: { $ref: "#/components/schemas/InternalLinkHealth" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /seo/internal-links/health:
+    get:
+      operationId: getInternalLinkReport
+      tags: [SEO]
+      summary: Read the internal link report
+      description: |
+        The full internal link report the dashboard's Internal Links page shows: summary counts, orphan
+        articles (nothing links to them), under-linked articles (fewer than `under_linked_threshold`
+        linking articles; orphans are listed separately), articles with no outbound links, broken links
+        (internal links to a missing or unpublished article, external links that answered 404 or 410),
+        the 25 most linked-to articles (pillars), anchor text usage with generic and ambiguous anchors
+        flagged, and articles whose inbound links lean on one exact anchor.
+
+        Only published articles count, as sources and as targets. `inbound` and `outbound` count
+        distinct linking articles, never self-links. Lists hold at most 200 rows (`list_limit`); the
+        summary counts are exact. Run `rescanInternalLinks` first if `summary.last_checked_at` is null
+        or old.
+      x-scope: seo:read
+      x-permission: seo.view
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: false
+      x-mcp-surface: action
+      parameters:
+        - name: under_linked_threshold
+          in: query
+          required: false
+          description: An article with at least one but fewer than this many linking articles is under-linked.
+          schema: { type: integer, minimum: 1, maximum: 50, default: 3 }
+      responses:
+        "200":
+          description: The internal link report.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/InternalLinkReport" }
+        "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/InsufficientScope" }
         "429": { $ref: "#/components/responses/RateLimited" }
@@ -4916,14 +5644,224 @@ paths:
         "503": { $ref: "#/components/responses/Maintenance" }
         "500": { $ref: "#/components/responses/InternalError" }
 
+  /seo/ai-visibility:
+    get:
+      operationId: getAiVisibility
+      tags: [SEO]
+      summary: Read AI visibility
+      description: |
+        How AI answer engines treat the Site's topics: for each engine (Google AI Overview, Google AI
+        Mode, ChatGPT, Claude, Gemini, Perplexity) the latest AI visibility check with the one before
+        it, the trend over `days` (90 by default, at most 365), the domains the engines cite most for
+        the Site's topics (the Site and its tracked competitors flagged), sample answers, and the
+        latest result per keyword and engine. A trend signal, not a guarantee: coverage varies by
+        engine and topic. `share_of_voice` is the percent of citations to the top domains that went
+        to the Site; `brand_mentions_total` is null for an engine without a mention index. Run a new
+        check with `runAiVisibility`.
+      x-scope: seo:read
+      x-permission: seo.view
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: false
+      x-mcp-surface: action
+      parameters:
+        - name: days
+          in: query
+          required: false
+          description: How many days of trend and keyword results to return, 1 to 365 (default 90).
+          schema: { type: integer, minimum: 1, maximum: 365, default: 90 }
+      responses:
+        "200":
+          description: The AI visibility of the Site.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/AiVisibility" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /seo/ai-visibility/run:
+    post:
+      operationId: runAiVisibility
+      tags: [SEO]
+      summary: Run an AI visibility check now
+      description: |
+        Check up to 20 of the Site's keywords (tracked keywords first, then keywords it ranks for) across
+        Google AI Overview, Google AI Mode, ChatGPT, Claude, Gemini and Perplexity, and record whether
+        each engine mentions or cites the Site, which domains it cites instead, and sample answers.
+
+        It spends one `seo.llm_visibility_run` charge for the whole run, and nothing when the run
+        captures no engine. It runs in the background: the response is `202` with `queued: true` and
+        `estimated_credits`, and `check` names the operation that shows the result a few minutes later
+        (`getAiVisibility`). A second request of the same kind within 10 minutes is `409 CONFLICT`
+        ("An AI visibility scan is already running.").
+
+        While the organisation's plan has no daily spend cap configured, spending is paused and this is
+        `409 FEATURE_UNAVAILABLE` ("Spending is paused: this plan has no daily spend cap configured...");
+        nothing on the caller's side fixes it, so report it rather than retry.
+
+        Checked in this order, each answered before anything is spent: the plan
+        (`402 NOT_ENTITLED`), a primary domain (`409 PREREQUISITE_MISSING`, naming the operation that sets it
+        up), credits (`402 INSUFFICIENT_CREDITS`) and the Site's spend cap (`402 SPEND_CAP_REACHED`).
+
+        **When an AI agent asks.** A key from a device or OAuth sign-in, or any request from an MCP
+        client, always gets `428 APPROVAL_REQUIRED` on the first try, whatever the organisation's
+        approvals switch says, because it spends money or credits. Give the person `error.approval.url`;
+        once they approve, repeat the identical request with `Writavo-Approval: <error.approval.id>`.
+        The approval is void if what the request would do changes before the retry. A key made in the
+        dashboard is asked only when the request comes from an MCP client.
+      x-scope: seo:write
+      x-permission: seo.manage
+      x-entitlement: seo.llm_visibility
+      x-spends-credits: true
+      x-rate-limit-class: pipeline
+      x-publishable: false
+      x-writavo-approval: seo.scan
+      x-writavo-approval-kind: money
+      x-writavo-approval-always: true
+      x-agent-consequence: Runs a paid AI visibility check that spends one `seo.llm_visibility_run` charge.
+      x-mcp-surface: action
+      parameters:
+        - { $ref: "#/components/parameters/IdempotencyKeyRequired" }
+        - { $ref: "#/components/parameters/WritavoApproval" }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EmptyBody" }
+      responses:
+        "202":
+          description: The check is queued.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/ScanQueued" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "402": { $ref: "#/components/responses/PaymentRequired" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "428": { $ref: "#/components/responses/ApprovalRequired" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /engagement/events:
+    post:
+      operationId: recordEngagement
+      tags: [SEO]
+      summary: Record a view, reaction or share
+      description: |
+        For a site that renders its articles itself: record one view, a reader's reaction, or a share
+        click on a published article, from your own server (never from the browser: the key is a
+        secret key). Filter bots and link prefetches before calling.
+
+        Reactions follow one rule per reader and article: a reader has at most one current reaction;
+        sending another replaces it and `reaction: null` removes it. `visitor_id` is your own stable
+        anonymous id for the reader (a cookie value, for example); Writavo stores only a hash of it.
+        The response is the article's totals after the write. An unknown or unpublished slug is 404.
+      x-scope: engagement:write
+      x-permission: articles.write
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-mcp-surface: action
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EngagementEventInput" }
+      responses:
+        "201":
+          description: Recorded. The article's totals after the write.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/PostEngagement" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /engagement/posts/{slug}:
+    get:
+      operationId: getPostEngagement
+      tags: [SEO]
+      summary: Read an article's views, reactions and shares
+      description: |
+        The public counters for one published article: lifetime views, the six reaction totals, share
+        clicks per platform and, with `visitor_id`, that reader's current reaction. Safe for a
+        publishable key: these numbers are shown on the page anyway.
+      x-scope: articles:read
+      x-permission: none
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: true
+      x-mcp-surface: action
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema: {type: string, maxLength: 200}
+          description: The article's slug.
+        - name: visitor_id
+          in: query
+          required: false
+          schema: {type: string, minLength: 8, maxLength: 200}
+          description: Your anonymous id for the reader, to return their current reaction.
+      responses:
+        "200":
+          description: The article's counters.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/PostEngagement" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
   /seo/engagement:
     get:
       operationId: getEngagement
       tags: [SEO]
       summary: Read blog engagement
       description: |
-        Views, reactions and shares on the published blog, by day and by post, for a date range (the
-        last 30 days by default, at most 366 days). Counted without identifying readers.
+        Views, reactions and shares on the published blog, by day and by post, plus reactions by type
+        and shares by platform, for a date range (the last 30 days by default, at most 366 days).
+        Counted without identifying readers. A reader holds one reaction per article at a time: when
+        they switch or remove it, it leaves the day it was made on, so totals never inflate.
       x-scope: seo:read
       x-permission: seo.view
       x-entitlement: none
@@ -6666,6 +7604,191 @@ paths:
         "503": { $ref: "#/components/responses/Maintenance" }
         "500": { $ref: "#/components/responses/InternalError" }
 
+  /billing/credit-packs/{key}/buy-with-balance:
+    parameters:
+      - $ref: "#/components/parameters/CreditPackKey"
+    post:
+      operationId: buyCreditPackWithBalance
+      tags: [Billing]
+      summary: Buy a credit pack with the account balance
+      description: |
+        Buys one credit pack at its catalogue price (`usd_price` from `GET /billing/credit-packs`) out of
+        the organisation's USD account balance, and adds its credits at once. No card is charged and no
+        Stripe page is involved. Read the balance first with `GET /billing` (`credits.usd_balance`).
+
+        Not all of the balance can always buy credits. Money added with `startWalletTopup` can take up
+        to 72 hours to clear before it can buy credits, and CMS pay-as-you-go usage already owed is paid
+        from the balance first. When what is usable is less than the price, the answer is
+        `409 CONFLICT` with the usable figure in the message: add funds, wait for them to clear, pick a
+        smaller pack, or buy the pack by card with `startCreditPurchase`. A balance on hold is also
+        `409 CONFLICT` (the person contacts Writavo support). An unknown or inactive pack is `404`.
+
+        **When an AI agent asks.** A key from a device or OAuth sign-in, or any request from an MCP
+        client, always gets `428 APPROVAL_REQUIRED` on the first try, whatever the organisation's
+        approvals switch says, because it spends money or credits. Give the person
+        `error.approval.url`; once they approve, repeat the identical request (same `Idempotency-Key`)
+        with `Writavo-Approval: <error.approval.id>`. The approval is void if what the request would do
+        changes before the retry, for example the pack is repriced. A key made in the dashboard is asked
+        only when the request comes from an MCP client.
+      x-scope: billing:write
+      x-permission: billing.manage
+      x-entitlement: none
+      x-spends-credits: false
+      x-spends-money: true
+      x-rate-limit-class: write
+      x-publishable: false
+      x-writavo-approval: billing.wallet_buy
+      x-writavo-approval-kind: money
+      x-writavo-approval-always: true
+      x-agent-consequence: The pack's price is taken from the organisation's account balance and its credits are added straight away. It cannot be undone from the API.
+      x-mcp-surface: action
+      parameters:
+        - { $ref: "#/components/parameters/IdempotencyKeyRequired" }
+        - { $ref: "#/components/parameters/WritavoApproval" }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EmptyBody" }
+      responses:
+        "200":
+          description: The pack was bought.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/BalancePurchase" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "428": { $ref: "#/components/responses/ApprovalRequired" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /billing/wallet/checkout:
+    post:
+      operationId: startWalletTopup
+      tags: [Billing]
+      summary: Start adding funds to the account balance
+      description: |
+        Returns a Stripe Checkout link that adds `amount_usd` US dollars to the organisation's account
+        balance. Nothing is charged by this call and no funds are added by it: the person opens the link
+        in their browser and pays by card on Stripe's page, and the money arrives in the balance only
+        when that payment completes. That page is where they consent, so no approval is asked. Give
+        them `checkout_url` exactly as returned; it is shown once and expires after 30 minutes. Card
+        details never pass through the API or an assistant, and the card is not saved.
+
+        Limits: $10 to $2,000 per top-up (to the cent), $2,000 added in any 24 hours, a balance of at
+        most $10,000, and $200 in total during a new account's first week. Going past one is
+        `409 CONFLICT` saying which, and how much can still be added; an amount outside $10 to $2,000 is
+        `422`; too many attempts in an hour is `429`. The person who created the key must have confirmed
+        their email address, or it is `403 FORBIDDEN`. A balance on hold is `409 CONFLICT`.
+
+        What the balance is for: it pays CMS pay-as-you-go usage (going past an included CMS allowance)
+        first, and once the money has cleared (up to 72 hours after the payment) it can buy credit
+        packs with `buyCreditPackWithBalance`. The balance never expires. Unspent balance is refunded
+        only through Writavo support, to the original card; the API cannot refund it.
+      x-scope: billing:write
+      x-permission: billing.manage
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-mcp-surface: action
+      parameters:
+        - { $ref: "#/components/parameters/IdempotencyKeyRequired" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WalletTopupRequest" }
+      responses:
+        "200":
+          description: The checkout link.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/WalletCheckout" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /billing/activity:
+    get:
+      operationId: listBillingActivity
+      tags: [Billing]
+      summary: List balance and credit activity
+      description: |
+        Every movement of the organisation's two balances, newest first: credits (`unit: credit`) and
+        the USD account balance (`unit: usd`). Each row says which way it went (`flow`), where it came
+        from (`source`), how it was paid (`method`), a label a person can read, and the balance after
+        it. Filter with `unit` and `flow`. Page back with `before` set to the previous page's
+        `next_cursor`; `next_cursor` is null on the last page.
+
+        Buying a pack with the balance writes two rows, a USD one out and a credit one in, and each
+        carries the other's `id` in `linked_id`. For invoices and card payments use `listInvoices`.
+      x-scope: billing:read
+      x-permission: billing.manage
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: false
+      x-mcp-surface: action
+      parameters:
+        - name: unit
+          in: query
+          required: false
+          schema: {type: string, enum: [credit, usd]}
+          description: Only credit rows, or only USD balance rows. Both when left out.
+        - name: flow
+          in: query
+          required: false
+          schema: {type: string, enum: [in, out]}
+          description: Only what came in, or only what went out. Both when left out.
+        - name: before
+          in: query
+          required: false
+          schema: {type: string, pattern: '^[1-9][0-9]{0,15}$'}
+          description: The `next_cursor` from the previous page.
+        - name: limit
+          in: query
+          required: false
+          schema: {type: integer, minimum: 1, maximum: 100, default: 25}
+          description: Rows per page.
+      responses:
+        "200":
+          description: A page of activity.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/BillingActivityPage" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
   /billing/links:
     get:
       operationId: getBillingLinks
@@ -8257,6 +9380,11 @@ components:
       in: path
       required: true
       schema: { type: string, format: uuid }
+    PipelineSourceId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
     KeyId:
       name: id
       in: path
@@ -8548,10 +9676,61 @@ components:
       enum: [blog-images, author-avatars]
       default: blog-images
 
+    EngagementEventInput:
+      type: object
+      additionalProperties: false
+      required: [slug, type]
+      properties:
+        slug: {type: string, minLength: 1, maxLength: 200, description: The published article's slug.}
+        type: {type: string, enum: [view, reaction, share]}
+        reaction:
+          type: [string, "null"]
+          enum: [useful, mind_blown, insightful, skeptical, loved, hot_take, null]
+          description: Required when type is reaction. null removes the reader's reaction.
+        platform:
+          type: string
+          enum: [x, linkedin, facebook, other]
+          description: Required when type is share. `other` is a copied link or the system share sheet.
+        visitor_id:
+          type: [string, "null"]
+          minLength: 8
+          maxLength: 200
+          description: |
+            Your stable anonymous id for the reader. Required for reactions; only a hash is stored.
+            With it, a view or a share counts once per 30 minutes per reader and article.
+
+    PostEngagement:
+      type: object
+      required: [slug, views, reactions, shares, user_reaction]
+      properties:
+        slug: {type: string}
+        views: {type: integer, description: Lifetime views.}
+        reactions:
+          type: object
+          description: Current totals per reaction (a reader counts once, for their current pick).
+          properties:
+            useful: {type: integer}
+            mind_blown: {type: integer}
+            insightful: {type: integer}
+            skeptical: {type: integer}
+            loved: {type: integer}
+            hot_take: {type: integer}
+        shares:
+          type: object
+          properties:
+            x: {type: integer}
+            linkedin: {type: integer}
+            facebook: {type: integer}
+            other: {type: integer, description: Copied links and system share sheets.}
+            total: {type: integer}
+        user_reaction:
+          type: [string, "null"]
+          description: The reader's current reaction when visitor_id was sent, else null.
+
     PipelineStage:
       type: string
       description: The engine stage a run belongs to.
-      enum: [dispatch, discover, scrape, extract, plan, generate, improve, classify, images, publish]
+      enum: [dispatch, discover, score, scrape, extract, plan, generate, improve, classify, images, publish]
 
     PipelineRunStatus:
       type: string
@@ -8642,6 +9821,7 @@ components:
         - roles:write
         - billing:read
         - billing:write
+        - engagement:write
         - insights:read
         - logs:read
         - org:write
@@ -8944,6 +10124,10 @@ components:
           type: string
           maxLength: 120
           pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+        description:
+          type: [string, "null"]
+          maxLength: 2000
+          description: Shown on the category's page and used as its meta description.
         article_count:
           type: integer
           readOnly: true
@@ -8959,6 +10143,14 @@ components:
           type: string
           maxLength: 120
           pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+        description:
+          type: [string, "null"]
+          maxLength: 2000
+          description: Shown on the tag's page and used as its meta description.
+        group_label:
+          type: [string, "null"]
+          maxLength: 80
+          description: A label that groups related tags, for a theme's tag index. Tags only.
         article_count:
           type: integer
           readOnly: true
@@ -8975,6 +10167,10 @@ components:
           maxLength: 120
           pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$"
           description: Derived from `name` when omitted.
+        description:
+          type: [string, "null"]
+          maxLength: 2000
+          description: An empty string clears it, the same as null.
 
     TaxonomyTermUpdate:
       type: object
@@ -8985,15 +10181,98 @@ components:
           type: string
           maxLength: 120
           pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+        description:
+          type: [string, "null"]
+          maxLength: 2000
+          description: An empty string clears it, the same as null.
+
+    TagWrite:
+      type: object
+      required: [name]
+      additionalProperties: false
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+        slug:
+          type: string
+          maxLength: 120
+          pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+          description: Derived from `name` when omitted.
+        description:
+          type: [string, "null"]
+          maxLength: 2000
+          description: An empty string clears it, the same as null.
+        group_label:
+          type: [string, "null"]
+          maxLength: 80
+          description: An empty string clears it, the same as null.
+
+    TagUpdate:
+      type: object
+      additionalProperties: false
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+        slug:
+          type: string
+          maxLength: 120
+          pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+        description:
+          type: [string, "null"]
+          maxLength: 2000
+          description: An empty string clears it, the same as null.
+        group_label:
+          type: [string, "null"]
+          maxLength: 80
+          description: An empty string clears it, the same as null.
+
+    AuthorType:
+      type: string
+      enum: [co-founder, admin, user]
+      default: user
+      description: |
+        How a theme groups this byline, for example a founders page listing every `co-founder`.
+        A display label only: it grants no access to anything.
+
+    AuthorSocials:
+      type: object
+      description: |
+        The author's profiles elsewhere, as network to absolute http(s) URL. Emitted as the
+        schema.org `sameAs` of the byline. A write REPLACES the whole object; send `{}` to clear
+        it.
+      additionalProperties: false
+      properties:
+        website: { type: string, format: uri, maxLength: 2048 }
+        x: { type: string, format: uri, maxLength: 2048 }
+        linkedin: { type: string, format: uri, maxLength: 2048 }
+        github: { type: string, format: uri, maxLength: 2048 }
+        youtube: { type: string, format: uri, maxLength: 2048 }
+        instagram: { type: string, format: uri, maxLength: 2048 }
+        facebook: { type: string, format: uri, maxLength: 2048 }
+        mastodon: { type: string, format: uri, maxLength: 2048 }
+        bluesky: { type: string, format: uri, maxLength: 2048 }
+        threads: { type: string, format: uri, maxLength: 2048 }
+        tiktok: { type: string, format: uri, maxLength: 2048 }
 
     Author:
       type: object
-      required: [id, name]
+      required: [id, name, slug]
       properties:
         id: { type: string, format: uuid, readOnly: true }
         name: { type: string, maxLength: 160 }
+        slug:
+          type: string
+          maxLength: 120
+          pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+          description: The author's stable URL key, unique on the Site. Derived from `name` when omitted, and kept when the author is renamed.
         bio: { type: [string, "null"], maxLength: 2000 }
         avatar_url: { type: [string, "null"], format: uri }
+        job_title:
+          type: [string, "null"]
+          maxLength: 160
+          description: Emitted as the schema.org `jobTitle` of the byline.
+        socials:
+          $ref: "#/components/schemas/AuthorSocials"
+        author_type:
+          $ref: "#/components/schemas/AuthorType"
         is_ai_generated:
           type: boolean
           description: True for a persona the engine created, false for a real person.
@@ -9008,8 +10287,21 @@ components:
       additionalProperties: false
       properties:
         name: { type: string, minLength: 1, maxLength: 160 }
+        slug:
+          type: string
+          maxLength: 120
+          pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+          description: The author's stable URL key, unique on the Site. Derived from `name` when omitted, and kept when the author is renamed.
         bio: { type: [string, "null"], maxLength: 2000 }
         avatar_url: { type: [string, "null"], format: uri }
+        job_title:
+          type: [string, "null"]
+          maxLength: 160
+          description: Emitted as the schema.org `jobTitle` of the byline.
+        socials:
+          $ref: "#/components/schemas/AuthorSocials"
+        author_type:
+          $ref: "#/components/schemas/AuthorType"
         is_ai_generated: { type: boolean, default: true }
         is_default: { type: boolean, default: false }
 
@@ -9018,8 +10310,21 @@ components:
       additionalProperties: false
       properties:
         name: { type: string, minLength: 1, maxLength: 160 }
+        slug:
+          type: string
+          maxLength: 120
+          pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+          description: The author's stable URL key, unique on the Site. Derived from `name` when omitted, and kept when the author is renamed.
         bio: { type: [string, "null"], maxLength: 2000 }
         avatar_url: { type: [string, "null"], format: uri }
+        job_title:
+          type: [string, "null"]
+          maxLength: 160
+          description: Emitted as the schema.org `jobTitle` of the byline.
+        socials:
+          $ref: "#/components/schemas/AuthorSocials"
+        author_type:
+          $ref: "#/components/schemas/AuthorType"
         is_ai_generated: { type: boolean }
         is_default: { type: boolean }
 
@@ -9171,6 +10476,56 @@ components:
           description: |
             Why the run ended early, when it did. On a `partial` run this is where you find out
             it was credits, the spend cap, or a vendor failure.
+
+    PipelineSourceStatus:
+      type: string
+      enum: [discovered, scored, skipped, scraped, rejected, failed, used]
+      description: |
+        Where a competitor source article is in the queue. `discovered` is found, `scored` passed
+        the score threshold, `skipped` fell below it, `scraped` has been read and waits to be
+        written, `used` produced an article, `rejected` could not be used (too short, off-niche or
+        unreadable) and `failed` hit an error (see `error_message`).
+
+    PipelineSource:
+      type: object
+      description: |
+        A competitor article the engine found and may write an original article from. Scores and
+        metadata only: the text read from the page is never exposed.
+      required: [id, source_url, status, created_at]
+      properties:
+        id: { type: string, format: uuid, readOnly: true }
+        competitor_id:
+          type: [string, "null"]
+          format: uuid
+          description: The competitor whose blog it was found on. Null if that competitor was removed.
+        source_url: { type: string, format: uri }
+        status: { $ref: "#/components/schemas/PipelineSourceStatus" }
+        seo_score:
+          type: [number, "null"]
+          description: The weighted 0-100 source score (the Site's `seo_score_weights`). Null until scored.
+        organic_traffic: { type: [integer, "null"], description: Estimated monthly organic visits to the page. Null when not measured. }
+        ranking_keywords: { type: [integer, "null"], description: Keywords the page ranks for. Null when not measured. }
+        top10_keywords: { type: [integer, "null"], description: Keywords the page ranks in the top 10 for. Null when not measured. }
+        referring_domains: { type: [integer, "null"], description: Domains linking to the page. Null when not measured. }
+        backlinks: { type: [integer, "null"], description: Links to the page. Null when not measured. }
+        target_keywords:
+          type: array
+          items: { type: string }
+          description: The keywords the page ranks for, used to brief the writer.
+        scored_at: { type: [string, "null"], format: date-time }
+        source_title: { type: [string, "null"] }
+        featured_image_url: { type: [string, "null"] }
+        word_count: { type: [integer, "null"] }
+        scrape_attempts: { type: integer }
+        scraped_at: { type: [string, "null"], format: date-time }
+        write_attempts: { type: integer }
+        article_id:
+          type: [string, "null"]
+          format: uuid
+          description: The article written from this source, once `status` is `used`.
+        error_message: { type: [string, "null"] }
+        created_at: { type: string, format: date-time, readOnly: true }
+        updated_at: { type: string, format: date-time, readOnly: true }
 
     QueueItem:
       type: object
@@ -9372,7 +10727,7 @@ components:
 
     KnowledgeProfile:
       type: object
-      required: [brand_voice, product_description, target_audience, competitors_seed, is_auto_generated]
+      required: [brand_voice, product_description, target_audience, competitors_seed, product_knowledge, prompt_vars, niche_keywords, is_auto_generated]
       properties:
         brand_voice: {type: [string, "null"], maxLength: 4000, description: How the articles should sound.}
         product_description: {type: [string, "null"], maxLength: 4000, description: What the business sells or does.}
@@ -9382,6 +10737,21 @@ components:
           items: {type: string}
           description: The onboarding suggestion list. Read only; tracked competitors are `GET /seo/competitors`.
           readOnly: true
+        product_knowledge:
+          type: [string, "null"]
+          maxLength: 20000
+          description: |
+            The knowledge base the writer may cite: features, pricing, differentiators. The writer is
+            told never to invent a feature that is not in here.
+        prompt_vars:
+          $ref: "#/components/schemas/PromptVars"
+        niche_keywords:
+          type: array
+          maxItems: 60
+          items: {type: string, minLength: 1, maxLength: 60}
+          description: |
+            The niche gate, lowercase. A competitor article needs at least two of these words in its
+            title or text before the pipeline writes it. Empty means no gate.
         is_auto_generated:
           type: boolean
           description: True until a person (or this API) edits the profile.
@@ -9390,13 +10760,102 @@ components:
 
     KnowledgeProfileUpdate:
       type: object
-      description: Send at least one field; `null` clears it.
+      description: 'Send at least one field; `null` clears a text field. `prompt_vars` is merged key by key: keys you leave out are unchanged, and `null` or `""` sets one back to its default. `niche_keywords` replaces the whole list.'
       additionalProperties: false
       minProperties: 1
       properties:
         brand_voice: {type: [string, "null"], maxLength: 4000}
         product_description: {type: [string, "null"], maxLength: 4000}
         target_audience: {type: [string, "null"], maxLength: 4000}
+        product_knowledge: {type: [string, "null"], maxLength: 20000}
+        prompt_vars:
+          $ref: "#/components/schemas/PromptVarsUpdate"
+        niche_keywords:
+          type: array
+          maxItems: 60
+          items: {type: string, minLength: 1, maxLength: 60}
+          description: Stored trimmed, lowercase and without duplicates.
+
+    PromptVars:
+      type: object
+      description: |
+        The Site's values for the brand phrases in the platform writing prompts (the AI writing
+        profile). A key that is not set falls back to a generic default built from the Site's name,
+        niche, domain, competitors, categories and tags. Only the keys listed here are accepted.
+      additionalProperties: false
+      properties:
+        brand_category: {type: string, maxLength: 600, description: 'What the business is, with an article, e.g. "a project management tool".'}
+        brand_focus_areas: {type: string, maxLength: 600, description: The things the product does directly; the writer writes tutorials when a topic is one of these.}
+        brand_topic: {type: string, maxLength: 600, description: The broad topic the blog covers.}
+        named_competitors: {type: string, maxLength: 600, description: Competitors the writer may name (never link) in honest comparisons.}
+        brand_url: {type: string, maxLength: 600, description: The URL brand links point to.}
+        blog_path: {type: string, maxLength: 600, description: 'The path internal links are built on, e.g. "/blog/".'}
+        example_product_workflow: {type: string, maxLength: 600, description: Example of teaching with the product.}
+        example_show_experience: {type: string, maxLength: 600, description: Example of showing the product experience.}
+        example_list_features: {type: string, maxLength: 600, description: The feature-list phrasing the writer should avoid.}
+        example_definition_good: {type: string, maxLength: 600, description: A good definitional first sentence.}
+        example_definition_bad: {type: string, maxLength: 600, description: A vague opener to avoid.}
+        example_specific_fact: {type: string, maxLength: 600, description: A specific, checkable fact.}
+        example_vague_fact: {type: string, maxLength: 600, description: The same fact said vaguely.}
+        example_citation_link_1: {type: string, maxLength: 600, description: A correctly formatted citation link in markdown.}
+        example_citation_link_2: {type: string, maxLength: 600, description: A second correctly formatted citation link in markdown.}
+        example_citation_anchors: {type: string, maxLength: 600, description: Example anchor texts for source citations.}
+        example_competitor_brand: {type: string, maxLength: 600, description: A competitor name used in the anchor text rules.}
+        example_internal_link_scenario: {type: string, maxLength: 600, description: When an internal link is worth adding.}
+        example_internal_link_right: {type: string, maxLength: 600, description: A well-placed inline internal link.}
+        example_internal_link_wrong: {type: string, maxLength: 600, description: A standalone internal link to avoid.}
+        example_comparison_row: {type: string, maxLength: 600, description: 'A comparison table row as a JSON array of four strings.'}
+        example_comparison_row_short: {type: string, maxLength: 600, description: 'A shorter comparison row as a JSON array of three strings.'}
+        example_improve_show: {type: string, maxLength: 600, description: The rewrite stage's example of showing the experience.}
+        example_improve_list: {type: string, maxLength: 600, description: The rewrite stage's feature list to avoid.}
+        example_categories: {type: string, maxLength: 600, description: Example categories the classifier is shown.}
+        example_feature_tag: {type: string, maxLength: 600, description: An example feature tag slug.}
+        example_audience_tag: {type: string, maxLength: 600, description: An example audience tag slug.}
+        image_objects: {type: string, maxLength: 600, description: Physical objects the illustrations are built from.}
+        chat_brand_description: {type: string, maxLength: 600, description: How the SEO assistant describes the business.}
+        product_ui_affordances: {type: string, maxLength: 600, description: Real feature and screen names use-case walkthroughs may reference.}
+        example_step_name: {type: string, maxLength: 600, description: An example how-to step name.}
+        example_use_case_scenarios: {type: string, maxLength: 600, description: Example scenarios for use-case walkthroughs.}
+        keyword_fallback_niche: {type: string, maxLength: 600, description: The niche named when no keyword data exists for a topic.}
+
+    PromptVarsUpdate:
+      type: object
+      description: 'Keys to change. A value of `null` or `""` removes the key, so it falls back to its default. An unknown key is `422` naming `prompt_vars.<key>`.'
+      additionalProperties: false
+      properties:
+        brand_category: {type: [string, "null"], maxLength: 600}
+        brand_focus_areas: {type: [string, "null"], maxLength: 600}
+        brand_topic: {type: [string, "null"], maxLength: 600}
+        named_competitors: {type: [string, "null"], maxLength: 600}
+        brand_url: {type: [string, "null"], maxLength: 600}
+        blog_path: {type: [string, "null"], maxLength: 600}
+        example_product_workflow: {type: [string, "null"], maxLength: 600}
+        example_show_experience: {type: [string, "null"], maxLength: 600}
+        example_list_features: {type: [string, "null"], maxLength: 600}
+        example_definition_good: {type: [string, "null"], maxLength: 600}
+        example_definition_bad: {type: [string, "null"], maxLength: 600}
+        example_specific_fact: {type: [string, "null"], maxLength: 600}
+        example_vague_fact: {type: [string, "null"], maxLength: 600}
+        example_citation_link_1: {type: [string, "null"], maxLength: 600}
+        example_citation_link_2: {type: [string, "null"], maxLength: 600}
+        example_citation_anchors: {type: [string, "null"], maxLength: 600}
+        example_competitor_brand: {type: [string, "null"], maxLength: 600}
+        example_internal_link_scenario: {type: [string, "null"], maxLength: 600}
+        example_internal_link_right: {type: [string, "null"], maxLength: 600}
+        example_internal_link_wrong: {type: [string, "null"], maxLength: 600}
+        example_comparison_row: {type: [string, "null"], maxLength: 600}
+        example_comparison_row_short: {type: [string, "null"], maxLength: 600}
+        example_improve_show: {type: [string, "null"], maxLength: 600}
+        example_improve_list: {type: [string, "null"], maxLength: 600}
+        example_categories: {type: [string, "null"], maxLength: 600}
+        example_feature_tag: {type: [string, "null"], maxLength: 600}
+        example_audience_tag: {type: [string, "null"], maxLength: 600}
+        image_objects: {type: [string, "null"], maxLength: 600}
+        chat_brand_description: {type: [string, "null"], maxLength: 600}
+        product_ui_affordances: {type: [string, "null"], maxLength: 600}
+        example_step_name: {type: [string, "null"], maxLength: 600}
+        example_use_case_scenarios: {type: [string, "null"], maxLength: 600}
+        keyword_fallback_niche: {type: [string, "null"], maxLength: 600}
 
     Organisation:
       type: object
@@ -9455,6 +10914,18 @@ components:
           minimum: 0
           maximum: 1
           description: The quality score, 0 to 1, an article must reach to move on without a rewrite.
+        source_score_threshold:
+          type: number
+          minimum: 0
+          maximum: 100
+          description: The pass mark, 0 to 100, a competitor article's SEO score must reach before it is scraped and rewritten. Below it the article is skipped before any money is spent on it.
+        seo_score_weights:
+          $ref: "#/components/schemas/SeoScoreWeights"
+        min_originality_pct:
+          type: number
+          minimum: 0
+          maximum: 100
+          description: The hard originality gate. An article must have at least this share of its 5-word phrases not copied from the competitor article, or it goes back for a rewrite instead of publishing.
         next_run_at: {type: [string, "null"], format: date-time, readOnly: true}
         last_dispatched_at: {type: [string, "null"], format: date-time, readOnly: true}
         in_flight:
@@ -9473,8 +10944,220 @@ components:
         publish_mode: {type: string, enum: [auto, review]}
         articles_per_day: {type: integer, minimum: 0, maximum: 100}
         batch_size: {type: integer, minimum: 1, maximum: 50}
-        max_auto_improve_attempts: {type: integer, minimum: 0, maximum: 10}
+        max_auto_improve_attempts: {type: integer, minimum: 0, maximum: 5}
         quality_score_threshold: {type: number, minimum: 0, maximum: 1}
+        source_score_threshold: {type: number, minimum: 0, maximum: 100}
+        seo_score_weights: { $ref: "#/components/schemas/SeoScoreWeights" }
+        min_originality_pct: {type: number, minimum: 60, maximum: 100}
+
+    RecipeEntry:
+      type: object
+      required: [step]
+      additionalProperties: false
+      properties:
+        step: {type: string, description: A step key from `GET /pipeline/steps`.}
+        settings:
+          type: object
+          additionalProperties: true
+          description: The step's settings; a missing one takes the step's default.
+
+    RecipeSpec:
+      type: object
+      description: |
+        An article recipe (spec_version 1): one step for where ideas come from, zero or more to keep,
+        zero or more research steps, one writer, the checks, the finishing touches and one publishing
+        step. Every entry is `{step, settings}`.
+      required: [spec_version, ideas, write, publish]
+      additionalProperties: false
+      properties:
+        spec_version: {type: integer, enum: [1]}
+        ideas: { $ref: "#/components/schemas/RecipeEntry" }
+        keep: {type: array, maxItems: 8, items: { $ref: "#/components/schemas/RecipeEntry" }}
+        research: {type: array, maxItems: 8, items: { $ref: "#/components/schemas/RecipeEntry" }}
+        write: { $ref: "#/components/schemas/RecipeEntry" }
+        checks: {type: array, maxItems: 8, items: { $ref: "#/components/schemas/RecipeEntry" }}
+        finish: {type: array, maxItems: 8, items: { $ref: "#/components/schemas/RecipeEntry" }}
+        publish: { $ref: "#/components/schemas/RecipeEntry" }
+
+    RecipeStep:
+      type: object
+      required: [key, section, section_label, name, description, status, locked, settings, price]
+      properties:
+        key: {type: string}
+        section: {type: string, enum: [ideas, keep, research, write, checks, finish, publish]}
+        section_label: {type: string}
+        name: {type: string}
+        description: {type: string}
+        status: {type: string, enum: [available, coming_soon]}
+        produces: {type: [string, "null"], enum: [url, topic, refresh, null]}
+        accepts:
+          type: [array, "null"]
+          items: {type: string, enum: [url, topic, refresh]}
+        only_with_ideas: {type: [array, "null"], items: {type: string}}
+        only_with_writers: {type: [array, "null"], items: {type: string}}
+        locked: {type: boolean}
+        settings:
+          type: array
+          items:
+            type: object
+            required: [key, label, type, default]
+            properties:
+              key: {type: string}
+              label: {type: string}
+              type: {type: string, enum: [int, bool, enum, text, url_list, weights]}
+              min: {type: number}
+              max: {type: number}
+              options:
+                type: array
+                items: {type: object, properties: {value: {type: string}, label: {type: string}}}
+              maxLength: {type: integer}
+              maxItems: {type: integer}
+              keys: {type: array, items: {type: string}}
+              default: {}
+              help: {type: string}
+              unit: {type: string}
+        price:
+          type: array
+          items:
+            type: object
+            required: [action, per, qty, credits]
+            properties:
+              action: {type: string}
+              per: {type: string, enum: [article, candidate, image, rewrite, topic]}
+              qty: {type: number}
+              credits: {type: [number, "null"]}
+
+    RecipeSentence:
+      type: object
+      required: [section, step, text, locked]
+      properties:
+        section: {type: string, enum: [ideas, keep, research, write, checks, finish, publish]}
+        step: {type: [string, "null"]}
+        text: {type: string}
+        locked: {type: boolean}
+
+    RecipeEstimate:
+      type: object
+      required: [credits_per_article, credits_per_month, articles_per_month, lines, basis, basis_days, unpriced]
+      properties:
+        credits_per_article: {type: number}
+        credits_per_month: {type: number}
+        articles_per_month: {type: number}
+        lines:
+          type: array
+          items:
+            type: object
+            required: [step, label, credits_per_article]
+            properties:
+              step: {type: string}
+              label: {type: string}
+              credits_per_article: {type: number}
+        basis: {type: string, enum: [default, history], description: '`history` = the Site''s own last 14 days.'}
+        basis_days: {type: [integer, "null"]}
+        unpriced: {type: array, items: {type: string}}
+
+    RecipeVersion:
+      type: object
+      required: [id, version, status, spec, sentences, warnings, estimate, created_via, created_at]
+      properties:
+        id: {type: string, format: uuid}
+        version: {type: integer}
+        status: {type: string, enum: [draft, live, retired]}
+        template_key: {type: [string, "null"]}
+        created_via: {type: string, enum: [migration, system, signup, dashboard, api, mcp, undo]}
+        note: {type: [string, "null"]}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        activated_at: {type: [string, "null"], format: date-time}
+        spec: { $ref: "#/components/schemas/RecipeSpec" }
+        sentences:
+          type: array
+          items: { $ref: "#/components/schemas/RecipeSentence" }
+        warnings:
+          type: array
+          items: {type: object, properties: {path: {type: string}, message: {type: string}}}
+        estimate: { $ref: "#/components/schemas/RecipeEstimate" }
+
+    Recipe:
+      type: object
+      required: [live, draft, history]
+      properties:
+        live:
+          oneOf:
+            - { $ref: "#/components/schemas/RecipeVersion" }
+            - {type: "null"}
+        draft:
+          oneOf:
+            - { $ref: "#/components/schemas/RecipeVersion" }
+            - {type: "null"}
+        history:
+          type: array
+          items:
+            type: object
+            properties:
+              id: {type: string, format: uuid}
+              version: {type: integer}
+              status: {type: string, enum: [draft, live, retired]}
+              template_key: {type: [string, "null"]}
+              created_via: {type: string}
+              note: {type: [string, "null"]}
+              created_at: {type: string, format: date-time}
+              activated_at: {type: [string, "null"], format: date-time}
+              retired_at: {type: [string, "null"], format: date-time}
+
+    RecipeTemplate:
+      type: object
+      required: [key, goal, description, available, spec, sentences, estimate, needs]
+      properties:
+        key: {type: string}
+        goal: {type: string}
+        description: {type: string}
+        available: {type: boolean}
+        spec: { $ref: "#/components/schemas/RecipeSpec" }
+        sentences:
+          type: array
+          items: { $ref: "#/components/schemas/RecipeSentence" }
+        estimate: { $ref: "#/components/schemas/RecipeEstimate" }
+        needs:
+          type: array
+          items: {type: object, properties: {path: {type: string}, message: {type: string}}}
+
+    RecipeActivityItem:
+      type: object
+      required: [key, title, is_test, credits, steps]
+      properties:
+        key: {type: string, format: uuid}
+        article_id: {type: [string, "null"], format: uuid}
+        title: {type: string}
+        status: {type: [string, "null"]}
+        is_test: {type: boolean}
+        started_at: {type: [string, "null"], format: date-time}
+        updated_at: {type: [string, "null"], format: date-time}
+        credits: {type: number}
+        steps:
+          type: array
+          items:
+            type: object
+            required: [step, label, outcome, credits, at]
+            properties:
+              step: {type: string}
+              label: {type: string}
+              outcome: {type: string, enum: [done, kept, dropped, held, failed, retry]}
+              detail: {type: [string, "null"]}
+              credits: {type: number}
+              at: {type: string, format: date-time}
+
+    SeoScoreWeights:
+      type: object
+      description: How much each metric counts toward a competitor article's SEO score. The weights are relative (the score is normalised over the metrics that were measured), so they need not add up to 1. Send all five; at least one must be above 0.
+      required: [organic_traffic, ranking_keywords, top10_keywords, referring_domains, backlinks]
+      additionalProperties: false
+      properties:
+        organic_traffic: {type: number, minimum: 0, maximum: 1, examples: [0.3]}
+        ranking_keywords: {type: number, minimum: 0, maximum: 1, examples: [0.2]}
+        top10_keywords: {type: number, minimum: 0, maximum: 1, examples: [0.2]}
+        referring_domains: {type: number, minimum: 0, maximum: 1, examples: [0.2]}
+        backlinks: {type: number, minimum: 0, maximum: 1, examples: [0.1]}
 
     PlanItem:
       description: 'A content plan item: a queue item plus the format it will be written in.'
@@ -9546,8 +11229,38 @@ components:
 
     PromptStage:
       type: string
-      enum: [plan, generate, improve, classify, extract]
-      description: The pipeline stages that read a prompt.
+      enum:
+        - plan
+        - paraphrase.system
+        - paraphrase.user
+        - paraphrase.quality_system
+        - paraphrase.quality_user
+        - improve.system
+        - improve.user
+        - improve.quality_system
+        - improve.quality_user
+        - classify.system
+        - classify.user
+        - image.art_director
+        - image.base_style
+        - extract.system
+        - extract.user
+        - chat.system
+        - news.system
+        - news.user
+        - news.quality_system
+        - news.quality_user
+        - news.attribution
+        - news.rewrite
+        - refresh.system
+        - refresh.user
+      description: |
+        The prompts the pipeline reads. The `news.*` prompts drive a recipe's news writers ("Short news
+        story", "Story from several sources") and their checks; `refresh.*` the "Refresh an old
+        article" writer. `plan` is the topic planner; the rest are the article
+        pipeline's prompt library (writer, quality audit, improver, classifier, image art director
+        and base style, structured-data extractor, SEO assistant). Placeholders such as
+        `{{brand_name}}` or `{{named_competitors}}` are filled per Site from its writing profile.
 
     Prompt:
       type: object
@@ -9608,13 +11321,28 @@ components:
           description: The outline, in order.
 
     ContentTypeDetail:
-      description: An article format with its blueprint.
+      description: An article format with its blueprint and the instructions the writer receives for it.
       allOf:
         - { $ref: "#/components/schemas/ContentType" }
         - type: object
-          required: [blueprint]
+          required: [blueprint, description, prompt_addendum]
           properties:
-            blueprint: { $ref: "#/components/schemas/Blueprint" }
+            blueprint: { $ref: "#/components/schemas/BlueprintView" }
+            description: {type: [string, "null"], maxLength: 1000, description: What the format is for. The classifier reads it when it picks a format.}
+            prompt_addendum: {type: [string, "null"], maxLength: 4000, description: 'The writing instructions added to the writer prompt for this format. May use the AI writing profile placeholders, e.g. `{{brand_name}}`.'}
+
+    BlueprintView:
+      type: object
+      description: 'A format''s blueprint as stored. A platform format may set only `requires`, so `sections` can be empty here; a blueprint you send must follow `Blueprint`.'
+      required: [requires, sections]
+      properties:
+        requires:
+          type: array
+          items: {type: string, enum: [howto_steps, key_takeaways, comparison, faqs]}
+          uniqueItems: true
+        sections:
+          type: array
+          items: {type: string}
 
     ContentTypeCreate:
       type: object
@@ -9628,6 +11356,8 @@ components:
           description: Derived from `name` when omitted. A platform default's key overrides that default for this Site.
         blueprint: { $ref: "#/components/schemas/Blueprint" }
         is_active: {type: boolean, default: true}
+        description: {type: [string, "null"], maxLength: 1000}
+        prompt_addendum: {type: [string, "null"], maxLength: 4000, description: Writing instructions for this format. May use the AI writing profile placeholders.}
 
     ContentTypeUpdate:
       type: object
@@ -9638,6 +11368,8 @@ components:
         name: {type: string, minLength: 1, maxLength: 80}
         blueprint: { $ref: "#/components/schemas/Blueprint" }
         is_active: {type: boolean}
+        description: {type: [string, "null"], maxLength: 1000, description: '`null` or `""` clears it.'}
+        prompt_addendum: {type: [string, "null"], maxLength: 4000, description: '`null` or `""` clears it.'}
 
     DeliveryConnection:
       type: object
@@ -9938,6 +11670,86 @@ components:
         keywords_top3: {type: [integer, "null"]}
         keywords_top10: {type: [integer, "null"]}
         keywords_top100: {type: [integer, "null"]}
+        traffic_value_usd:
+          type: [number, "null"]
+          description: What the estimated organic traffic would cost as paid clicks, in US dollars per month.
+        keywords_pos_1: {type: [integer, "null"], description: Keywords ranking at position 1.}
+        keywords_pos_2_3: {type: [integer, "null"], description: Keywords ranking at positions 2-3.}
+        keywords_pos_4_10: {type: [integer, "null"], description: Keywords ranking at positions 4-10.}
+        keywords_pos_11_20: {type: [integer, "null"], description: Keywords ranking at positions 11-20.}
+        keywords_pos_21_50: {type: [integer, "null"], description: Keywords ranking at positions 21-50.}
+        keywords_pos_51_100: {type: [integer, "null"], description: Keywords ranking at positions 51-100.}
+        keywords_new:
+          type: [integer, "null"]
+          description: Keywords the domain newly ranks for since the data provider's previous update.
+        keywords_up: {type: [integer, "null"], description: Keywords whose position improved since the provider's previous update.}
+        keywords_down: {type: [integer, "null"], description: Keywords whose position dropped since the provider's previous update.}
+        keywords_lost: {type: [integer, "null"], description: Keywords the domain no longer ranks for since the provider's previous update.}
+        backlinks_dofollow: {type: [integer, "null"]}
+        backlinks_nofollow: {type: [integer, "null"]}
+        backlinks_gov: {type: [integer, "null"], description: Backlinks from .gov domains.}
+        backlinks_edu: {type: [integer, "null"], description: Backlinks from .edu domains.}
+        backlink_spam_score: {type: [integer, "null"], minimum: 0, maximum: 100}
+        broken_backlinks: {type: [integer, "null"], description: Inbound links that point at a page on this domain that errors.}
+        broken_pages: {type: [integer, "null"]}
+        referring_ips: {type: [integer, "null"]}
+
+    SeoOwnSnapshot:
+      description: |
+        The own site's latest measurement: every SeoSnapshot field plus its top pages and backlink
+        breakdown. Domain rank, spam score, gov/edu counts and the platform and country breakdowns
+        need paid backlink data and are null without it.
+      allOf:
+        - { $ref: "#/components/schemas/SeoSnapshot" }
+        - type: object
+          properties:
+            top_pages:
+              type: [array, "null"]
+              maxItems: 50
+              description: Up to 20 pages by estimated organic traffic, highest first.
+              items:
+                type: object
+                required: [url]
+                properties:
+                  url: {type: string}
+                  etv: {type: [number, "null"], description: Estimated monthly organic traffic to the page.}
+                  keywords: {type: [integer, "null"]}
+                  top_position:
+                    type: [integer, "null"]
+                    description: The lower bound of the best position band the page ranks in (1, 2, 4, 11, ...), not an exact rank.
+                  top_bucket: {type: [string, "null"], description: 'That band, for example "1", "2-3" or "4-10".'}
+            backlink_breakdown:
+              type: [object, "null"]
+              description: Where the backlink data came from, and its top lists. A list is absent when it was not measured.
+              properties:
+                source:
+                  type: string
+                  description: '`dataforseo` for paid data, otherwise the free import source (`gsc_csv`, `bing_wmt`, `manual` or `derived`).'
+                platform_types:
+                  type: array
+                  items: { $ref: "#/components/schemas/SeoKeyCount" }
+                countries:
+                  type: array
+                  items: { $ref: "#/components/schemas/SeoKeyCount" }
+                tlds:
+                  type: array
+                  items: { $ref: "#/components/schemas/SeoKeyCount" }
+                anchors:
+                  type: array
+                  items:
+                    type: object
+                    required: [anchor]
+                    properties:
+                      anchor: {type: string}
+                      backlinks: {type: [integer, "null"]}
+                      referring_domains: {type: [integer, "null"]}
+
+    SeoKeyCount:
+      type: object
+      required: [key, count]
+      properties:
+        key: {type: string}
+        count: {type: integer}
 
     SeoOverview:
       type: object
@@ -9945,7 +11757,7 @@ components:
       properties:
         own_site:
           oneOf:
-            - { $ref: "#/components/schemas/SeoSnapshot" }
+            - { $ref: "#/components/schemas/SeoOwnSnapshot" }
             - {type: "null"}
         competitors:
           type: array
@@ -9967,14 +11779,56 @@ components:
 
     Competitor:
       type: object
-      required: [id, domain, is_own_site, is_active]
+      required: [id, domain, is_own_site, is_active, max_articles_per_run]
       properties:
         id: {type: string, format: uuid, readOnly: true}
         domain: {type: string}
         name: {type: [string, "null"], maxLength: 120}
         is_own_site: {type: boolean, readOnly: true}
         is_active: {type: boolean}
+        blog_url: { $ref: "#/components/schemas/CompetitorBlogUrl" }
+        listing_selector: { $ref: "#/components/schemas/CompetitorListingSelector" }
+        content_selector: { $ref: "#/components/schemas/CompetitorContentSelector" }
+        max_articles_per_run: { $ref: "#/components/schemas/CompetitorMaxArticlesPerRun" }
+        notes: { $ref: "#/components/schemas/CompetitorNotes" }
         added_at: {type: string, format: date-time, readOnly: true}
+        updated_at: {type: string, format: date-time, readOnly: true}
+
+    CompetitorBlogUrl:
+      type: [string, "null"]
+      format: uri
+      maxLength: 2048
+      description: |
+        The competitor's blog listing page, the page that links to its articles, such as
+        `https://example.com/blog`. `http` or `https` on a public hostname; no user name, password,
+        port or IP address (`422` on `blog_url`). `null` or an empty string clears it. When set, the
+        competitor is a content source: its articles are read for signal (never republished).
+
+    CompetitorListingSelector:
+      type: [string, "null"]
+      maxLength: 500
+      description: |
+        A CSS selector for the article links on the listing page, such as `article h2 a`. `null` or
+        an empty string means auto-detect, which is right for most blogs.
+
+    CompetitorContentSelector:
+      type: [string, "null"]
+      maxLength: 500
+      description: |
+        A CSS selector for the article body on an article page, such as `.post-content`. `null` or
+        an empty string means auto-detect.
+
+    CompetitorMaxArticlesPerRun:
+      type: integer
+      minimum: 1
+      maximum: 50
+      default: 5
+      description: The most articles one pipeline run reads from this competitor.
+
+    CompetitorNotes:
+      type: [string, "null"]
+      maxLength: 2000
+      description: Free-text notes for the people curating this competitor. Never sent to the AI.
 
     CompetitorCreate:
       type: object
@@ -9986,6 +11840,11 @@ components:
           maxLength: 253
           description: A bare hostname such as `example.com`. A scheme, path or port is stripped.
         name: {type: [string, "null"], maxLength: 120}
+        blog_url: { $ref: "#/components/schemas/CompetitorBlogUrl" }
+        listing_selector: { $ref: "#/components/schemas/CompetitorListingSelector" }
+        content_selector: { $ref: "#/components/schemas/CompetitorContentSelector" }
+        max_articles_per_run: { $ref: "#/components/schemas/CompetitorMaxArticlesPerRun" }
+        notes: { $ref: "#/components/schemas/CompetitorNotes" }
 
     CompetitorUpdate:
       type: object
@@ -9994,6 +11853,11 @@ components:
       properties:
         name: {type: [string, "null"], maxLength: 120}
         is_active: {type: boolean}
+        blog_url: { $ref: "#/components/schemas/CompetitorBlogUrl" }
+        listing_selector: { $ref: "#/components/schemas/CompetitorListingSelector" }
+        content_selector: { $ref: "#/components/schemas/CompetitorContentSelector" }
+        max_articles_per_run: { $ref: "#/components/schemas/CompetitorMaxArticlesPerRun" }
+        notes: { $ref: "#/components/schemas/CompetitorNotes" }
 
     TrackedKeyword:
       type: object
@@ -10088,16 +11952,27 @@ components:
         competitor_position: {type: [integer, "null"]}
         our_position: {type: [integer, "null"]}
         opportunity_score: {type: [number, "null"]}
-        status: {type: string, enum: [open, planned, dismissed]}
+        status: {type: string, enum: [open, planned, targeted, covered, dismissed]}
         linked_plan_item_id: {type: [string, "null"], format: uuid}
         captured_at: {type: string, format: date-time}
+        last_offered_at:
+          type: [string, "null"]
+          format: date-time
+          description: When a targeted gap was last offered to the writer.
+        offer_count:
+          type: integer
+          description: How many article briefs a targeted gap has been offered to. A high count with no coverage means it does not fit what is being written.
+        covered_article_id:
+          type: [string, "null"]
+          format: uuid
+          description: The article that covered the keyword, when `status` is `covered`.
 
     ContentGapUpdate:
       type: object
       required: [status]
       additionalProperties: false
       properties:
-        status: {type: string, enum: [open, dismissed]}
+        status: {type: string, enum: [open, targeted, dismissed]}
 
     PlanFromSource:
       type: object
@@ -10152,6 +12027,103 @@ components:
               count: {type: integer}
           maxItems: 50
 
+    InternalLinkReportArticle:
+      type: object
+      required: [article_id, title, slug, inbound, outbound, published_at]
+      properties:
+        article_id: {type: string, format: uuid}
+        title: {type: [string, "null"]}
+        slug: {type: [string, "null"]}
+        inbound: {type: integer, description: Distinct published articles linking to this one.}
+        outbound: {type: integer, description: Distinct published articles this one links to.}
+        published_at: {type: [string, "null"], format: date-time}
+
+    InternalLinkReport:
+      type: object
+      required: [under_linked_threshold, list_limit, summary, orphans, under_linked, no_outbound,
+                 pillars, broken, anchors, anchor_concentration]
+      properties:
+        under_linked_threshold: {type: integer}
+        list_limit: {type: integer, description: The most rows any list holds.}
+        summary:
+          type: object
+          required: [published_articles, internal_links, external_links, avg_inbound, orphans, under_linked,
+                     no_outbound, broken_internal, broken_external, external_checked, generic_anchor_links,
+                     last_checked_at]
+          properties:
+            published_articles: {type: integer}
+            internal_links: {type: integer, description: Links from one published article to another, self-links excluded.}
+            external_links: {type: integer}
+            avg_inbound: {type: number}
+            orphans: {type: integer}
+            under_linked: {type: integer}
+            no_outbound: {type: integer}
+            broken_internal: {type: integer}
+            broken_external: {type: integer}
+            external_checked: {type: integer, description: External links with an HTTP check result so far.}
+            generic_anchor_links: {type: integer}
+            last_checked_at: {type: [string, "null"], format: date-time, description: Null until the first scan.}
+        orphans:
+          type: array
+          items: { $ref: "#/components/schemas/InternalLinkReportArticle" }
+          maxItems: 200
+        under_linked:
+          type: array
+          items: { $ref: "#/components/schemas/InternalLinkReportArticle" }
+          maxItems: 200
+        no_outbound:
+          type: array
+          items: { $ref: "#/components/schemas/InternalLinkReportArticle" }
+          maxItems: 200
+        pillars:
+          type: array
+          items: { $ref: "#/components/schemas/InternalLinkReportArticle" }
+          maxItems: 25
+        broken:
+          type: array
+          maxItems: 200
+          items:
+            type: object
+            required: [source_article_id, target_url, link_type, reason]
+            properties:
+              source_article_id: {type: string, format: uuid}
+              source_title: {type: [string, "null"]}
+              source_slug: {type: [string, "null"]}
+              target_url: {type: [string, "null"]}
+              anchor_text: {type: [string, "null"]}
+              link_type: {type: string, enum: [internal, external]}
+              reason: {type: string, enum: [missing, unpublished, unreachable]}
+              http_status: {type: [integer, "null"]}
+              checked_at: {type: string, format: date-time}
+        anchors:
+          type: array
+          maxItems: 200
+          items:
+            type: object
+            required: [anchor_text, uses, targets, generic, ambiguous]
+            properties:
+              anchor_text: {type: string, description: Normalised (lower case, collapsed whitespace, outer punctuation trimmed).}
+              uses: {type: integer}
+              targets: {type: integer, description: Distinct articles this anchor links to.}
+              generic: {type: boolean, description: A phrase like "click here" or "read more".}
+              ambiguous: {type: boolean, description: The same anchor links to more than one article.}
+              share_pct: {type: [number, "null"], description: Percent of all anchored internal links.}
+        anchor_concentration:
+          type: array
+          maxItems: 100
+          description: Articles with at least 3 anchored inbound links where one exact anchor carries 60% or more.
+          items:
+            type: object
+            required: [target_article_id, anchor_text, uses, target_links, share]
+            properties:
+              target_article_id: {type: string, format: uuid}
+              target_title: {type: [string, "null"]}
+              target_slug: {type: [string, "null"]}
+              anchor_text: {type: string}
+              uses: {type: integer}
+              target_links: {type: integer}
+              share: {type: number, description: 0 to 1.}
+
     LlmMention:
       type: object
       required: [id, topic, engine, is_mentioned, is_cited, checked_at]
@@ -10164,6 +12136,87 @@ components:
         citation_url: {type: [string, "null"]}
         position: {type: [integer, "null"]}
         checked_at: {type: string, format: date-time}
+
+    AiVisibilityEngine:
+      type: object
+      required: [engine, captured_at, keywords_checked, answers_checked, mentions, citations]
+      properties:
+        engine: {type: string, description: "google_ai_overview, google_ai_mode, chatgpt, claude, gemini or perplexity. Treat as open."}
+        captured_at: {type: string, format: date-time}
+        keywords_checked: {type: integer}
+        answers_checked: {type: integer}
+        mentions: {type: integer, description: Answers that mention or cite the Site.}
+        citations: {type: integer, description: Answers that cite a page on the Site.}
+        share_of_voice: {type: [number, "null"], description: Percent of citations to the top domains that went to the Site.}
+        brand_mentions_total: {type: [integer, "null"], description: "The engine's own count of the domain across its answer index; null when the engine has none."}
+        ai_search_volume: {type: [integer, "null"]}
+        previous:
+          type: [object, "null"]
+          properties:
+            captured_at: {type: string, format: date-time}
+            mentions: {type: integer}
+            citations: {type: integer}
+            share_of_voice: {type: [number, "null"]}
+            answers_checked: {type: integer}
+
+    AiVisibility:
+      type: object
+      required: [website_id, days, engines, trend, top_domains, samples, keywords]
+      properties:
+        website_id: {type: string, format: uuid}
+        days: {type: integer}
+        own_domain: {type: [string, "null"]}
+        competitors: {type: array, items: {type: string}}
+        last_run_at: {type: [string, "null"], format: date-time}
+        engines:
+          type: array
+          items: { $ref: "#/components/schemas/AiVisibilityEngine" }
+        trend:
+          type: array
+          items:
+            type: object
+            properties:
+              captured_at: {type: string, format: date-time}
+              engine: {type: string}
+              mentions: {type: integer}
+              citations: {type: integer}
+              share_of_voice: {type: [number, "null"]}
+              answers_checked: {type: integer}
+        top_domains:
+          type: array
+          items:
+            type: object
+            properties:
+              domain: {type: string}
+              mentions: {type: integer}
+              engines: {type: array, items: {type: string}}
+              is_own: {type: boolean}
+              is_competitor: {type: boolean}
+        samples:
+          type: array
+          items:
+            type: object
+            properties:
+              keyword: {type: string}
+              question: {type: string}
+              engine: {type: string}
+              snippet: {type: string}
+              cited_urls: {type: array, items: {type: string}}
+              mentioned: {type: boolean}
+              cited: {type: boolean}
+        keywords:
+          type: array
+          items:
+            type: object
+            properties:
+              topic: {type: string}
+              engine: {type: string}
+              is_mentioned: {type: boolean}
+              is_cited: {type: boolean}
+              citation_url: {type: [string, "null"]}
+              position: {type: [integer, "null"]}
+              answered: {type: [boolean, "null"], description: "false when the engine gave no answer for the keyword; null for older checks that did not record it."}
+              checked_at: {type: string, format: date-time}
 
     Engagement:
       type: object
@@ -10198,6 +12251,26 @@ components:
               reactions: {type: integer}
               shares: {type: integer}
           maxItems: 50
+        reactions_by_type:
+          type: object
+          description: |
+            Readers' current reactions, by type, counted on the day each was last set (the same
+            rule as the reactions in totals and by_day).
+          properties:
+            useful: {type: integer}
+            mind_blown: {type: integer}
+            insightful: {type: integer}
+            skeptical: {type: integer}
+            loved: {type: integer}
+            hot_take: {type: integer}
+        shares_by_platform:
+          type: object
+          description: Share clicks in the range, by where they went (`other` is a copied link or the system share sheet).
+          properties:
+            x: {type: integer}
+            linkedin: {type: integer}
+            facebook: {type: integer}
+            other: {type: integer}
 
     BacklinkOverview:
       type: object
@@ -10838,6 +12911,87 @@ components:
           description: Stripe's hosted page. The person pays there; shown once.
         pack: { $ref: "#/components/schemas/CreditPack" }
         next_step: {type: string}
+
+    BalancePurchase:
+      type: object
+      required: [pack, credits, usd_spent, usd_balance, credit_balance]
+      properties:
+        pack: { $ref: "#/components/schemas/CreditPack" }
+        credits: {type: number, description: Credits added.}
+        usd_spent: {type: number, description: US dollars taken from the account balance.}
+        usd_balance: {type: number, description: The account balance in US dollars after the purchase.}
+        credit_balance: {type: number, description: The credit balance after the purchase.}
+
+    WalletTopupRequest:
+      type: object
+      required: [amount_usd]
+      additionalProperties: false
+      properties:
+        amount_usd:
+          type: number
+          minimum: 10
+          maximum: 2000
+          description: US dollars to add, 10 to 2000, to the cent.
+
+    WalletCheckout:
+      type: object
+      required: [checkout_url, amount_usd, next_step]
+      properties:
+        checkout_url:
+          type: string
+          format: uri
+          description: Stripe's hosted page. The person pays there within 30 minutes; shown once.
+        amount_usd: {type: number, description: What will be added to the balance once the person pays.}
+        next_step: {type: string}
+
+    BillingActivityItem:
+      type: object
+      required: [id, created_at, unit, amount, flow, source, label]
+      properties:
+        id: {type: integer, description: Increases over time; the paging cursor.}
+        created_at: {type: string, format: date-time}
+        unit:
+          type: string
+          enum: [credit, usd]
+          description: Which balance moved, credits or US dollars.
+        amount:
+          type: number
+          description: Signed. Positive came in, negative went out.
+        balance_after: {type: [number, "null"], description: That balance after this row.}
+        flow: {type: string, enum: [in, out]}
+        source:
+          type: string
+          enum: [plan, welcome, card_purchase, auto_refill, balance_purchase, top_up, company_grant, usage, cms_usage, expiry, refund, reversal, company_adjustment, other]
+          description: |
+            Where the movement came from. `plan` monthly plan credits; `welcome` welcome credits;
+            `card_purchase` a credit pack bought by card; `auto_refill` a pack bought by auto-refill;
+            `balance_purchase` a pack bought with the account balance (both of its rows); `top_up` funds
+            added by card; `company_grant` credits or funds given by Writavo; `usage` credits spent;
+            `cms_usage` CMS pay-as-you-go usage paid from the balance; `expiry` unused plan credits
+            expired; `refund` a refund; `reversal` removed after a refund or card dispute;
+            `company_adjustment` a correction by Writavo.
+        method:
+          type: [string, "null"]
+          enum: [card, balance, writavo, automatic, null]
+          description: How it was paid, when that applies.
+        label: {type: string, description: A short description a person can read.}
+        quantity: {type: [number, "null"], description: Units of the action, for credit usage.}
+        customer_note: {type: [string, "null"], description: A note Writavo left for the customer, if any.}
+        website_id: {type: [string, "null"], format: uuid, description: The Site the movement belongs to, when it belongs to one.}
+        linked_id:
+          type: [integer, "null"]
+          description: For a pack bought with the balance, the `id` of the other half (the USD row for the credit row, and back).
+
+    BillingActivityPage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/BillingActivityItem" }
+        next_cursor:
+          type: [string, "null"]
+          description: Pass as `before` for the next page. Null on the last page.
 
     BillingLinks:
       type: object

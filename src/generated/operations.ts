@@ -106,7 +106,7 @@ export interface McpRefusal {
 }
 
 export const API_BASE_URL = "https://api.writavo.com/v1";
-export const API_VERSION = "1.3.0";
+export const API_VERSION = "1.4.0";
 
 export const OPERATIONS: McpOperation[] = [
   {
@@ -358,11 +358,20 @@ export const OPERATIONS: McpOperation[] = [
         "name": "tag_id",
         "in": "query",
         "required": false,
-        "description": "Return only articles carrying this tag.",
+        "description": "Return only articles carrying this tag. Repeat the parameter (or separate ids with commas) to match articles carrying ANY of the tags, at most 20. An article carrying several of them is still returned once.",
+        "explode": true,
+        "kind": "array",
+        "nullable": false,
+        "itemKind": "string"
+      },
+      {
+        "name": "q",
+        "in": "query",
+        "required": false,
+        "description": "Text search. Matches the words in the title, excerpt and body (English stemming, so `transcribing` finds `transcription`; web search syntax, so `\"exact phrase\"` and `-excluded` work), or a substring of the title, for the partial word a stemmer cannot match.",
         "explode": false,
         "kind": "string",
-        "nullable": false,
-        "format": "uuid"
+        "nullable": false
       },
       {
         "name": "slug",
@@ -1205,7 +1214,7 @@ export const OPERATIONS: McpOperation[] = [
         "name": "fields",
         "in": "query",
         "required": false,
-        "description": "Comma separated field allow list. Default projection: `id, name, slug, article_count`.",
+        "description": "Comma separated field allow list. Default projection: `id, name, slug, description, article_count`.",
         "explode": false,
         "kind": "string",
         "nullable": false
@@ -1265,6 +1274,15 @@ export const OPERATIONS: McpOperation[] = [
         "explode": false,
         "kind": "string",
         "nullable": false
+      },
+      {
+        "name": "description",
+        "in": "body",
+        "required": false,
+        "description": "An empty string clears it, the same as null.",
+        "explode": false,
+        "kind": "string",
+        "nullable": true
       }
     ],
     "approval": null,
@@ -1379,6 +1397,15 @@ export const OPERATIONS: McpOperation[] = [
         "explode": false,
         "kind": "string",
         "nullable": false
+      },
+      {
+        "name": "description",
+        "in": "body",
+        "required": false,
+        "description": "An empty string clears it, the same as null.",
+        "explode": false,
+        "kind": "string",
+        "nullable": true
       }
     ],
     "approval": null,
@@ -1488,7 +1515,7 @@ export const OPERATIONS: McpOperation[] = [
         "name": "fields",
         "in": "query",
         "required": false,
-        "description": "Comma separated field allow list. Default projection: `id, name, slug, article_count`.",
+        "description": "Comma separated field allow list. Default projection: `id, name, slug, description, group_label, article_count`.",
         "explode": false,
         "kind": "string",
         "nullable": false
@@ -1548,6 +1575,24 @@ export const OPERATIONS: McpOperation[] = [
         "explode": false,
         "kind": "string",
         "nullable": false
+      },
+      {
+        "name": "description",
+        "in": "body",
+        "required": false,
+        "description": "An empty string clears it, the same as null.",
+        "explode": false,
+        "kind": "string",
+        "nullable": true
+      },
+      {
+        "name": "group_label",
+        "in": "body",
+        "required": false,
+        "description": "An empty string clears it, the same as null.",
+        "explode": false,
+        "kind": "string",
+        "nullable": true
       }
     ],
     "approval": null,
@@ -1662,6 +1707,24 @@ export const OPERATIONS: McpOperation[] = [
         "explode": false,
         "kind": "string",
         "nullable": false
+      },
+      {
+        "name": "description",
+        "in": "body",
+        "required": false,
+        "description": "An empty string clears it, the same as null.",
+        "explode": false,
+        "kind": "string",
+        "nullable": true
+      },
+      {
+        "name": "group_label",
+        "in": "body",
+        "required": false,
+        "description": "An empty string clears it, the same as null.",
+        "explode": false,
+        "kind": "string",
+        "nullable": true
       }
     ],
     "approval": null,
@@ -1771,7 +1834,7 @@ export const OPERATIONS: McpOperation[] = [
         "name": "fields",
         "in": "query",
         "required": false,
-        "description": "Comma separated field allow list. Default projection: `id, name, bio, avatar_url, is_ai_generated, is_default, created_at`.",
+        "description": "Comma separated field allow list. Default projection: `id, name, slug, bio, avatar_url, job_title, socials, author_type, is_ai_generated, is_default, created_at`.",
         "explode": false,
         "kind": "string",
         "nullable": false
@@ -1824,6 +1887,15 @@ export const OPERATIONS: McpOperation[] = [
         "nullable": false
       },
       {
+        "name": "slug",
+        "in": "body",
+        "required": false,
+        "description": "The author's stable URL key, unique on the Site. Derived from `name` when omitted, and kept when the author is renamed.",
+        "explode": false,
+        "kind": "string",
+        "nullable": false
+      },
+      {
         "name": "bio",
         "in": "body",
         "required": false,
@@ -1841,6 +1913,38 @@ export const OPERATIONS: McpOperation[] = [
         "kind": "string",
         "nullable": true,
         "format": "uri"
+      },
+      {
+        "name": "job_title",
+        "in": "body",
+        "required": false,
+        "description": "Emitted as the schema.org `jobTitle` of the byline.",
+        "explode": false,
+        "kind": "string",
+        "nullable": true
+      },
+      {
+        "name": "socials",
+        "in": "body",
+        "required": false,
+        "description": "The author's profiles elsewhere, as network to absolute http(s) URL. Emitted as the schema.org `sameAs` of the byline. A write REPLACES the whole object; send `{}` to clear it.",
+        "explode": false,
+        "kind": "object",
+        "nullable": false
+      },
+      {
+        "name": "author_type",
+        "in": "body",
+        "required": false,
+        "description": "How a theme groups this byline, for example a founders page listing every `co-founder`. A display label only: it grants no access to anything.",
+        "explode": false,
+        "kind": "string",
+        "nullable": false,
+        "enum": [
+          "co-founder",
+          "admin",
+          "user"
+        ]
       },
       {
         "name": "is_ai_generated",
@@ -1966,6 +2070,15 @@ export const OPERATIONS: McpOperation[] = [
         "nullable": false
       },
       {
+        "name": "slug",
+        "in": "body",
+        "required": false,
+        "description": "The author's stable URL key, unique on the Site. Derived from `name` when omitted, and kept when the author is renamed.",
+        "explode": false,
+        "kind": "string",
+        "nullable": false
+      },
+      {
         "name": "bio",
         "in": "body",
         "required": false,
@@ -1983,6 +2096,38 @@ export const OPERATIONS: McpOperation[] = [
         "kind": "string",
         "nullable": true,
         "format": "uri"
+      },
+      {
+        "name": "job_title",
+        "in": "body",
+        "required": false,
+        "description": "Emitted as the schema.org `jobTitle` of the byline.",
+        "explode": false,
+        "kind": "string",
+        "nullable": true
+      },
+      {
+        "name": "socials",
+        "in": "body",
+        "required": false,
+        "description": "The author's profiles elsewhere, as network to absolute http(s) URL. Emitted as the schema.org `sameAs` of the byline. A write REPLACES the whole object; send `{}` to clear it.",
+        "explode": false,
+        "kind": "object",
+        "nullable": false
+      },
+      {
+        "name": "author_type",
+        "in": "body",
+        "required": false,
+        "description": "How a theme groups this byline, for example a founders page listing every `co-founder`. A display label only: it grants no access to anything.",
+        "explode": false,
+        "kind": "string",
+        "nullable": false,
+        "enum": [
+          "co-founder",
+          "admin",
+          "user"
+        ]
       },
       {
         "name": "is_ai_generated",
@@ -2363,6 +2508,7 @@ export const OPERATIONS: McpOperation[] = [
         "enum": [
           "dispatch",
           "discover",
+          "score",
           "scrape",
           "extract",
           "plan",
@@ -2765,6 +2911,24 @@ export const ACTIONS: McpOperation[] = [
         "explode": false,
         "kind": "boolean",
         "nullable": false
+      },
+      {
+        "name": "description",
+        "in": "body",
+        "required": false,
+        "description": "",
+        "explode": false,
+        "kind": "string",
+        "nullable": true
+      },
+      {
+        "name": "prompt_addendum",
+        "in": "body",
+        "required": false,
+        "description": "Writing instructions for this format. May use the AI writing profile placeholders.",
+        "explode": false,
+        "kind": "string",
+        "nullable": true
       }
     ],
     "approval": null,
@@ -2855,6 +3019,138 @@ export const ACTIONS: McpOperation[] = [
     }
   },
   {
+    "tool": "list_pipeline_sources",
+    "operationId": "listPipelineSources",
+    "method": "GET",
+    "path": "/pipeline/sources",
+    "tag": "Pipeline",
+    "surface": "action",
+    "area": "pipeline",
+    "summary": "List competitor source articles",
+    "brief": "The source queue, newest first. When the Site has competitors with a blog URL, the engine finds their articles (`discovered`), scores each one on its search traffic, ranking keywords and links (`scored`, or `skipped` below the Site's `sourc...",
+    "description": "List competitor source articles. The source queue, newest first. When the Site has competitors with a blog URL, the engine finds their articles (`discovered`), scores each one on its search traffic, ranking keywords and links (`scored`, or `skipped` below the Site's `source_score_threshold`), reads it (`scraped`, or `rejected` / `failed`), and then writes an original article that beats it (`used`, with `article_id` set). Read only. Nothing is changed. Needs a secret key (wv_sk_) carrying the pipeline:read scope.",
+    "scope": "pipeline:read",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": false,
+    "spendsCredits": false,
+    "spendsMoney": false,
+    "consequence": null,
+    "makesPublic": false,
+    "readOnly": true,
+    "confirm": false,
+    "confirmReason": null,
+    "idempotency": false,
+    "ifMatch": false,
+    "params": [
+      {
+        "name": "cursor",
+        "in": "query",
+        "required": false,
+        "description": "The opaque cursor from `data.next_cursor` on the previous page. Do not parse it or construct one; its encoding is not part of this contract and will change.",
+        "explode": false,
+        "kind": "string",
+        "nullable": false
+      },
+      {
+        "name": "limit",
+        "in": "query",
+        "required": false,
+        "description": "Page size. Values above the maximum are clamped rather than rejected, so a client asking for a thousand rows gets a hundred and a `next_cursor`.",
+        "explode": false,
+        "kind": "integer",
+        "nullable": false
+      },
+      {
+        "name": "status",
+        "in": "query",
+        "required": false,
+        "description": "",
+        "explode": false,
+        "kind": "string",
+        "nullable": false,
+        "enum": [
+          "discovered",
+          "scored",
+          "skipped",
+          "scraped",
+          "rejected",
+          "failed",
+          "used"
+        ]
+      },
+      {
+        "name": "competitor_id",
+        "in": "query",
+        "required": false,
+        "description": "Only sources found on this competitor's blog.",
+        "explode": false,
+        "kind": "string",
+        "nullable": false,
+        "format": "uuid"
+      }
+    ],
+    "approval": null,
+    "approvalMode": null,
+    "approvalKind": null,
+    "approvalWhen": null,
+    "annotations": {
+      "title": "List competitor source articles",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "tool": "get_pipeline_source",
+    "operationId": "getPipelineSource",
+    "method": "GET",
+    "path": "/pipeline/sources/{id}",
+    "tag": "Pipeline",
+    "surface": "action",
+    "area": "pipeline",
+    "summary": "Read one competitor source article",
+    "brief": "One source article with its score breakdown, where it is in the queue, and the article it produced once written. The text read from the competitor page is never returned.",
+    "description": "Read one competitor source article. One source article with its score breakdown, where it is in the queue, and the article it produced once written. The text read from the competitor page is never returned. Read only. Nothing is changed. Needs a secret key (wv_sk_) carrying the pipeline:read scope.",
+    "scope": "pipeline:read",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": false,
+    "spendsCredits": false,
+    "spendsMoney": false,
+    "consequence": null,
+    "makesPublic": false,
+    "readOnly": true,
+    "confirm": false,
+    "confirmReason": null,
+    "idempotency": false,
+    "ifMatch": false,
+    "params": [
+      {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "description": "",
+        "explode": false,
+        "kind": "string",
+        "nullable": false,
+        "format": "uuid"
+      }
+    ],
+    "approval": null,
+    "approvalMode": null,
+    "approvalKind": null,
+    "approvalWhen": null,
+    "annotations": {
+      "title": "Read one competitor source article",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
     "tool": "get_pipeline_config",
     "operationId": "getPipelineConfig",
     "method": "GET",
@@ -2863,8 +3159,8 @@ export const ACTIONS: McpOperation[] = [
     "surface": "action",
     "area": "pipeline",
     "summary": "Read the pipeline configuration",
-    "brief": "Whether the AI pipeline runs on its own for this Site, and how hard: the publish mode, the daily publish limit, the batch size, the rewrite attempts and the quality threshold, plus when it next runs and whether a run is in flight.",
-    "description": "Read the pipeline configuration. Whether the AI pipeline runs on its own for this Site, and how hard: the publish mode, the daily publish limit, the batch size, the rewrite attempts and the quality threshold, plus when it next runs and whether a run is in flight. Read this before `PATCH /pipeline/config`. Read only. Nothing is changed. Needs a secret key (wv_sk_) carrying the pipeline:read scope.",
+    "brief": "Whether the AI pipeline runs on its own for this Site, and how hard: the publish mode, the daily publish limit, the batch size, the rewrite attempts and the quality threshold, the competitor source pass mark and its weights and the minimum...",
+    "description": "Read the pipeline configuration. Whether the AI pipeline runs on its own for this Site, and how hard: the publish mode, the daily publish limit, the batch size, the rewrite attempts and the quality threshold, the competitor source pass mark and its weights and the minimum originality, plus when it next runs and whether a run is in flight. Read this before `PATCH /pipeline/config`. Read only. Nothing is changed. Needs a secret key (wv_sk_) carrying the pipeline:read scope.",
     "scope": "pipeline:read",
     "alsoScopes": [],
     "entitlement": "none",
@@ -2901,7 +3197,7 @@ export const ACTIONS: McpOperation[] = [
     "area": "pipeline",
     "summary": "Change the pipeline configuration",
     "brief": "Turn the AI pipeline on or off, or change how much it does. Send at least one field. While the pipeline is on it writes articles from the content plan every 10 minutes, up to `batch_size` at a time, and every article spends credits; in `aut...",
-    "description": "Change the pipeline configuration. Turn the AI pipeline on or off, or change how much it does. Send at least one field. While the pipeline is on it writes articles from the content plan every 10 minutes, up to `batch_size` at a time, and every article spends credits; in `auto` mode finished articles go live on the blog without review, up to `articles_per_day` a day. COSTS MONEY: this spends the organisation's credit balance, charged per unit of work completed. The AI pipeline writes more articles, or starts writing them, and spends the organisation's credits on each one; in auto mode they go live without review. Ask the user before calling this, and pass confirm: true only once they have agreed. Needs a secret key (wv_sk_) carrying the pipeline:config scope. APPROVAL: when an AI assistant calls this it always needs a person's approval first: the first call returns a link for them instead of acting; after they approve, call run_writavo_action again with the same operation_id and arguments plus approval_id. Asked only when the result is a running pipeline that does more than before: turning it on, raising `batch_size`, `articles_per_day`, `max_auto_improve_attempts` or `quality_score_threshold`, or switching `publish_mode` to `auto`. Turning it off or lowering anything is never asked.",
+    "description": "Change the pipeline configuration. Turn the AI pipeline on or off, or change how much it does. Send at least one field. While the pipeline is on it writes articles from the content plan every 10 minutes, up to `batch_size` at a time, and every article spends credits; in `auto` mode finished articles go live on the blog without review, up to `articles_per_day` a day. COSTS MONEY: this spends the organisation's credit balance, charged per unit of work completed. The AI pipeline writes more articles, or starts writing them, and spends the organisation's credits on each one; in auto mode they go live without review. Ask the user before calling this, and pass confirm: true only once they have agreed. Needs a secret key (wv_sk_) carrying the pipeline:config scope. APPROVAL: when an AI assistant calls this it always needs a person's approval first: the first call returns a link for them instead of acting; after they approve, call run_writavo_action again with the same operation_id and arguments plus approval_id. Asked only when the result is a running pipeline that does more than before: turning it on, raising `batch_size`, `articles_per_day`, `max_auto_improve_attempts`, `quality_score_threshold` or `min_originality_pct`, lowering `source_score_threshold`, changing `seo_score_weights`, or switching `publish_mode` to `auto`. Turning it off is never asked.",
     "scope": "pipeline:config",
     "alsoScopes": [],
     "entitlement": "ai.article_generation",
@@ -2973,17 +3269,575 @@ export const ACTIONS: McpOperation[] = [
         "explode": false,
         "kind": "number",
         "nullable": false
+      },
+      {
+        "name": "source_score_threshold",
+        "in": "body",
+        "required": false,
+        "description": "",
+        "explode": false,
+        "kind": "number",
+        "nullable": false
+      },
+      {
+        "name": "seo_score_weights",
+        "in": "body",
+        "required": false,
+        "description": "How much each metric counts toward a competitor article's SEO score. The weights are relative (the score is normalised over the metrics that were measured), so they need not add up to 1. Send all five; at least one must be above 0.",
+        "explode": false,
+        "kind": "object",
+        "nullable": false
+      },
+      {
+        "name": "min_originality_pct",
+        "in": "body",
+        "required": false,
+        "description": "",
+        "explode": false,
+        "kind": "number",
+        "nullable": false
       }
     ],
     "approval": "pipeline.configure",
     "approvalMode": "always",
     "approvalKind": "money",
-    "approvalWhen": "Asked only when the result is a running pipeline that does more than before: turning it on, raising `batch_size`, `articles_per_day`, `max_auto_improve_attempts` or `quality_score_threshold`, or switching `publish_mode` to `auto`. Turning it off or lowering anything is never asked.",
+    "approvalWhen": "Asked only when the result is a running pipeline that does more than before: turning it on, raising `batch_size`, `articles_per_day`, `max_auto_improve_attempts`, `quality_score_threshold` or `min_originality_pct`, lowering `source_score_threshold`, changing `seo_score_weights`, or switching `publish_mode` to `auto`. Turning it off is never asked.",
     "annotations": {
       "title": "Change the pipeline configuration",
       "readOnlyHint": false,
       "destructiveHint": false,
       "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "tool": "list_recipe_steps",
+    "operationId": "listRecipeSteps",
+    "method": "GET",
+    "path": "/pipeline/steps",
+    "tag": "Pipeline",
+    "surface": "action",
+    "area": "pipeline",
+    "summary": "List the steps a recipe can use",
+    "brief": "The step catalogue for article recipes. A recipe is the Site's pipeline as data: steps in seven fixed sections (where ideas come from, which ideas to keep, research, writing, checks, finishing touches, publishing).",
+    "description": "List the steps a recipe can use. The step catalogue for article recipes. A recipe is the Site's pipeline as data: steps in seven fixed sections (where ideas come from, which ideas to keep, research, writing, checks, finishing touches, publishing). Every step here is one Writavo built and priced; there is no custom code. Read only. Nothing is changed. Needs a secret key (wv_sk_) carrying the pipeline:read scope.",
+    "scope": "pipeline:read",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": false,
+    "spendsCredits": false,
+    "spendsMoney": false,
+    "consequence": null,
+    "makesPublic": false,
+    "readOnly": true,
+    "confirm": false,
+    "confirmReason": null,
+    "idempotency": false,
+    "ifMatch": false,
+    "params": [],
+    "approval": null,
+    "approvalMode": null,
+    "approvalKind": null,
+    "approvalWhen": null,
+    "annotations": {
+      "title": "List the steps a recipe can use",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "tool": "list_recipe_templates",
+    "operationId": "listRecipeTemplates",
+    "method": "GET",
+    "path": "/pipeline/templates",
+    "tag": "Pipeline",
+    "surface": "action",
+    "area": "pipeline",
+    "summary": "List the starting recipes",
+    "brief": "One ready-made recipe per goal (\"Win traffic from competitors\", \"Cover the news in my niche\", \"Write the topics I plan\", \"Build pages from a list\", \"Keep old articles fresh\", \"Let AI pick my topics\"), each with its spec, its plain sentences...",
+    "description": "List the starting recipes. One ready-made recipe per goal (\"Win traffic from competitors\", \"Cover the news in my niche\", \"Write the topics I plan\", \"Build pages from a list\", \"Keep old articles fresh\", \"Let AI pick my topics\"), each with its spec, its plain sentences and what it costs per article. `needs` lists what a person must fill in before the template can be saved (news feed addresses, a CSV link). Read only. Nothing is changed. Needs a secret key (wv_sk_) carrying the pipeline:read scope.",
+    "scope": "pipeline:read",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": false,
+    "spendsCredits": false,
+    "spendsMoney": false,
+    "consequence": null,
+    "makesPublic": false,
+    "readOnly": true,
+    "confirm": false,
+    "confirmReason": null,
+    "idempotency": false,
+    "ifMatch": false,
+    "params": [],
+    "approval": null,
+    "approvalMode": null,
+    "approvalKind": null,
+    "approvalWhen": null,
+    "annotations": {
+      "title": "List the starting recipes",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "tool": "get_recipe",
+    "operationId": "getRecipe",
+    "method": "GET",
+    "path": "/pipeline/recipe",
+    "tag": "Pipeline",
+    "surface": "action",
+    "area": "pipeline",
+    "summary": "Read the Site's article recipe",
+    "brief": "The recipe that is running (`live`), the draft being edited (`draft`, or null) and the last ten versions. Each version carries its `spec`, the plain `sentences` the dashboard shows, advice (`warnings`) and an `estimate` of what it costs per...",
+    "description": "Read the Site's article recipe. The recipe that is running (`live`), the draft being edited (`draft`, or null) and the last ten versions. Each version carries its `spec`, the plain `sentences` the dashboard shows, advice (`warnings`) and an `estimate` of what it costs per article and per month (based on the Site's own last 14 days once it has that much history). Read only. Nothing is changed. Needs a secret key (wv_sk_) carrying the pipeline:read scope.",
+    "scope": "pipeline:read",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": false,
+    "spendsCredits": false,
+    "spendsMoney": false,
+    "consequence": null,
+    "makesPublic": false,
+    "readOnly": true,
+    "confirm": false,
+    "confirmReason": null,
+    "idempotency": false,
+    "ifMatch": false,
+    "params": [],
+    "approval": null,
+    "approvalMode": null,
+    "approvalKind": null,
+    "approvalWhen": null,
+    "annotations": {
+      "title": "Read the Site's article recipe",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "tool": "explain_recipe",
+    "operationId": "explainRecipe",
+    "method": "GET",
+    "path": "/pipeline/recipe/explain",
+    "tag": "Pipeline",
+    "surface": "action",
+    "area": "pipeline",
+    "summary": "Explain the recipe in plain words",
+    "brief": "The recipe as the sentences a person sees on the recipe page, one per step, in order, for example \"Every 10 minutes, check 3 news feeds\". Use these words when you tell a person what their recipe does.",
+    "description": "Explain the recipe in plain words. The recipe as the sentences a person sees on the recipe page, one per step, in order, for example \"Every 10 minutes, check 3 news feeds\". Use these words when you tell a person what their recipe does. Read only. Nothing is changed. Needs a secret key (wv_sk_) carrying the pipeline:read scope.",
+    "scope": "pipeline:read",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": false,
+    "spendsCredits": false,
+    "spendsMoney": false,
+    "consequence": null,
+    "makesPublic": false,
+    "readOnly": true,
+    "confirm": false,
+    "confirmReason": null,
+    "idempotency": false,
+    "ifMatch": false,
+    "params": [
+      {
+        "name": "version",
+        "in": "query",
+        "required": false,
+        "description": "Which version to explain. Default `live`.",
+        "explode": false,
+        "kind": "string",
+        "nullable": false,
+        "enum": [
+          "live",
+          "draft"
+        ]
+      }
+    ],
+    "approval": null,
+    "approvalMode": null,
+    "approvalKind": null,
+    "approvalWhen": null,
+    "annotations": {
+      "title": "Explain the recipe in plain words",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "tool": "list_recipe_activity",
+    "operationId": "listRecipeActivity",
+    "method": "GET",
+    "path": "/pipeline/recipe/activity",
+    "tag": "Pipeline",
+    "surface": "action",
+    "area": "pipeline",
+    "summary": "See what the recipe did, step by step",
+    "brief": "The most recent ideas and articles, each with its step-by-step trace (found, kept or dropped and why, read, written, checked, illustrated, published) and the credits each step charged.",
+    "description": "See what the recipe did, step by step. The most recent ideas and articles, each with its step-by-step trace (found, kept or dropped and why, read, written, checked, illustrated, published) and the credits each step charged. Pass `item` (an article, source or topic id) for one item's full trace. Test runs are marked `is_test`. Read only. Nothing is changed. Needs a secret key (wv_sk_) carrying the pipeline:read scope.",
+    "scope": "pipeline:read",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": false,
+    "spendsCredits": false,
+    "spendsMoney": false,
+    "consequence": null,
+    "makesPublic": false,
+    "readOnly": true,
+    "confirm": false,
+    "confirmReason": null,
+    "idempotency": false,
+    "ifMatch": false,
+    "params": [
+      {
+        "name": "limit",
+        "in": "query",
+        "required": false,
+        "description": "Page size. Values above the maximum are clamped rather than rejected, so a client asking for a thousand rows gets a hundred and a `next_cursor`.",
+        "explode": false,
+        "kind": "integer",
+        "nullable": false
+      },
+      {
+        "name": "item",
+        "in": "query",
+        "required": false,
+        "description": "One article, source or topic id.",
+        "explode": false,
+        "kind": "string",
+        "nullable": false,
+        "format": "uuid"
+      }
+    ],
+    "approval": null,
+    "approvalMode": null,
+    "approvalKind": null,
+    "approvalWhen": null,
+    "annotations": {
+      "title": "See what the recipe did, step by step",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "tool": "estimate_recipe",
+    "operationId": "estimateRecipe",
+    "method": "POST",
+    "path": "/pipeline/recipe/estimate",
+    "tag": "Pipeline",
+    "surface": "action",
+    "area": "pipeline",
+    "summary": "Estimate what a recipe costs",
+    "brief": "Credits per article and per month for a spec (send `spec`, validated as for a draft) or for the Site's `live` or `draft` recipe (send `version`). `per_day` overrides how many articles a day the monthly figure assumes.",
+    "description": "Estimate what a recipe costs. Credits per article and per month for a spec (send `spec`, validated as for a draft) or for the Site's `live` or `draft` recipe (send `version`). `per_day` overrides how many articles a day the monthly figure assumes. Nothing is saved and nothing is charged. Changes content on the customer's Site. Nothing becomes public: publishing is always a separate call. Needs a secret key (wv_sk_) carrying the pipeline:read scope.",
+    "scope": "pipeline:read",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": false,
+    "spendsCredits": false,
+    "spendsMoney": false,
+    "consequence": null,
+    "makesPublic": false,
+    "readOnly": false,
+    "confirm": false,
+    "confirmReason": null,
+    "idempotency": false,
+    "ifMatch": false,
+    "params": [
+      {
+        "name": "spec",
+        "in": "body",
+        "required": false,
+        "description": "An article recipe (spec_version 1): one step for where ideas come from, zero or more to keep, zero or more research steps, one writer, the checks, the finishing touches and one publishing step. Every entry is `{step, settings}`.",
+        "explode": false,
+        "kind": "object",
+        "nullable": false
+      },
+      {
+        "name": "version",
+        "in": "body",
+        "required": false,
+        "description": "",
+        "explode": false,
+        "kind": "string",
+        "nullable": false,
+        "enum": [
+          "live",
+          "draft"
+        ]
+      },
+      {
+        "name": "per_day",
+        "in": "body",
+        "required": false,
+        "description": "",
+        "explode": false,
+        "kind": "number",
+        "nullable": false
+      }
+    ],
+    "approval": null,
+    "approvalMode": null,
+    "approvalKind": null,
+    "approvalWhen": null,
+    "annotations": {
+      "title": "Estimate what a recipe costs",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "tool": "save_recipe_draft",
+    "operationId": "saveRecipeDraft",
+    "method": "POST",
+    "path": "/pipeline/recipe/draft",
+    "tag": "Pipeline",
+    "surface": "action",
+    "area": "pipeline",
+    "summary": "Save the draft recipe",
+    "brief": "Save (or replace) the Site's draft recipe. Send `spec`, or `template_key` to start from a template. Nothing runs until the draft is switched on with `POST /pipeline/recipe/draft/activate`, so saving a draft never spends anything.",
+    "description": "Save the draft recipe. Save (or replace) the Site's draft recipe. Send `spec`, or `template_key` to start from a template. Nothing runs until the draft is switched on with `POST /pipeline/recipe/draft/activate`, so saving a draft never spends anything. Changes content on the customer's Site. Nothing becomes public: publishing is always a separate call. CONSEQUENCE: Saves a draft recipe. Nothing changes until a person switches it on. Needs a secret key (wv_sk_) carrying the pipeline:config scope.",
+    "scope": "pipeline:config",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": false,
+    "spendsCredits": false,
+    "spendsMoney": false,
+    "consequence": "Saves a draft recipe. Nothing changes until a person switches it on.",
+    "makesPublic": false,
+    "readOnly": false,
+    "confirm": false,
+    "confirmReason": null,
+    "idempotency": false,
+    "ifMatch": false,
+    "params": [
+      {
+        "name": "spec",
+        "in": "body",
+        "required": false,
+        "description": "An article recipe (spec_version 1): one step for where ideas come from, zero or more to keep, zero or more research steps, one writer, the checks, the finishing touches and one publishing step. Every entry is `{step, settings}`.",
+        "explode": false,
+        "kind": "object",
+        "nullable": false
+      },
+      {
+        "name": "template_key",
+        "in": "body",
+        "required": false,
+        "description": "A key from `GET /pipeline/templates`.",
+        "explode": false,
+        "kind": "string",
+        "nullable": false
+      },
+      {
+        "name": "note",
+        "in": "body",
+        "required": false,
+        "description": "",
+        "explode": false,
+        "kind": "string",
+        "nullable": true
+      }
+    ],
+    "approval": null,
+    "approvalMode": null,
+    "approvalKind": null,
+    "approvalWhen": null,
+    "annotations": {
+      "title": "Save the draft recipe",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "tool": "discard_recipe_draft",
+    "operationId": "discardRecipeDraft",
+    "method": "DELETE",
+    "path": "/pipeline/recipe/draft",
+    "tag": "Pipeline",
+    "surface": "action",
+    "area": "pipeline",
+    "summary": "Discard the draft recipe",
+    "brief": "Throw the draft away. The live recipe is not touched.",
+    "description": "Discard the draft recipe. Throw the draft away. The live recipe is not touched. PERMANENT: Discards the draft recipe. The recipe that is running is not changed. Ask the user before calling this, and pass confirm: true only once they have agreed. Needs a secret key (wv_sk_) carrying the pipeline:config scope.",
+    "scope": "pipeline:config",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": false,
+    "spendsCredits": false,
+    "spendsMoney": false,
+    "consequence": "Discards the draft recipe. The recipe that is running is not changed.",
+    "makesPublic": false,
+    "readOnly": false,
+    "confirm": true,
+    "confirmReason": "destructive",
+    "idempotency": false,
+    "ifMatch": false,
+    "params": [],
+    "approval": null,
+    "approvalMode": null,
+    "approvalKind": null,
+    "approvalWhen": null,
+    "annotations": {
+      "title": "Discard the draft recipe",
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "tool": "test_recipe_draft",
+    "operationId": "testRecipeDraft",
+    "method": "POST",
+    "path": "/pipeline/recipe/draft/test",
+    "tag": "Pipeline",
+    "surface": "action",
+    "area": "pipeline",
+    "summary": "Test the draft on one real idea",
+    "brief": "This spends credits. Takes ONE real idea through every step of the draft recipe and stops at the review queue. The test article is never published.",
+    "description": "Test the draft on one real idea. This spends credits. Takes ONE real idea through every step of the draft recipe and stops at the review queue. The test article is never published. It returns `202` straight away; follow the test with `GET /pipeline/recipe/activity?item=<item_id>`. COSTS MONEY: this spends the organisation's credit balance, charged per unit of work completed. Writes one test article with the draft recipe and charges its credits. It is held for review, never published. Ask the user before calling this, and pass confirm: true only once they have agreed. Needs a secret key (wv_sk_) carrying the pipeline:run scope. APPROVAL: when an AI assistant calls this it always needs a person's approval first: the first call returns a link for them instead of acting; after they approve, call run_writavo_action again with the same operation_id and arguments plus approval_id.",
+    "scope": "pipeline:run",
+    "alsoScopes": [],
+    "entitlement": "ai.article_generation",
+    "publishable": false,
+    "spendsCredits": true,
+    "spendsMoney": false,
+    "consequence": "Writes one test article with the draft recipe and charges its credits. It is held for review, never published.",
+    "makesPublic": false,
+    "readOnly": false,
+    "confirm": true,
+    "confirmReason": "spend",
+    "idempotency": true,
+    "ifMatch": false,
+    "params": [
+      {
+        "name": "topic",
+        "in": "body",
+        "required": false,
+        "description": "",
+        "explode": false,
+        "kind": "string",
+        "nullable": false
+      },
+      {
+        "name": "url",
+        "in": "body",
+        "required": false,
+        "description": "",
+        "explode": false,
+        "kind": "string",
+        "nullable": false,
+        "format": "uri"
+      },
+      {
+        "name": "article_id",
+        "in": "body",
+        "required": false,
+        "description": "",
+        "explode": false,
+        "kind": "string",
+        "nullable": false,
+        "format": "uuid"
+      }
+    ],
+    "approval": "pipeline.run",
+    "approvalMode": "always",
+    "approvalKind": "money",
+    "approvalWhen": null,
+    "annotations": {
+      "title": "Test the draft on one real idea",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "tool": "activate_recipe_draft",
+    "operationId": "activateRecipeDraft",
+    "method": "POST",
+    "path": "/pipeline/recipe/draft/activate",
+    "tag": "Pipeline",
+    "surface": "action",
+    "area": "pipeline",
+    "summary": "Switch the draft recipe on",
+    "brief": "The draft becomes the live recipe; the previous one is kept in the history and `POST /pipeline/recipe/undo` goes back to it. New ideas follow the new recipe at once; articles already on their way finish on the version they started on.",
+    "description": "Switch the draft recipe on. The draft becomes the live recipe; the previous one is kept in the history and `POST /pipeline/recipe/undo` goes back to it. New ideas follow the new recipe at once; articles already on their way finish on the version they started on. Returns the recipe as `GET /pipeline/recipe` does. COSTS MONEY: this spends the organisation's credit balance, charged per unit of work completed. Replaces the recipe the AI pipeline follows, which changes what every new article costs and whether it publishes without review. Ask the user before calling this, and pass confirm: true only once they have agreed. Needs a secret key (wv_sk_) carrying the pipeline:config scope. APPROVAL: when an AI assistant calls this it always needs a person's approval first: the first call returns a link for them instead of acting; after they approve, call run_writavo_action again with the same operation_id and arguments plus approval_id.",
+    "scope": "pipeline:config",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": false,
+    "spendsCredits": true,
+    "spendsMoney": false,
+    "consequence": "Replaces the recipe the AI pipeline follows, which changes what every new article costs and whether it publishes without review.",
+    "makesPublic": false,
+    "readOnly": false,
+    "confirm": true,
+    "confirmReason": "spend",
+    "idempotency": true,
+    "ifMatch": false,
+    "params": [],
+    "approval": "pipeline.configure",
+    "approvalMode": "always",
+    "approvalKind": "money",
+    "approvalWhen": null,
+    "annotations": {
+      "title": "Switch the draft recipe on",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "tool": "undo_recipe",
+    "operationId": "undoRecipe",
+    "method": "POST",
+    "path": "/pipeline/recipe/undo",
+    "tag": "Pipeline",
+    "surface": "action",
+    "area": "pipeline",
+    "summary": "Go back to the previous recipe",
+    "brief": "Switch the previous recipe back on, as a new version (the history stays in order). Refused with `409 CONFLICT` while a draft is open.",
+    "description": "Go back to the previous recipe. Switch the previous recipe back on, as a new version (the history stays in order). Refused with `409 CONFLICT` while a draft is open. COSTS MONEY: this spends the organisation's credit balance, charged per unit of work completed. Switches the previous article recipe back on, which can change what each new article costs. Ask the user before calling this, and pass confirm: true only once they have agreed. Needs a secret key (wv_sk_) carrying the pipeline:config scope. APPROVAL: when an AI assistant calls this it always needs a person's approval first: the first call returns a link for them instead of acting; after they approve, call run_writavo_action again with the same operation_id and arguments plus approval_id. Asked only when the previous recipe costs more per article than the current one.",
+    "scope": "pipeline:config",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": false,
+    "spendsCredits": true,
+    "spendsMoney": false,
+    "consequence": "Switches the previous article recipe back on, which can change what each new article costs.",
+    "makesPublic": false,
+    "readOnly": false,
+    "confirm": true,
+    "confirmReason": "spend",
+    "idempotency": true,
+    "ifMatch": false,
+    "params": [],
+    "approval": "pipeline.configure",
+    "approvalMode": "always",
+    "approvalKind": "money",
+    "approvalWhen": "Asked only when the previous recipe costs more per article than the current one.",
+    "annotations": {
+      "title": "Go back to the previous recipe",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
       "openWorldHint": false
     }
   },
@@ -3363,10 +4217,29 @@ export const ACTIONS: McpOperation[] = [
         "nullable": false,
         "enum": [
           "plan",
-          "generate",
-          "improve",
-          "classify",
-          "extract"
+          "paraphrase.system",
+          "paraphrase.user",
+          "paraphrase.quality_system",
+          "paraphrase.quality_user",
+          "improve.system",
+          "improve.user",
+          "improve.quality_system",
+          "improve.quality_user",
+          "classify.system",
+          "classify.user",
+          "image.art_director",
+          "image.base_style",
+          "extract.system",
+          "extract.user",
+          "chat.system",
+          "news.system",
+          "news.user",
+          "news.quality_system",
+          "news.quality_user",
+          "news.attribution",
+          "news.rewrite",
+          "refresh.system",
+          "refresh.user"
         ]
       },
       {
@@ -3426,10 +4299,29 @@ export const ACTIONS: McpOperation[] = [
         "nullable": false,
         "enum": [
           "plan",
-          "generate",
-          "improve",
-          "classify",
-          "extract"
+          "paraphrase.system",
+          "paraphrase.user",
+          "paraphrase.quality_system",
+          "paraphrase.quality_user",
+          "improve.system",
+          "improve.user",
+          "improve.quality_system",
+          "improve.quality_user",
+          "classify.system",
+          "classify.user",
+          "image.art_director",
+          "image.base_style",
+          "extract.system",
+          "extract.user",
+          "chat.system",
+          "news.system",
+          "news.user",
+          "news.quality_system",
+          "news.quality_user",
+          "news.attribution",
+          "news.rewrite",
+          "refresh.system",
+          "refresh.user"
         ]
       }
     ],
@@ -3554,6 +4446,24 @@ export const ACTIONS: McpOperation[] = [
         "explode": false,
         "kind": "boolean",
         "nullable": false
+      },
+      {
+        "name": "description",
+        "in": "body",
+        "required": false,
+        "description": "`null` or `\"\"` clears it.",
+        "explode": false,
+        "kind": "string",
+        "nullable": true
+      },
+      {
+        "name": "prompt_addendum",
+        "in": "body",
+        "required": false,
+        "description": "`null` or `\"\"` clears it.",
+        "explode": false,
+        "kind": "string",
+        "nullable": true
       }
     ],
     "approval": null,
@@ -3754,8 +4664,8 @@ export const ACTIONS: McpOperation[] = [
     "surface": "action",
     "area": "site_settings",
     "summary": "Read the knowledge profile",
-    "brief": "What the AI knows about the business it writes for: the brand voice, the product description and the target audience. Every generated article is written from this, so it is the single most effective thing to get right before turning the pip...",
-    "description": "Read the knowledge profile. What the AI knows about the business it writes for: the brand voice, the product description and the target audience. Every generated article is written from this, so it is the single most effective thing to get right before turning the pipeline on. Read only. Nothing is changed. Needs a secret key (wv_sk_) carrying the site:read scope.",
+    "brief": "What the AI knows about the business it writes for: the brand voice, the product description and the target audience, plus the AI writing profile: the product knowledge the writer may cite, the niche keywords that gate which competitor arti...",
+    "description": "Read the knowledge profile. What the AI knows about the business it writes for: the brand voice, the product description and the target audience, plus the AI writing profile: the product knowledge the writer may cite, the niche keywords that gate which competitor articles get written, and `prompt_vars`, the Site's values for the brand phrases in the platform writing prompts. Read only. Nothing is changed. Needs a secret key (wv_sk_) carrying the site:read scope.",
     "scope": "site:read",
     "alsoScopes": [],
     "entitlement": "none",
@@ -3791,8 +4701,8 @@ export const ACTIONS: McpOperation[] = [
     "surface": "action",
     "area": "site_settings",
     "summary": "Change the knowledge profile",
-    "brief": "Change the brand voice, product description or target audience. Send at least one; `null` clears a field. Each is plain text up to 4000 characters.",
-    "description": "Change the knowledge profile. Change the brand voice, product description or target audience. Send at least one; `null` clears a field. Each is plain text up to 4000 characters. Once edited the profile is marked as written by a person (`is_auto_generated: false`) and the onboarding generator never overwrites it. Changes Site settings. Needs a secret key (wv_sk_) carrying the site:write scope.",
+    "brief": "Change the brand voice, product description or target audience (plain text up to 4000 characters each), the product knowledge (up to 20000), the niche keywords (up to 60, each 1 to 60 characters) or any of the `prompt_vars`.",
+    "description": "Change the knowledge profile. Change the brand voice, product description or target audience (plain text up to 4000 characters each), the product knowledge (up to 20000), the niche keywords (up to 60, each 1 to 60 characters) or any of the `prompt_vars`. Send at least one field; `null` clears a text field. Changes Site settings. Needs a secret key (wv_sk_) carrying the site:write scope.",
     "scope": "site:write",
     "alsoScopes": [],
     "entitlement": "none",
@@ -3833,6 +4743,34 @@ export const ACTIONS: McpOperation[] = [
         "explode": false,
         "kind": "string",
         "nullable": true
+      },
+      {
+        "name": "product_knowledge",
+        "in": "body",
+        "required": false,
+        "description": "",
+        "explode": false,
+        "kind": "string",
+        "nullable": true
+      },
+      {
+        "name": "prompt_vars",
+        "in": "body",
+        "required": false,
+        "description": "Keys to change. A value of `null` or `\"\"` removes the key, so it falls back to its default. An unknown key is `422` naming `prompt_vars.<key>`.",
+        "explode": false,
+        "kind": "object",
+        "nullable": false
+      },
+      {
+        "name": "niche_keywords",
+        "in": "body",
+        "required": false,
+        "description": "Stored trimmed, lowercase and without duplicates.",
+        "explode": false,
+        "kind": "array",
+        "nullable": false,
+        "itemKind": "string"
       }
     ],
     "approval": null,
@@ -4691,8 +5629,8 @@ export const ACTIONS: McpOperation[] = [
     "surface": "action",
     "area": "seo",
     "summary": "Read the SEO overview",
-    "brief": "The latest site metrics for the Site's own domain and each tracked competitor (domain rank, estimated organic traffic, ranking keywords by position band, backlinks and referring domains), plus the own site's 90-day trend.",
-    "description": "Read the SEO overview. The latest site metrics for the Site's own domain and each tracked competitor (domain rank, estimated organic traffic, ranking keywords by position band, backlinks and referring domains), plus the own site's 90-day trend. Free to read; refreshing costs credits (`POST /seo/site-metrics/refresh`). A null snapshot means never measured, not zero. Read only. Nothing is changed. Needs a secret key (wv_sk_) carrying the seo:read scope.",
+    "brief": "The latest site metrics for the Site's own domain and each tracked competitor (domain rank, estimated organic traffic and its value, ranking keywords by position band, keyword movement, backlinks and referring domains), plus the own site's...",
+    "description": "Read the SEO overview. The latest site metrics for the Site's own domain and each tracked competitor (domain rank, estimated organic traffic and its value, ranking keywords by position band, keyword movement, backlinks and referring domains), plus the own site's 90-day trend. The own site also carries its top pages and backlink breakdown. Free to read; refreshing costs credits (`POST /seo/site-metrics/refresh`). Read only. Nothing is changed. Needs a secret key (wv_sk_) carrying the seo:read scope.",
     "scope": "seo:read",
     "alsoScopes": [],
     "entitlement": "none",
@@ -4729,14 +5667,14 @@ export const ACTIONS: McpOperation[] = [
     "area": "seo",
     "summary": "Refresh the site metrics",
     "brief": "Measure the Site's own domain and its tracked competitors again now, rather than at the weekly refresh.",
-    "description": "Refresh the site metrics. Measure the Site's own domain and its tracked competitors again now, rather than at the weekly refresh. COSTS MONEY: this spends the organisation's credit balance, charged per unit of work completed. Runs a paid site metrics scan that spends about 12 credits. Ask the user before calling this, and pass confirm: true only once they have agreed. Needs a secret key (wv_sk_) carrying the seo:write scope. APPROVAL: when an AI assistant calls this it always needs a person's approval first: the first call returns a link for them instead of acting; after they approve, call run_writavo_action again with the same operation_id and arguments plus approval_id.",
+    "description": "Refresh the site metrics. Measure the Site's own domain and its tracked competitors again now, rather than at the weekly refresh. COSTS MONEY: this spends the organisation's credit balance, charged per unit of work completed. Runs a paid site metrics scan that spends about 27 credits. Ask the user before calling this, and pass confirm: true only once they have agreed. Needs a secret key (wv_sk_) carrying the seo:write scope. APPROVAL: when an AI assistant calls this it always needs a person's approval first: the first call returns a link for them instead of acting; after they approve, call run_writavo_action again with the same operation_id and arguments plus approval_id.",
     "scope": "seo:write",
     "alsoScopes": [],
     "entitlement": "seo.content_gap",
     "publishable": false,
     "spendsCredits": true,
     "spendsMoney": false,
-    "consequence": "Runs a paid site metrics scan that spends about 12 credits.",
+    "consequence": "Runs a paid site metrics scan that spends about 27 credits.",
     "makesPublic": false,
     "readOnly": false,
     "confirm": true,
@@ -4835,6 +5773,52 @@ export const ACTIONS: McpOperation[] = [
         "explode": false,
         "kind": "string",
         "nullable": true
+      },
+      {
+        "name": "blog_url",
+        "in": "body",
+        "required": false,
+        "description": "The competitor's blog listing page, the page that links to its articles, such as `https://example.com/blog`. `http` or `https` on a public hostname; no user name, password, port or IP address (`422` on `blog_url`). `null` or an empty string clears it.",
+        "explode": false,
+        "kind": "string",
+        "nullable": true,
+        "format": "uri"
+      },
+      {
+        "name": "listing_selector",
+        "in": "body",
+        "required": false,
+        "description": "A CSS selector for the article links on the listing page, such as `article h2 a`. `null` or an empty string means auto-detect, which is right for most blogs.",
+        "explode": false,
+        "kind": "string",
+        "nullable": true
+      },
+      {
+        "name": "content_selector",
+        "in": "body",
+        "required": false,
+        "description": "A CSS selector for the article body on an article page, such as `.post-content`. `null` or an empty string means auto-detect.",
+        "explode": false,
+        "kind": "string",
+        "nullable": true
+      },
+      {
+        "name": "max_articles_per_run",
+        "in": "body",
+        "required": false,
+        "description": "The most articles one pipeline run reads from this competitor.",
+        "explode": false,
+        "kind": "integer",
+        "nullable": false
+      },
+      {
+        "name": "notes",
+        "in": "body",
+        "required": false,
+        "description": "Free-text notes for the people curating this competitor. Never sent to the AI.",
+        "explode": false,
+        "kind": "string",
+        "nullable": true
       }
     ],
     "approval": null,
@@ -4858,8 +5842,8 @@ export const ACTIONS: McpOperation[] = [
     "surface": "action",
     "area": "seo",
     "summary": "Change a competitor",
-    "brief": "Rename a competitor or pause it (`is_active: false`), which leaves it out of scans without losing its history. The Site's own row is `409 CONFLICT`.",
-    "description": "Change a competitor. Rename a competitor or pause it (`is_active: false`), which leaves it out of scans without losing its history. The Site's own row is `409 CONFLICT`. Changes SEO settings. Needs a secret key (wv_sk_) carrying the seo:write scope.",
+    "brief": "Rename a competitor, pause it (`is_active: false`), which leaves it out of scans without losing its history, or change its blog source fields (`blog_url`, `listing_selector`, `content_selector`, `max_articles_per_run`, `notes`; `null` clear...",
+    "description": "Change a competitor. Rename a competitor, pause it (`is_active: false`), which leaves it out of scans without losing its history, or change its blog source fields (`blog_url`, `listing_selector`, `content_selector`, `max_articles_per_run`, `notes`; `null` clears one). Omitted fields are left alone. The Site's own row is `409 CONFLICT`. Changes SEO settings. Needs a secret key (wv_sk_) carrying the seo:write scope.",
     "scope": "seo:write",
     "alsoScopes": [],
     "entitlement": "none",
@@ -4901,6 +5885,52 @@ export const ACTIONS: McpOperation[] = [
         "explode": false,
         "kind": "boolean",
         "nullable": false
+      },
+      {
+        "name": "blog_url",
+        "in": "body",
+        "required": false,
+        "description": "The competitor's blog listing page, the page that links to its articles, such as `https://example.com/blog`. `http` or `https` on a public hostname; no user name, password, port or IP address (`422` on `blog_url`). `null` or an empty string clears it.",
+        "explode": false,
+        "kind": "string",
+        "nullable": true,
+        "format": "uri"
+      },
+      {
+        "name": "listing_selector",
+        "in": "body",
+        "required": false,
+        "description": "A CSS selector for the article links on the listing page, such as `article h2 a`. `null` or an empty string means auto-detect, which is right for most blogs.",
+        "explode": false,
+        "kind": "string",
+        "nullable": true
+      },
+      {
+        "name": "content_selector",
+        "in": "body",
+        "required": false,
+        "description": "A CSS selector for the article body on an article page, such as `.post-content`. `null` or an empty string means auto-detect.",
+        "explode": false,
+        "kind": "string",
+        "nullable": true
+      },
+      {
+        "name": "max_articles_per_run",
+        "in": "body",
+        "required": false,
+        "description": "The most articles one pipeline run reads from this competitor.",
+        "explode": false,
+        "kind": "integer",
+        "nullable": false
+      },
+      {
+        "name": "notes",
+        "in": "body",
+        "required": false,
+        "description": "Free-text notes for the people curating this competitor. Never sent to the AI.",
+        "explode": false,
+        "kind": "string",
+        "nullable": true
       }
     ],
     "approval": null,
@@ -5461,8 +6491,8 @@ export const ACTIONS: McpOperation[] = [
     "surface": "action",
     "area": "seo",
     "summary": "List content gaps",
-    "brief": "Keywords competitors rank for and this Site does not, best opportunity first. Plan one into the content plan with `POST /seo/content-gaps/{id}/plan`, or dismiss it.",
-    "description": "List content gaps. Keywords competitors rank for and this Site does not, best opportunity first. Plan one into the content plan with `POST /seo/content-gaps/{id}/plan`, or dismiss it. Read only. Nothing is changed. Needs a secret key (wv_sk_) carrying the seo:read scope.",
+    "brief": "Keywords competitors rank for and this Site does not, best opportunity first. Plan one into the content plan with `POST /seo/content-gaps/{id}/plan`, target it, or dismiss it.",
+    "description": "List content gaps. Keywords competitors rank for and this Site does not, best opportunity first. Plan one into the content plan with `POST /seo/content-gaps/{id}/plan`, target it, or dismiss it. Read only. Nothing is changed. Needs a secret key (wv_sk_) carrying the seo:read scope.",
     "scope": "seo:read",
     "alsoScopes": [],
     "entitlement": "none",
@@ -5506,6 +6536,8 @@ export const ACTIONS: McpOperation[] = [
         "enum": [
           "open",
           "planned",
+          "targeted",
+          "covered",
           "dismissed"
         ]
       }
@@ -5567,9 +6599,9 @@ export const ACTIONS: McpOperation[] = [
     "tag": "SEO",
     "surface": "action",
     "area": "seo",
-    "summary": "Dismiss or reopen a content gap",
-    "brief": "Set a gap to `dismissed` (not interesting) or back to `open`. `planned` is set only by `POST /seo/content-gaps/{id}/plan`, and a gap already planned is `409 CONFLICT`.",
-    "description": "Dismiss or reopen a content gap. Set a gap to `dismissed` (not interesting) or back to `open`. `planned` is set only by `POST /seo/content-gaps/{id}/plan`, and a gap already planned is `409 CONFLICT`. Changes SEO settings. Needs a secret key (wv_sk_) carrying the seo:write scope.",
+    "summary": "Target, dismiss or reopen a content gap",
+    "brief": "Set a gap to `targeted` (work this keyword into upcoming articles where it fits), `dismissed` (not interesting) or back to `open`. `planned` is set only by `POST /seo/content-gaps/{id}/plan`, and a gap already planned is `409 CONFLICT`.",
+    "description": "Target, dismiss or reopen a content gap. Set a gap to `targeted` (work this keyword into upcoming articles where it fits), `dismissed` (not interesting) or back to `open`. `planned` is set only by `POST /seo/content-gaps/{id}/plan`, and a gap already planned is `409 CONFLICT`. `covered` is set only by the engine, when an article uses the keyword. Changes SEO settings. Needs a secret key (wv_sk_) carrying the seo:write scope.",
     "scope": "seo:write",
     "alsoScopes": [],
     "entitlement": "none",
@@ -5604,6 +6636,7 @@ export const ACTIONS: McpOperation[] = [
         "nullable": false,
         "enum": [
           "open",
+          "targeted",
           "dismissed"
         ]
       }
@@ -5613,7 +6646,7 @@ export const ACTIONS: McpOperation[] = [
     "approvalKind": null,
     "approvalWhen": null,
     "annotations": {
-      "title": "Dismiss or reopen a content gap",
+      "title": "Target, dismiss or reopen a content gap",
       "readOnlyHint": false,
       "destructiveHint": false,
       "idempotentHint": true,
@@ -5719,6 +6752,53 @@ export const ACTIONS: McpOperation[] = [
     "approvalWhen": null,
     "annotations": {
       "title": "Read internal link health",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "tool": "get_internal_link_report",
+    "operationId": "getInternalLinkReport",
+    "method": "GET",
+    "path": "/seo/internal-links/health",
+    "tag": "SEO",
+    "surface": "action",
+    "area": "seo",
+    "summary": "Read the internal link report",
+    "brief": "The full internal link report the dashboard's Internal Links page shows: summary counts, orphan articles (nothing links to them), under-linked articles (fewer than `under_linked_threshold` linking articles; orphans are listed separately), a...",
+    "description": "Read the internal link report. The full internal link report the dashboard's Internal Links page shows: summary counts, orphan articles (nothing links to them), under-linked articles (fewer than `under_linked_threshold` linking articles; orphans are listed separately), articles with no outbound links, broken links (internal links to a missing or unpublished article, external links that answered 404 or 410), the 25 most linked-to articles (pillars)... Read only. Nothing is changed. Needs a secret key (wv_sk_) carrying the seo:read scope.",
+    "scope": "seo:read",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": false,
+    "spendsCredits": false,
+    "spendsMoney": false,
+    "consequence": null,
+    "makesPublic": false,
+    "readOnly": true,
+    "confirm": false,
+    "confirmReason": null,
+    "idempotency": false,
+    "ifMatch": false,
+    "params": [
+      {
+        "name": "under_linked_threshold",
+        "in": "query",
+        "required": false,
+        "description": "An article with at least one but fewer than this many linking articles is under-linked.",
+        "explode": false,
+        "kind": "integer",
+        "nullable": false
+      }
+    ],
+    "approval": null,
+    "approvalMode": null,
+    "approvalKind": null,
+    "approvalWhen": null,
+    "annotations": {
+      "title": "Read the internal link report",
       "readOnlyHint": true,
       "destructiveHint": false,
       "idempotentHint": true,
@@ -5856,6 +6936,249 @@ export const ACTIONS: McpOperation[] = [
     }
   },
   {
+    "tool": "get_ai_visibility",
+    "operationId": "getAiVisibility",
+    "method": "GET",
+    "path": "/seo/ai-visibility",
+    "tag": "SEO",
+    "surface": "action",
+    "area": "seo",
+    "summary": "Read AI visibility",
+    "brief": "How AI answer engines treat the Site's topics: for each engine (Google AI Overview, Google AI Mode, ChatGPT, Claude, Gemini, Perplexity) the latest AI visibility check with the one before it, the trend over `days` (90 by default, at most 36...",
+    "description": "Read AI visibility. How AI answer engines treat the Site's topics: for each engine (Google AI Overview, Google AI Mode, ChatGPT, Claude, Gemini, Perplexity) the latest AI visibility check with the one before it, the trend over `days` (90 by default, at most 365), the domains the engines cite most for the Site's topics (the Site and its tracked competitors flagged), sample answers, and the latest result per keyword and engine. Read only. Nothing is changed. Needs a secret key (wv_sk_) carrying the seo:read scope.",
+    "scope": "seo:read",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": false,
+    "spendsCredits": false,
+    "spendsMoney": false,
+    "consequence": null,
+    "makesPublic": false,
+    "readOnly": true,
+    "confirm": false,
+    "confirmReason": null,
+    "idempotency": false,
+    "ifMatch": false,
+    "params": [
+      {
+        "name": "days",
+        "in": "query",
+        "required": false,
+        "description": "How many days of trend and keyword results to return, 1 to 365 (default 90).",
+        "explode": false,
+        "kind": "integer",
+        "nullable": false
+      }
+    ],
+    "approval": null,
+    "approvalMode": null,
+    "approvalKind": null,
+    "approvalWhen": null,
+    "annotations": {
+      "title": "Read AI visibility",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "tool": "run_ai_visibility",
+    "operationId": "runAiVisibility",
+    "method": "POST",
+    "path": "/seo/ai-visibility/run",
+    "tag": "SEO",
+    "surface": "action",
+    "area": "seo",
+    "summary": "Run an AI visibility check now",
+    "brief": "Check up to 20 of the Site's keywords (tracked keywords first, then keywords it ranks for) across Google AI Overview, Google AI Mode, ChatGPT, Claude, Gemini and Perplexity, and record whether each engine mentions or cites the Site, which d...",
+    "description": "Run an AI visibility check now. Check up to 20 of the Site's keywords (tracked keywords first, then keywords it ranks for) across Google AI Overview, Google AI Mode, ChatGPT, Claude, Gemini and Perplexity, and record whether each engine mentions or cites the Site, which domains it cites instead, and sample answers. COSTS MONEY: this spends the organisation's credit balance, charged per unit of work completed. Runs a paid AI visibility check that spends one `seo.llm_visibility_run` charge. Ask the user before calling this, and pass confirm: true only once they have agreed. Needs a secret key (wv_sk_) carrying the seo:write scope. APPROVAL: when an AI assistant calls this it always needs a person's approval first: the first call returns a link for them instead of acting; after they approve, call run_writavo_action again with the same operation_id and arguments plus approval_id.",
+    "scope": "seo:write",
+    "alsoScopes": [],
+    "entitlement": "seo.llm_visibility",
+    "publishable": false,
+    "spendsCredits": true,
+    "spendsMoney": false,
+    "consequence": "Runs a paid AI visibility check that spends one `seo.llm_visibility_run` charge.",
+    "makesPublic": false,
+    "readOnly": false,
+    "confirm": true,
+    "confirmReason": "spend",
+    "idempotency": true,
+    "ifMatch": false,
+    "params": [],
+    "approval": "seo.scan",
+    "approvalMode": "always",
+    "approvalKind": "money",
+    "approvalWhen": null,
+    "annotations": {
+      "title": "Run an AI visibility check now",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "tool": "record_engagement",
+    "operationId": "recordEngagement",
+    "method": "POST",
+    "path": "/engagement/events",
+    "tag": "SEO",
+    "surface": "action",
+    "area": "seo",
+    "summary": "Record a view, reaction or share",
+    "brief": "For a site that renders its articles itself: record one view, a reader's reaction, or a share click on a published article, from your own server (never from the browser: the key is a secret key).",
+    "description": "Record a view, reaction or share. For a site that renders its articles itself: record one view, a reader's reaction, or a share click on a published article, from your own server (never from the browser: the key is a secret key). Filter bots and link prefetches before calling. Changes SEO settings. Needs a secret key (wv_sk_) carrying the engagement:write scope.",
+    "scope": "engagement:write",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": false,
+    "spendsCredits": false,
+    "spendsMoney": false,
+    "consequence": null,
+    "makesPublic": false,
+    "readOnly": false,
+    "confirm": false,
+    "confirmReason": null,
+    "idempotency": false,
+    "ifMatch": false,
+    "params": [
+      {
+        "name": "slug",
+        "in": "body",
+        "required": true,
+        "description": "The published article's slug.",
+        "explode": false,
+        "kind": "string",
+        "nullable": false
+      },
+      {
+        "name": "type",
+        "in": "body",
+        "required": true,
+        "description": "",
+        "explode": false,
+        "kind": "string",
+        "nullable": false,
+        "enum": [
+          "view",
+          "reaction",
+          "share"
+        ]
+      },
+      {
+        "name": "reaction",
+        "in": "body",
+        "required": false,
+        "description": "Required when type is reaction. null removes the reader's reaction.",
+        "explode": false,
+        "kind": "string",
+        "nullable": true,
+        "enum": [
+          "useful",
+          "mind_blown",
+          "insightful",
+          "skeptical",
+          "loved",
+          "hot_take",
+          "null"
+        ]
+      },
+      {
+        "name": "platform",
+        "in": "body",
+        "required": false,
+        "description": "Required when type is share. `other` is a copied link or the system share sheet.",
+        "explode": false,
+        "kind": "string",
+        "nullable": false,
+        "enum": [
+          "x",
+          "linkedin",
+          "facebook",
+          "other"
+        ]
+      },
+      {
+        "name": "visitor_id",
+        "in": "body",
+        "required": false,
+        "description": "Your stable anonymous id for the reader. Required for reactions; only a hash is stored. With it, a view or a share counts once per 30 minutes per reader and article.",
+        "explode": false,
+        "kind": "string",
+        "nullable": true
+      }
+    ],
+    "approval": null,
+    "approvalMode": null,
+    "approvalKind": null,
+    "approvalWhen": null,
+    "annotations": {
+      "title": "Record a view, reaction or share",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "tool": "get_post_engagement",
+    "operationId": "getPostEngagement",
+    "method": "GET",
+    "path": "/engagement/posts/{slug}",
+    "tag": "SEO",
+    "surface": "action",
+    "area": "seo",
+    "summary": "Read an article's views, reactions and shares",
+    "brief": "The public counters for one published article: lifetime views, the six reaction totals, share clicks per platform and, with `visitor_id`, that reader's current reaction.",
+    "description": "Read an article's views, reactions and shares. The public counters for one published article: lifetime views, the six reaction totals, share clicks per platform and, with `visitor_id`, that reader's current reaction. Safe for a publishable key: these numbers are shown on the page anyway. Read only. Nothing is changed. Needs a key carrying the articles:read scope.",
+    "scope": "articles:read",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": true,
+    "spendsCredits": false,
+    "spendsMoney": false,
+    "consequence": null,
+    "makesPublic": false,
+    "readOnly": true,
+    "confirm": false,
+    "confirmReason": null,
+    "idempotency": false,
+    "ifMatch": false,
+    "params": [
+      {
+        "name": "slug",
+        "in": "path",
+        "required": true,
+        "description": "The article's slug.",
+        "explode": false,
+        "kind": "string",
+        "nullable": false
+      },
+      {
+        "name": "visitor_id",
+        "in": "query",
+        "required": false,
+        "description": "Your anonymous id for the reader, to return their current reaction.",
+        "explode": false,
+        "kind": "string",
+        "nullable": false
+      }
+    ],
+    "approval": null,
+    "approvalMode": null,
+    "approvalKind": null,
+    "approvalWhen": null,
+    "annotations": {
+      "title": "Read an article's views, reactions and shares",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
     "tool": "get_engagement",
     "operationId": "getEngagement",
     "method": "GET",
@@ -5864,8 +7187,8 @@ export const ACTIONS: McpOperation[] = [
     "surface": "action",
     "area": "seo",
     "summary": "Read blog engagement",
-    "brief": "Views, reactions and shares on the published blog, by day and by post, for a date range (the last 30 days by default, at most 366 days). Counted without identifying readers.",
-    "description": "Read blog engagement. Views, reactions and shares on the published blog, by day and by post, for a date range (the last 30 days by default, at most 366 days). Counted without identifying readers. Read only. Nothing is changed. Needs a secret key (wv_sk_) carrying the seo:read scope.",
+    "brief": "Views, reactions and shares on the published blog, by day and by post, plus reactions by type and shares by platform, for a date range (the last 30 days by default, at most 366 days). Counted without identifying readers.",
+    "description": "Read blog engagement. Views, reactions and shares on the published blog, by day and by post, plus reactions by type and shares by platform, for a date range (the last 30 days by default, at most 366 days). Counted without identifying readers. A reader holds one reaction per article at a time: when they switch or remove it, it leaves the day it was made on, so totals never inflate. Read only. Nothing is changed. Needs a secret key (wv_sk_) carrying the seo:read scope.",
     "scope": "seo:read",
     "alsoScopes": [],
     "entitlement": "none",
@@ -7828,6 +9151,182 @@ export const ACTIONS: McpOperation[] = [
       "readOnlyHint": false,
       "destructiveHint": false,
       "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "tool": "buy_credit_pack_with_balance",
+    "operationId": "buyCreditPackWithBalance",
+    "method": "POST",
+    "path": "/billing/credit-packs/{key}/buy-with-balance",
+    "tag": "Billing",
+    "surface": "action",
+    "area": "billing",
+    "summary": "Buy a credit pack with the account balance",
+    "brief": "Buys one credit pack at its catalogue price (`usd_price` from `GET /billing/credit-packs`) out of the organisation's USD account balance, and adds its credits at once. No card is charged and no Stripe page is involved.",
+    "description": "Buy a credit pack with the account balance. Buys one credit pack at its catalogue price (`usd_price` from `GET /billing/credit-packs`) out of the organisation's USD account balance, and adds its credits at once. No card is charged and no Stripe page is involved. Read the balance first with `GET /billing` (`credits.usd_balance`). COSTS MONEY: The pack's price is taken from the organisation's account balance and its credits are added straight away. It cannot be undone from the API. Ask the user before calling this, and pass confirm: true only once they have agreed. Needs a secret key (wv_sk_) carrying the billing:write scope. APPROVAL: when an AI assistant calls this it always needs a person's approval first: the first call returns a link for them instead of acting; after they approve, call run_writavo_action again with the same operation_id and arguments plus approval_id.",
+    "scope": "billing:write",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": false,
+    "spendsCredits": false,
+    "spendsMoney": true,
+    "consequence": "The pack's price is taken from the organisation's account balance and its credits are added straight away. It cannot be undone from the API.",
+    "makesPublic": false,
+    "readOnly": false,
+    "confirm": true,
+    "confirmReason": "spend",
+    "idempotency": true,
+    "ifMatch": false,
+    "params": [
+      {
+        "name": "key",
+        "in": "path",
+        "required": true,
+        "description": "The pack's `key`, from `GET /billing/credit-packs`.",
+        "explode": false,
+        "kind": "string",
+        "nullable": false
+      }
+    ],
+    "approval": "billing.wallet_buy",
+    "approvalMode": "always",
+    "approvalKind": "money",
+    "approvalWhen": null,
+    "annotations": {
+      "title": "Buy a credit pack with the account balance",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "tool": "start_wallet_topup",
+    "operationId": "startWalletTopup",
+    "method": "POST",
+    "path": "/billing/wallet/checkout",
+    "tag": "Billing",
+    "surface": "action",
+    "area": "billing",
+    "summary": "Start adding funds to the account balance",
+    "brief": "Returns a Stripe Checkout link that adds `amount_usd` US dollars to the organisation's account balance. Nothing is charged by this call and no funds are added by it: the person opens the link in their browser and pays by card on Stripe's pa...",
+    "description": "Start adding funds to the account balance. Returns a Stripe Checkout link that adds `amount_usd` US dollars to the organisation's account balance. Nothing is charged by this call and no funds are added by it: the person opens the link in their browser and pays by card on Stripe's page, and the money arrives in the balance only when that payment completes. That page is where they consent, so no approval is asked. Changes Billing settings. Needs a secret key (wv_sk_) carrying the billing:write scope.",
+    "scope": "billing:write",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": false,
+    "spendsCredits": false,
+    "spendsMoney": false,
+    "consequence": null,
+    "makesPublic": false,
+    "readOnly": false,
+    "confirm": false,
+    "confirmReason": null,
+    "idempotency": true,
+    "ifMatch": false,
+    "params": [
+      {
+        "name": "amount_usd",
+        "in": "body",
+        "required": true,
+        "description": "US dollars to add, 10 to 2000, to the cent.",
+        "explode": false,
+        "kind": "number",
+        "nullable": false
+      }
+    ],
+    "approval": null,
+    "approvalMode": null,
+    "approvalKind": null,
+    "approvalWhen": null,
+    "annotations": {
+      "title": "Start adding funds to the account balance",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "tool": "list_billing_activity",
+    "operationId": "listBillingActivity",
+    "method": "GET",
+    "path": "/billing/activity",
+    "tag": "Billing",
+    "surface": "action",
+    "area": "billing",
+    "summary": "List balance and credit activity",
+    "brief": "Every movement of the organisation's two balances, newest first: credits (`unit: credit`) and the USD account balance (`unit: usd`).",
+    "description": "List balance and credit activity. Every movement of the organisation's two balances, newest first: credits (`unit: credit`) and the USD account balance (`unit: usd`). Each row says which way it went (`flow`), where it came from (`source`), how it was paid (`method`), a label a person can read, and the balance after it. Filter with `unit` and `flow`. Read only. Nothing is changed. Needs a secret key (wv_sk_) carrying the billing:read scope.",
+    "scope": "billing:read",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": false,
+    "spendsCredits": false,
+    "spendsMoney": false,
+    "consequence": null,
+    "makesPublic": false,
+    "readOnly": true,
+    "confirm": false,
+    "confirmReason": null,
+    "idempotency": false,
+    "ifMatch": false,
+    "params": [
+      {
+        "name": "unit",
+        "in": "query",
+        "required": false,
+        "description": "Only credit rows, or only USD balance rows. Both when left out.",
+        "explode": false,
+        "kind": "string",
+        "nullable": false,
+        "enum": [
+          "credit",
+          "usd"
+        ]
+      },
+      {
+        "name": "flow",
+        "in": "query",
+        "required": false,
+        "description": "Only what came in, or only what went out. Both when left out.",
+        "explode": false,
+        "kind": "string",
+        "nullable": false,
+        "enum": [
+          "in",
+          "out"
+        ]
+      },
+      {
+        "name": "before",
+        "in": "query",
+        "required": false,
+        "description": "The `next_cursor` from the previous page.",
+        "explode": false,
+        "kind": "string",
+        "nullable": false
+      },
+      {
+        "name": "limit",
+        "in": "query",
+        "required": false,
+        "description": "Rows per page.",
+        "explode": false,
+        "kind": "integer",
+        "nullable": false
+      }
+    ],
+    "approval": null,
+    "approvalMode": null,
+    "approvalKind": null,
+    "approvalWhen": null,
+    "annotations": {
+      "title": "List balance and credit activity",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
       "openWorldHint": false
     }
   },
