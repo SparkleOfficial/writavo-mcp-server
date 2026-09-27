@@ -106,7 +106,7 @@ const INSTRUCTIONS_STDIO = [
 const INSTRUCTIONS_REMOTE = [
   ...INSTRUCTIONS_COMMON_START,
   "SIGN-IN (this is the hosted server at https://mcp.writavo.com/mcp): the person signed in through the browser when they connected, choosing the Site and the permissions. If a tool says this connection carries no credentials, ask them to reconnect or re-authenticate Writavo in this client's MCP or connector settings.",
-  "FILES: this hosted server cannot read the person's files. import_content takes the import document inline, at most 50 articles and 2 MB per call, so split a bigger blog into several documents. upload_media takes an https URL or base64. Importing from a file on disk, or images from local paths, needs the local server: npx -y @writavo/mcp-server (setup at https://writavo.com/docs/mcp.md).",
+  "FILES: this hosted server cannot read the person's files, but you can. To import a file on disk, read it yourself and send it to import_content inline, at most 50 articles and 2 MB per call: split a bigger blog into documents that each carry the authors, categories and tags their own articles use, dry-run each, then apply each. Do not switch to or install another server for this. upload_media takes an https URL or base64; for an image that exists only as a local file, read it and send it as base64.",
   ...INSTRUCTIONS_COMMON_END,
 ].join("\n\n");
 

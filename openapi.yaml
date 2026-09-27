@@ -9961,19 +9961,27 @@ components:
           description: Short summary bullets rendered above the body.
           items: { type: string }
         howto_steps:
-          type: [array, "null"]
-          description: Ordered steps, rendered as HowTo structured data.
-          items:
-            type: object
-            required: [name]
-            properties:
-              name: { type: string }
-              text: { type: string }
-              image_url: { type: string, format: uri }
+          type: [object, "null"]
+          description: |
+            A how-to: its own title and summary, and the ordered steps. Rendered on the blog and as
+            HowTo structured data. `name` and `description` are "" when the how-to has none. On a
+            write, a bare array of steps is also accepted and stored in this shape.
+          properties:
+            name: { type: string, description: The how-to's own title. }
+            description: { type: string, description: A short summary of the how-to. }
+            steps:
+              type: array
+              items:
+                type: object
+                properties:
+                  name: { type: string }
+                  text: { type: string }
+                  image_url: { type: string, format: uri }
         comparison:
           type: [object, "null"]
           description: A comparison table, rendered as a table in the body.
           properties:
+            title: { type: string, description: The table's own heading. "" when it has none. }
             headers:
               type: array
               items: { type: string }
@@ -10053,8 +10061,12 @@ components:
         seo_keywords: { type: [array, "null"], items: { type: string } }
         faqs: { type: [array, "null"], items: { type: object } }
         key_takeaways: { type: [array, "null"], items: { type: string } }
-        howto_steps: { type: [array, "null"], items: { type: object } }
-        comparison: { type: [object, "null"] }
+        howto_steps:
+          type: [object, array, "null"]
+          description: '`{ name?, description?, steps: [{ name, text?, image_url? }] }`, or a bare array of steps. Stored as the object.'
+        comparison:
+          type: [object, "null"]
+          description: '`{ title?, headers: [string], rows: [[string]] }`.'
         category_id: { type: [string, "null"], format: uuid }
         author_id: { type: [string, "null"], format: uuid }
         format_id: { type: [string, "null"], format: uuid }
@@ -10090,8 +10102,12 @@ components:
         seo_keywords: { type: [array, "null"], items: { type: string } }
         faqs: { type: [array, "null"], items: { type: object } }
         key_takeaways: { type: [array, "null"], items: { type: string } }
-        howto_steps: { type: [array, "null"], items: { type: object } }
-        comparison: { type: [object, "null"] }
+        howto_steps:
+          type: [object, array, "null"]
+          description: '`{ name?, description?, steps: [{ name, text?, image_url? }] }`, or a bare array of steps. Stored as the object.'
+        comparison:
+          type: [object, "null"]
+          description: '`{ title?, headers: [string], rows: [[string]] }`.'
         category_id: { type: [string, "null"], format: uuid }
         author_id: { type: [string, "null"], format: uuid }
         format_id: { type: [string, "null"], format: uuid }

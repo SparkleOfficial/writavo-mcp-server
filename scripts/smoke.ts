@@ -660,7 +660,8 @@ async function main(): Promise<void> {
   const site = {
     categories: [] as Row[],
     tags: [{ id: "00000000-0000-4000-8000-00000000c0c0", slug: "compost", name: "Compost" }] as Row[],
-    authors: [] as Row[],
+    // Already on the Site, with a bio a person wrote: the import may fill her job title, never the bio.
+    authors: [{ id: "00000000-0000-4000-8000-00000000a0a0", name: "Sam Roe", slug: "sam-roe", bio: "Written by hand.", job_title: null, socials: { x: "https://x.com/samroe" }, author_type: "user" }] as Row[],
     articles: [] as Row[],
     replays: new Map<string, { status: number; body: unknown }>(),
   };
@@ -726,11 +727,18 @@ async function main(): Promise<void> {
       if (path !== `/${kind}`) continue;
       if (req.method === "GET") return ok({ items: site[kind], next_cursor: null });
       if (req.method === "POST") {
-        if (kind !== "authors" && site[kind].some((r) => r.slug === body.slug)) return fail(409, "SLUG_CONFLICT", "That slug is taken.");
+        if ((kind !== "authors" || body.slug) && site[kind].some((r) => r.slug === body.slug)) return fail(409, "SLUG_CONFLICT", "That slug is taken.");
         const row = { id: randomUUID(), ...body };
         site[kind].push(row);
         return ok(row, 201);
       }
+    }
+    const author = /^\/authors\/([^/]+)$/.exec(path);
+    if (author && req.method === "PATCH") {
+      const row = site.authors.find((a) => a.id === author[1]);
+      if (!row) return fail(404, "NOT_FOUND", "No such author.");
+      Object.assign(row, body);
+      return ok(row);
     }
     if (path === "/articles" && req.method === "GET") {
       let rows = site.articles;
@@ -999,7 +1007,18 @@ async function main(): Promise<void> {
   const fixture = {
     format: "writavo-import",
     version: 1,
-    authors: [{ ref: "jane", name: "Jane Doe", avatar_url: "https://img.example.test/jane.png" }],
+    authors: [
+      {
+        ref: "jane",
+        name: "Jane Doe",
+        slug: "jane-doe",
+        avatar_url: "https://img.example.test/jane.png",
+        job_title: "Head gardener",
+        socials: { linkedin: "https://www.linkedin.com/in/janedoe" },
+        author_type: "co-founder",
+      },
+      { ref: "sam", name: "Sam Roe", slug: "sam-roe", bio: "From the old blog.", job_title: "Editor", socials: { x: "https://x.com/other", github: "https://github.com/samroe" }, author_type: "admin" },
+    ],
     categories: [{ slug: "guides", name: "Guides" }],
     tags: [
       { slug: "soil", name: "Soil" },
@@ -1113,6 +1132,27 @@ async function main(): Promise<void> {
     JSON.stringify(authorBody),
   );
   check(
+    "the author keeps its slug, job title, socials and byline type",
+    posts("/authors").length === 1 &&
+      authorBody.slug === "jane-doe" &&
+      authorBody.job_title === "Head gardener" &&
+      JSON.stringify(authorBody.socials) === JSON.stringify({ linkedin: "https://www.linkedin.com/in/janedoe" }) &&
+      authorBody.author_type === "co-founder",
+    JSON.stringify(authorBody),
+  );
+  const authorFills = writes().filter((r) => r.method === "PATCH" && r.path.includes("/authors/"));
+  const fillBody = JSON.parse(authorFills[0]?.body ?? "{}") as Row;
+  check(
+    "an author already on the Site gains only the fields it had empty",
+    authorFills.length === 1 &&
+      fillBody.job_title === "Editor" &&
+      fillBody.author_type === "admin" &&
+      !("bio" in fillBody) &&
+      !("slug" in fillBody) &&
+      JSON.stringify(fillBody.socials) === JSON.stringify({ x: "https://x.com/samroe", github: "https://github.com/samroe" }),
+    JSON.stringify(fillBody),
+  );
+  check(
     "each image is uploaded once, through the whole handshake",
     posts("/media/upload-url").length === 3 && posts("/media").length === 3 && presignedPuts.length === 3 && imageFetches.length === 3,
     `${posts("/media/upload-url").length} reservations, ${presignedPuts.length} PUTs, ${imageFetches.length} fetches`,
@@ -1138,7 +1178,7 @@ async function main(): Promise<void> {
   check(
     "references resolve to the Site's ids",
     first.category_id === site.categories[0]?.id &&
-      first.author_id === site.authors[0]?.id &&
+      first.author_id === site.authors.find((a) => a.name === "Jane Doe")?.id &&
       JSON.stringify(first.tag_ids) === JSON.stringify([site.tags.find((t) => t.slug === "soil")?.id, "00000000-0000-4000-8000-00000000c0c0"]),
   );
   check("the format key resolves to its id", byExternal("blog:3").format_id === "00000000-0000-4000-8000-00000000f0f0");

@@ -1,4 +1,4 @@
-import type { ImportArticle } from "./format.js";
+import { howtoSteps, type ImportArticle } from "./format.js";
 
 /**
  * Finding and rewriting image URLs, and nothing else. An import must keep the customer's prose
@@ -48,7 +48,7 @@ export function articleImages(article: ImportArticle): ImageRef[] {
   for (const image of markdownImages(article.content ?? "")) {
     refs.push({ url: image.url, alt: image.alt || undefined, kind: "inline" });
   }
-  for (const step of article.howto_steps ?? []) {
+  for (const step of howtoSteps(article.howto_steps)) {
     if (step.image_url) refs.push({ url: step.image_url, alt: step.name, kind: "howto" });
   }
   return refs;

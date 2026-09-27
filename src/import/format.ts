@@ -30,7 +30,14 @@ export const LIMITS = {
   termSlug: 120,
   authorRef: 120,
   authorName: 160,
+  authorSlug: 120,
+  jobTitle: 160,
   bio: 2000,
+  termDescription: 2000,
+  groupLabel: 80,
+  howtoName: 300,
+  howtoDescription: 2000,
+  comparisonTitle: 300,
   alt: 500,
 } as const;
 
@@ -58,7 +65,25 @@ export const HowtoStepSchema = z.strictObject({
   image_url: url.optional(),
 });
 
+/** A how-to: either the bare list of steps, or the list with the how-to's own name and summary
+ *  (the shape Writavo stores, and schema.org HowTo's name and description). */
+export const HowtoSchema = z.union([
+  z.array(HowtoStepSchema),
+  z.strictObject({
+    name: text(LIMITS.howtoName).optional().describe("The how-to's own title, for example How to transcribe a podcast."),
+    description: text(LIMITS.howtoDescription).optional().describe("A one or two sentence summary of the how-to."),
+    steps: z.array(HowtoStepSchema),
+  }),
+]);
+
+export type ImportHowto = z.infer<typeof HowtoSchema>;
+
+/** The steps of either how-to form. */
+export const howtoSteps = (h: ImportHowto | null | undefined): z.infer<typeof HowtoStepSchema>[] =>
+  !h ? [] : Array.isArray(h) ? h : h.steps;
+
 export const ComparisonSchema = z.strictObject({
+  title: text(LIMITS.comparisonTitle).optional().describe("The table's own heading, shown above it."),
   headers: z.array(z.string()),
   rows: z.array(z.array(z.string())),
 });
@@ -68,18 +93,46 @@ export const FeaturedImageSchema = z.strictObject({
   alt: z.string().max(LIMITS.alt).optional(),
 });
 
+/** The API's author_type values (0095). A byline label a theme groups on; it grants nothing. */
+export const AUTHOR_TYPES = ["co-founder", "admin", "user"] as const;
+
+/** The networks the API accepts in an author's socials. Mirrors AUTHOR_SOCIAL_NETWORKS in
+ *  supabase/functions/_shared/apiProjections.ts, so a dry run refuses what the API would. */
+export const AUTHOR_SOCIAL_NETWORKS = [
+  "website", "x", "linkedin", "github", "youtube", "instagram", "facebook", "mastodon", "bluesky",
+  "threads", "tiktok",
+] as const;
+
 export const AuthorSchema = z.strictObject({
   ref: z.string().min(1).max(LIMITS.authorRef).describe("Your own handle for this author, used by articles[].author."),
-  name: z.string().min(1).max(LIMITS.authorName).describe("Matched against the Site's authors by exact name; created if missing."),
+  name: z.string().min(1).max(LIMITS.authorName).describe("Matched against the Site's authors by slug when given, else by exact name; created if missing."),
+  slug: slug(LIMITS.authorSlug).optional().describe("The author's URL key at the source. Matched first; used when the author is created."),
   bio: text(LIMITS.bio).nullable().optional(),
   avatar_url: url.nullable().optional(),
+  job_title: text(LIMITS.jobTitle).nullable().optional().describe("Rendered as the schema.org Person jobTitle."),
+  socials: z
+    .partialRecord(z.enum(AUTHOR_SOCIAL_NETWORKS), url)
+    .optional()
+    .describe("Profile links by network, rendered as schema.org sameAs."),
+  author_type: z.enum(AUTHOR_TYPES).optional().describe("A byline label a theme can group on (a founders page). Defaults to user."),
   is_ai_generated: z.boolean().optional().describe("False (the default) for a real person."),
 });
 
-export const TermSchema = z.strictObject({
+const termFields = {
   slug: slug(LIMITS.termSlug).describe("Matched against the Site by slug; created if missing."),
   name: z.string().min(1).max(LIMITS.termName),
+  description: text(LIMITS.termDescription).nullable().optional().describe("Shown on the archive page. Filled on an existing term only when it has none."),
+};
+
+export const CategorySchema = z.strictObject(termFields);
+
+export const TagSchema = z.strictObject({
+  ...termFields,
+  group_label: text(LIMITS.groupLabel).nullable().optional().describe("A label a theme can group tags under. Filled on an existing tag only when it has none."),
 });
+
+/** A category or a tag, as the engine handles both. */
+export const TermSchema = TagSchema;
 
 /** Fields shared by drafts and published articles. */
 const articleFields = {
@@ -97,7 +150,7 @@ const articleFields = {
   featured_image: FeaturedImageSchema.nullable().optional(),
   faqs: z.array(FaqSchema).nullable().optional(),
   key_takeaways: z.array(z.string()).nullable().optional(),
-  howto_steps: z.array(HowtoStepSchema).nullable().optional(),
+  howto_steps: HowtoSchema.nullable().optional(),
   comparison: ComparisonSchema.nullable().optional(),
   author: z.string().min(1).optional().describe("An authors[].ref."),
   category: z.string().min(1).optional().describe("A categories[].slug, or the slug of a category already on the Site."),
@@ -134,8 +187,8 @@ const documentFields = {
     .optional()
     .describe("Informational only."),
   authors: z.array(AuthorSchema).optional(),
-  categories: z.array(TermSchema).optional(),
-  tags: z.array(TermSchema).optional(),
+  categories: z.array(CategorySchema).optional(),
+  tags: z.array(TagSchema).optional(),
 };
 
 export const ImportDocumentSchema = z
@@ -173,9 +226,20 @@ export const IMPORT_SAMPLE: ImportDocument = {
   format: "writavo-import",
   version: 1,
   source: { name: "Old blog", url: "https://example.com" },
-  authors: [{ ref: "jane", name: "Jane Doe", bio: "Writes about gardening.", is_ai_generated: false }],
-  categories: [{ slug: "guides", name: "Guides" }],
-  tags: [{ slug: "soil", name: "Soil" }],
+  authors: [
+    {
+      ref: "jane",
+      name: "Jane Doe",
+      slug: "jane-doe",
+      bio: "Writes about gardening.",
+      job_title: "Head gardener",
+      socials: { linkedin: "https://www.linkedin.com/in/janedoe" },
+      author_type: "co-founder",
+      is_ai_generated: false,
+    },
+  ],
+  categories: [{ slug: "guides", name: "Guides", description: "Step-by-step gardening guides." }],
+  tags: [{ slug: "soil", name: "Soil", group_label: "Topics" }],
   articles: [
     {
       external_id: "blog:1001",
@@ -211,11 +275,17 @@ is safe: articles are matched by external_id, so a second run updates rather tha
 Top level:
 - format: always "writavo-import". version: always 1.
 - source: optional, informational ({ name, url }).
-- authors: [{ ref, name, bio?, avatar_url?, is_ai_generated? }]. ref is your own handle, used by
-  articles[].author. Authors are matched on the Site by exact name and created when missing.
+- authors: [{ ref, name, slug?, bio?, avatar_url?, job_title?, socials?, author_type?,
+  is_ai_generated? }]. ref is your own handle, used by articles[].author. Authors are matched on
+  the Site by slug when given, else by exact name, and created when missing. An author already on
+  the Site keeps everything it has: the import only fills fields that are empty there, and never
+  changes its slug or name. socials is { network: https URL } with network one of
+  ${AUTHOR_SOCIAL_NETWORKS.join(", ")}. author_type is ${AUTHOR_TYPES.join(", ")} (default user).
   is_ai_generated defaults to false, which is right for a real person.
-- categories: [{ slug, name }] and tags: [{ slug, name }]. Matched on the Site by slug, created
-  when missing. Slugs are ${SLUG_RULE}, at most ${LIMITS.termSlug} characters.
+- categories: [{ slug, name, description? }] and tags: [{ slug, name, description?,
+  group_label? }]. Matched on the Site by slug, created when missing. Slugs are ${SLUG_RULE}, at
+  most ${LIMITS.termSlug} characters. On a term already on the Site, description and group_label
+  are filled only when it has none; nothing else about it changes.
 - articles: processed in file order. Each one:
   - external_id (required): your stable id from the source system, for example "blog:1234".
     1 to 255 printable ASCII characters. Never reuse one for a different article.
@@ -227,8 +297,11 @@ Top level:
   - excerpt (max ${LIMITS.excerpt}), seo_title (max ${LIMITS.seoTitle}), seo_description
     (max ${LIMITS.seoDescription}), seo_keywords (array of strings).
   - featured_image: { url, alt? }.
-  - faqs: [{ question, answer }], key_takeaways: [string], howto_steps: [{ name, text?,
-    image_url? }], comparison: { headers: [string], rows: [[string]] }.
+  - faqs: [{ question, answer }], key_takeaways: [string].
+  - howto_steps: either [{ name, text?, image_url? }] or { name?, description?, steps: [{ name,
+    text?, image_url? }] } when the how-to has its own title and summary.
+  - comparison: { title?, headers: [string], rows: [[string]] }. Every row should have one cell
+    per header.
   - author: an authors[].ref. category: a category slug. tags: tag slugs.
   - format: a content type key on the Site (see get_content_types). Optional.
   - published_at: required when published. When the article was FIRST published at the source,

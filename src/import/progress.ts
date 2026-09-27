@@ -54,6 +54,8 @@ export interface ImportProgress {
   tags: Record<string, string>;
   authors: Record<string, string>;
   created: { categories: number; tags: number; authors: number };
+  /** Authors already on the Site whose empty profile fields the import filled in. */
+  filled_authors: number;
   images: Record<string, ProgressImage>;
   items: Record<string, ProgressItem>;
 }
@@ -71,6 +73,7 @@ export function newProgress(filePath: string, website: { id: string; name: strin
     tags: {},
     authors: {},
     created: { categories: 0, tags: 0, authors: 0 },
+    filled_authors: 0,
     images: {},
     items: {},
   };
@@ -95,5 +98,6 @@ export function normaliseProgress(value: unknown): ImportProgress | null {
   p.authors ??= {};
   p.images ??= {};
   p.created ??= { categories: 0, tags: 0, authors: 0 };
+  p.filled_authors ??= 0;
   return p;
 }

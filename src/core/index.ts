@@ -4,7 +4,7 @@
  *   import { createWritavoMcpServer } from "@writavo/mcp-server/core";
  *   const server = createWritavoMcpServer({
  *     apiKey: () => props.apiKey,
- *     userAgent: "writavo-mcp-worker/0.4.0",
+ *     userAgent: "writavo-mcp-worker/0.5.0",
  *     host: "remote",
  *   });
  *

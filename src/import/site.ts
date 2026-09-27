@@ -75,11 +75,19 @@ export interface SiteTerm {
   id: string;
   slug: string;
   name: string;
+  description?: string | null;
+  group_label?: string | null;
 }
 
 export interface SiteAuthor {
   id: string;
   name: string;
+  slug?: string | null;
+  bio?: string | null;
+  avatar_url?: string | null;
+  job_title?: string | null;
+  socials?: Record<string, string> | null;
+  author_type?: string;
 }
 
 export interface SiteContentType {

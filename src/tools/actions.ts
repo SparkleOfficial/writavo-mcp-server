@@ -273,6 +273,9 @@ export function searchActions(
   // Intent: a query with a verb of change favours writes ("track a keyword" means trackKeyword,
   // not the list); one without favours reads ("credit balance" is a question).
   const question = !words.some((w) => WRITE_VERBS.has(w));
+  // The query as a phrase: an operation whose own text says "the credit balance" is the answer to
+  // "credit balance", over one that mentions a credit pack and the account balance separately.
+  const phrase = ` ${words.join(" ")} `;
   const scored: ActionMatch[] = [];
   pool.forEach((item) => {
     let score = 0;
@@ -288,6 +291,7 @@ export function searchActions(
     }
     if (score <= 0) return;
     if (matched === words.length && words.length > 1) score *= 1.25;
+    if (words.length > 1 && ` ${tokenize(`${item.operation.summary} ${item.operation.brief}`).join(" ")} `.includes(phrase)) score *= 2;
     if (question === (item.operation.method === "GET")) score *= 1.3;
     if (item.operation.operationId === exact || item.operation.tool === exact) score += 100;
     scored.push({ operation: item.operation, score });

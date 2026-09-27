@@ -3,7 +3,7 @@ import { WritavoApiError } from "../api/client.js";
 import { MediaError, fetchImage, uploadImage } from "../api/media.js";
 import type { ToolContext } from "../core/context.js";
 import { formatApiError, text, toolError, type ToolResult } from "../errors.js";
-import type { ImportArticle, ImportEnvelope } from "./format.js";
+import { howtoSteps, type ImportArticle, type ImportAuthor, type ImportEnvelope, type ImportTerm } from "./format.js";
 import { articleImages, htmlImageCount, isHttps, rewriteMarkdownImages } from "./images.js";
 import { newProgress, type ImportProgress, type ProgressItem, type ProgressStore } from "./progress.js";
 import {
@@ -104,8 +104,44 @@ interface Loaded {
   progressExisted: boolean;
   siteCategories: Map<string, string>;
   siteTags: Map<string, string>;
-  siteAuthors: Map<string, string>;
+  siteAuthors: SiteAuthors;
   formats: Map<string, string>;
+}
+
+/** The Site's authors, by slug and by exact name (first one wins for a shared name). */
+interface SiteAuthors {
+  bySlug: Map<string, SiteAuthor>;
+  byName: Map<string, SiteAuthor>;
+}
+
+const AUTHOR_FIELDS = "id,name,slug,bio,avatar_url,job_title,socials,author_type";
+
+function addSiteAuthor(site: SiteAuthors, a: SiteAuthor): void {
+  if (a.slug && !site.bySlug.has(a.slug)) site.bySlug.set(a.slug, a);
+  if (!site.byName.has(a.name)) site.byName.set(a.name, a);
+}
+
+/** The author already on the Site for a file author: by slug when the file gives one, else by name. */
+function matchAuthor(site: SiteAuthors, author: ImportAuthor): SiteAuthor | undefined {
+  return (author.slug ? site.bySlug.get(author.slug) : undefined) ?? site.byName.get(author.name);
+}
+
+/**
+ * What an import may add to an author that is already on the Site: only the fields that are empty
+ * there. A person may have edited the profile since, so nothing they wrote is overwritten, and the
+ * slug and name are never touched (either would move or rename a live byline). author_type counts
+ * as empty while it is the default, user. socials gain the networks the Site has no link for.
+ * The avatar is left to the caller, because it has to be copied into the media library first.
+ */
+function authorGaps(site: SiteAuthor, file: ImportAuthor): Record<string, unknown> {
+  const gaps: Record<string, unknown> = {};
+  if (!site.bio && file.bio) gaps.bio = file.bio;
+  if (!site.job_title && file.job_title) gaps.job_title = file.job_title;
+  if ((site.author_type ?? "user") === "user" && file.author_type && file.author_type !== "user") gaps.author_type = file.author_type;
+  const have = site.socials ?? {};
+  const added = Object.entries(file.socials ?? {}).filter(([network, url]) => url && !have[network]);
+  if (added.length) gaps.socials = { ...have, ...Object.fromEntries(added) };
+  return gaps;
 }
 
 const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -169,20 +205,20 @@ async function load(api: ToolContext, source: ImportSource): Promise<Loaded | To
   let site: SiteInfo;
   let siteCategories: Map<string, string>;
   let siteTags: Map<string, string>;
-  let siteAuthors: Map<string, string>;
+  let siteAuthors: SiteAuthors;
   let formats: Map<string, string>;
   try {
     site = await getSite(api);
     const [categories, tags, authors, types] = await Promise.all([
       listAll<SiteTerm>(api, "/categories", [["fields", "id,name,slug"]]),
       listAll<SiteTerm>(api, "/tags", [["fields", "id,name,slug"]]),
-      listAll<SiteAuthor>(api, "/authors", [["fields", "id,name"]]),
+      listAll<SiteAuthor>(api, "/authors", [["fields", AUTHOR_FIELDS]]),
       call<{ items: SiteContentType[] }>(api, { method: "GET", path: "/content-types" }),
     ]);
     siteCategories = new Map(categories.map((c) => [c.slug, c.id]));
     siteTags = new Map(tags.map((t) => [t.slug, t.id]));
-    siteAuthors = new Map();
-    for (const a of authors) if (!siteAuthors.has(a.name)) siteAuthors.set(a.name, a.id);
+    siteAuthors = { bySlug: new Map(), byName: new Map() };
+    for (const a of authors) addSiteAuthor(siteAuthors, a);
     formats = new Map();
     for (const t of types.data?.items ?? []) if (t.is_active !== false || !formats.has(t.key)) formats.set(t.key, t.id);
   } catch (err) {
@@ -335,8 +371,13 @@ async function dryRun(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
     for (const image of articleImages(item.article)) consider(image.url);
     htmlImages += htmlImageCount(item.article.content);
   }
-  const authorsToCreate = (envelope.authors ?? []).filter((a) => !ctx.siteAuthors.has(a.name));
+  const authorsToCreate = (envelope.authors ?? []).filter((a) => !matchAuthor(ctx.siteAuthors, a));
   for (const a of authorsToCreate) if (a.avatar_url) consider(a.avatar_url);
+  const authorsToFill = (envelope.authors ?? []).filter((a) => {
+    const known = matchAuthor(ctx.siteAuthors, a);
+    return known && (Object.keys(authorGaps(known, a)).length > 0 || (!known.avatar_url && a.avatar_url));
+  });
+  for (const a of authorsToFill) if (a.avatar_url && !matchAuthor(ctx.siteAuthors, a)?.avatar_url) consider(a.avatar_url);
   const categoriesToCreate = (envelope.categories ?? []).filter((c) => !ctx.siteCategories.has(c.slug));
   const tagsToCreate = (envelope.tags ?? []).filter((t) => !ctx.siteTags.has(t.slug));
 
@@ -360,7 +401,7 @@ async function dryRun(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
 
   // The estimate is the bottleneck bucket: reads, writes and uploads are limited separately.
   const reads = pending.length * 2 + 10;
-  const writes = categoriesToCreate.length + tagsToCreate.length + authorsToCreate.length + pending.length + counts.publish;
+  const writes = categoriesToCreate.length + tagsToCreate.length + authorsToCreate.length + authorsToFill.length + pending.length + counts.publish;
   const uploads = (opts.rehostImages ? toCopy.size : 0) * 2;
   const minutes = Math.max(1, Math.ceil(Math.max(reads / RATE.read, writes / RATE.write, uploads / RATE.upload)));
   const calls = Math.max(1, Math.ceil(pending.length / opts.batchSize));
@@ -382,7 +423,7 @@ async function dryRun(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
       ? `- to publish with their original dates: ${counts.publish}`
       : "- to publish: none, because publish is false (everything is imported as a draft)",
     "",
-    `Categories: ${(envelope.categories ?? []).length} in the file, ${categoriesToCreate.length} to create. Tags: ${(envelope.tags ?? []).length} in the file, ${tagsToCreate.length} to create. Authors: ${(envelope.authors ?? []).length} in the file, ${authorsToCreate.length} to create (matched by exact name).`,
+    `Categories: ${(envelope.categories ?? []).length} in the file, ${categoriesToCreate.length} to create. Tags: ${(envelope.tags ?? []).length} in the file, ${tagsToCreate.length} to create. Authors: ${(envelope.authors ?? []).length} in the file, ${authorsToCreate.length} to create, ${authorsToFill.length} already on the Site to fill in (matched by slug, else exact name; only empty fields are filled).`,
     opts.rehostImages
       ? `Images to copy into the media library: ${toCopy.size}.${notHttps.size ? ` Not https, so kept at their original URLs: ${notHttps.size}.` : ""}`
       : `Images: not copied (rehost_images is false); ${toCopy.size + notHttps.size} keep their original URLs.`,
@@ -486,23 +527,48 @@ async function retrying<T>(state: ApplyState, run: () => Promise<T>): Promise<T>
   }
 }
 
+/** A term's optional descriptive fields, only those the file actually sets. group_label is a tag's
+ *  alone: the categories schema has no such field, so it never appears on one. */
+function termExtras(term: ImportTerm): { description?: string; group_label?: string } {
+  const out: { description?: string; group_label?: string } = {};
+  if (term.description?.trim()) out.description = term.description.trim();
+  if (term.group_label?.trim()) out.group_label = term.group_label.trim();
+  return out;
+}
+
 async function ensureTaxonomy(state: ApplyState): Promise<boolean> {
   const { ctx, opts } = state;
   const { progress, envelope } = ctx;
 
-  const terms: { kind: "categories" | "tags"; site: Map<string, string>; list: { slug: string; name: string }[] }[] = [
+  const terms: { kind: "categories" | "tags"; site: Map<string, string>; list: ImportTerm[] }[] = [
     { kind: "categories", site: ctx.siteCategories, list: envelope.categories ?? [] },
     { kind: "tags", site: ctx.siteTags, list: envelope.tags ?? [] },
   ];
   for (const { kind, site, list } of terms) {
+    // The descriptive fields of terms already on the Site, read once and only when the file has
+    // something to fill: an existing term keeps what it has, and only empty fields are filled.
+    let existing: Map<string, SiteTerm> | null = null;
     for (const term of list) {
       const known = site.get(term.slug);
+      const extras = termExtras(term);
       if (known) {
+        if (Object.keys(extras).length) {
+          if (Date.now() > state.deadline) return false;
+          existing ??= new Map(
+            (await listAll<SiteTerm>(ctx.api, `/${kind}`, [["fields", kind === "tags" ? "id,slug,description,group_label" : "id,slug,description"]]))
+              .map((t) => [t.slug, t]),
+          );
+          const have = existing.get(term.slug);
+          const fill = Object.fromEntries(Object.entries(extras).filter(([k]) => !have?.[k as keyof typeof extras]));
+          if (Object.keys(fill).length) {
+            await call(ctx.api, { method: "PATCH", path: `/${kind}/${known}`, body: fill }, state.deadline + 20_000);
+          }
+        }
         progress[kind][term.slug] = known;
         continue;
       }
       if (Date.now() > state.deadline) return false;
-      const body = { name: term.name, slug: term.slug };
+      const body = { name: term.name, slug: term.slug, ...extras };
       let id: string | undefined;
       try {
         const created = await call<{ id: string }>(
@@ -526,32 +592,65 @@ async function ensureTaxonomy(state: ApplyState): Promise<boolean> {
   }
 
   for (const author of envelope.authors ?? []) {
-    const known = ctx.siteAuthors.get(author.name);
-    if (known) {
-      progress.authors[author.ref] = known;
+    const known = matchAuthor(ctx.siteAuthors, author);
+    const gaps = known ? authorGaps(known, author) : {};
+    const wantsAvatar = Boolean(author.avatar_url) && !(known && known.avatar_url);
+    if (known && Object.keys(gaps).length === 0 && !wantsAvatar) {
+      progress.authors[author.ref] = known.id;
       continue;
     }
     if (Date.now() > state.deadline) return false;
     const warnings: string[] = [];
-    let avatar = author.avatar_url ?? null;
+    let avatar = wantsAvatar ? author.avatar_url ?? null : null;
     if (avatar && opts.rehostImages) avatar = (await rehost(state, avatar, author.name, "author-avatars", warnings)) ?? avatar;
     for (const w of warnings) state.warnings.push(`- author ${author.ref}: ${w}`);
+
+    if (known) {
+      const body = { ...gaps, ...(avatar ? { avatar_url: avatar } : {}) };
+      const updated = await call<SiteAuthor>(
+        ctx.api,
+        { method: "PATCH", path: `/authors/${known.id}`, body, headers: { "Idempotency-Key": `import-author-fill-${sha256(known.id + JSON.stringify(body))}` } },
+        state.deadline + 20_000,
+      );
+      Object.assign(known, updated.data ?? body);
+      progress.authors[author.ref] = known.id;
+      progress.filled_authors += 1;
+      save(state);
+      continue;
+    }
+
     const body = {
       name: author.name,
+      ...(author.slug ? { slug: author.slug } : {}),
       ...(author.bio !== undefined ? { bio: author.bio } : {}),
       ...(avatar ? { avatar_url: avatar } : {}),
+      ...(author.job_title ? { job_title: author.job_title } : {}),
+      ...(author.socials && Object.keys(author.socials).length ? { socials: author.socials } : {}),
+      ...(author.author_type ? { author_type: author.author_type } : {}),
       is_ai_generated: author.is_ai_generated ?? false,
       is_default: false,
     };
-    const created = await call<{ id: string }>(
-      ctx.api,
-      { method: "POST", path: "/authors", body, headers: { "Idempotency-Key": `import-author-${sha256(JSON.stringify(body))}` } },
-      state.deadline + 20_000,
-    );
-    if (!created.data?.id) throw new ItemProblem(`the author "${author.name}" could not be created`);
-    ctx.siteAuthors.set(author.name, created.data.id);
-    progress.authors[author.ref] = created.data.id;
-    progress.created.authors += 1;
+    let created: SiteAuthor | undefined;
+    try {
+      created = (
+        await call<SiteAuthor>(
+          ctx.api,
+          { method: "POST", path: "/authors", body, headers: { "Idempotency-Key": `import-author-${sha256(JSON.stringify(body))}` } },
+          state.deadline + 20_000,
+        )
+      ).data ?? undefined;
+      if (created?.id) progress.created.authors += 1;
+    } catch (err) {
+      if (!(err instanceof WritavoApiError && err.code === "SLUG_CONFLICT")) throw err;
+      // The slug belongs to an author with a different name. Take that one rather than invent a
+      // second URL for the same person; a mismatch is reported so the person can check it.
+      const all = await listAll<SiteAuthor>(ctx.api, "/authors", [["fields", AUTHOR_FIELDS]]);
+      created = all.find((a) => a.slug === author.slug);
+      if (created) state.warnings.push(`- author ${author.ref}: the slug "${author.slug}" is already the Site's author "${created.name}", so the import uses that author`);
+    }
+    if (!created?.id) throw new ItemProblem(`the author "${author.name}" could not be created`);
+    addSiteAuthor(ctx.siteAuthors, { ...body, ...created });
+    progress.authors[author.ref] = created.id;
     save(state);
   }
   return true;
@@ -575,10 +674,16 @@ function buildBody(article: ImportArticle, ctx: Loaded, imageUrl: (url: string) 
   if (article.faqs !== undefined) body.faqs = article.faqs;
   if (article.key_takeaways !== undefined) body.key_takeaways = article.key_takeaways;
   if (article.howto_steps !== undefined) {
+    // Sent in the shape Writavo stores ({ name, description, steps }), whichever form the file used.
+    const h = article.howto_steps;
     body.howto_steps =
-      article.howto_steps === null
+      h === null
         ? null
-        : article.howto_steps.map((step) => (step.image_url ? { ...step, image_url: imageUrl(step.image_url) ?? step.image_url } : step));
+        : {
+            name: Array.isArray(h) ? "" : (h.name ?? ""),
+            description: Array.isArray(h) ? "" : (h.description ?? ""),
+            steps: howtoSteps(h).map((step) => (step.image_url ? { ...step, image_url: imageUrl(step.image_url) ?? step.image_url } : step)),
+          };
   }
   if (article.comparison !== undefined) body.comparison = article.comparison;
 
@@ -589,7 +694,7 @@ function buildBody(article: ImportArticle, ctx: Loaded, imageUrl: (url: string) 
   }
   if (article.author !== undefined) {
     const name = (envelope.authors ?? []).find((a) => a.ref === article.author)?.name;
-    const id = progress.authors[article.author] ?? (name ? ctx.siteAuthors.get(name) : undefined);
+    const id = progress.authors[article.author] ?? (name ? ctx.siteAuthors.byName.get(name)?.id : undefined);
     if (!id) throw new ItemProblem(`author "${article.author}" is not on the Site`);
     body.author_id = id;
   }
@@ -828,7 +933,7 @@ async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
       `Import complete for the Site "${ctx.site.name}". Every valid article in ${ctx.source.label} has been processed.`,
       "",
       thisCall,
-      `${ctx.source.store ? "Across the whole import" : "Across this document"}: created ${tally((e) => e.action === "created")}, updated ${tally((e) => e.action === "updated")}, published ${tally((e) => e.published === true)}, left unchanged ${tally((e) => e.outcome === "deferred")}, skipped ${tally((e) => e.outcome === "skipped")}, failed ${tally((e) => e.outcome === "failed")}${invalid.length ? `, not imported because of problems in the document ${invalid.length}` : ""}. Categories created ${created.categories}, tags ${created.tags}, authors ${created.authors}. Images copied ${Object.values(ctx.progress.images).filter((i) => i.url).length}.`,
+      `${ctx.source.store ? "Across the whole import" : "Across this document"}: created ${tally((e) => e.action === "created")}, updated ${tally((e) => e.action === "updated")}, published ${tally((e) => e.published === true)}, left unchanged ${tally((e) => e.outcome === "deferred")}, skipped ${tally((e) => e.outcome === "skipped")}, failed ${tally((e) => e.outcome === "failed")}${invalid.length ? `, not imported because of problems in the document ${invalid.length}` : ""}. Categories created ${created.categories}, tags ${created.tags}, authors ${created.authors}, authors filled in ${ctx.progress.filled_authors}. Images copied ${Object.values(ctx.progress.images).filter((i) => i.url).length}.`,
     );
     const attention = entries
       .filter(([, e]) => e.outcome === "skipped" || e.outcome === "failed" || e.outcome === "deferred")

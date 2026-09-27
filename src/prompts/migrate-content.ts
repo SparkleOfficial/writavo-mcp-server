@@ -89,12 +89,14 @@ ${signIn}
      today, not the last modified date. content_updated_at is the last content change.
    - content: markdown, words unchanged. Images as ![alt](https://...) so they are copied; relative
      image paths need their absolute https URL${host === "stdio" ? " or an upload_media call with the local path" : ""}.
-   - authors (a ref each; is_ai_generated false for real people), categories and tags (slug and
-     name), and each post's author, ONE category and its tags.
+   - authors (a ref each; is_ai_generated false for real people), categories and tags (slug,
+     name and description; a tag also its group_label), and each post's author, ONE category and
+     its tags.
    - excerpt, seo_title, seo_description, seo_keywords, featured_image, faqs, key_takeaways,
-     howto_steps and comparison wherever the source has them.
-   Some things have no place in the format: a second category, category parents and descriptions,
-   author emails and links, a comparison's title, a how-to's title, description, time or supplies,
+     howto_steps (with its own name and description when it has them) and comparison (with its
+     title) wherever the source has them.
+   Some things have no place in the format: a second category, category parents, author emails,
+   a how-to's time or supplies,
    canonical URLs, custom fields, comments, embeds and shortcodes, and non-https or non-image
    files. Do not squeeze them into another field: list them for me per article.
 ${dryRun}

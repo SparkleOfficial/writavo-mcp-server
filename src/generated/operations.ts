@@ -562,17 +562,16 @@ export const OPERATIONS: McpOperation[] = [
         "name": "howto_steps",
         "in": "body",
         "required": false,
-        "description": "",
+        "description": "`{ name?, description?, steps: [{ name, text?, image_url? }] }`, or a bare array of steps. Stored as the object.",
         "explode": false,
-        "kind": "array",
-        "nullable": true,
-        "itemKind": "object"
+        "kind": "object",
+        "nullable": true
       },
       {
         "name": "comparison",
         "in": "body",
         "required": false,
-        "description": "",
+        "description": "`{ title?, headers: [string], rows: [[string]] }`.",
         "explode": false,
         "kind": "object",
         "nullable": true
@@ -829,17 +828,16 @@ export const OPERATIONS: McpOperation[] = [
         "name": "howto_steps",
         "in": "body",
         "required": false,
-        "description": "",
+        "description": "`{ name?, description?, steps: [{ name, text?, image_url? }] }`, or a bare array of steps. Stored as the object.",
         "explode": false,
-        "kind": "array",
-        "nullable": true,
-        "itemKind": "object"
+        "kind": "object",
+        "nullable": true
       },
       {
         "name": "comparison",
         "in": "body",
         "required": false,
-        "description": "",
+        "description": "`{ title?, headers: [string], rows: [[string]] }`.",
         "explode": false,
         "kind": "object",
         "nullable": true
