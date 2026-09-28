@@ -496,6 +496,11 @@ async function main(): Promise<void> {
     authors: [{ id: "00000000-0000-4000-8000-00000000a0a0", name: "Sam Roe", slug: "sam-roe", bio: "Written by hand.", job_title: null, socials: { x: "https://x.com/samroe" }, author_type: "user" }] as Row[],
     articles: [] as Row[],
     replays: new Map<string, { status: number; body: unknown }>(),
+    // The engagement and cost-history endpoints, as the API implements them (SET, not add).
+    engagementDaily: new Map<string, Row>(),
+    engagementPicks: new Map<string, Row>(),
+    engagementCalls: 0,
+    engagementOff: false,
   };
   const ok = (data: unknown, status = 200) => ({ status, body: { ok: true, data } });
   const fail = (status: number, code: string, message: string) => ({ status, body: { ok: false, error: { code, message } } });
@@ -572,6 +577,34 @@ async function main(): Promise<void> {
     }
     if (path === "/media" && req.method === "POST") {
       return ok({ id: randomUUID(), bucket: "blog-images", url: `https://cdn.example.test/media/${String(body.upload_id)}.png` }, 201);
+    }
+    if (path === "/engagement/import" && req.method === "POST" && !site.engagementOff) {
+      site.engagementCalls += 1;
+      const findPost = (r: Row) => site.articles.find((a) => (r.external_id !== undefined ? a.external_id === r.external_id : a.slug === r.slug));
+      const problems: Row[] = [];
+      let daily = 0;
+      let picks = 0;
+      ((body.daily ?? []) as Row[]).forEach((r, index) => {
+        const post = findPost(r);
+        if (!post) return void problems.push({ section: "daily", index, error: "no such post on this Site" });
+        if (body.dry_run === false) site.engagementDaily.set(`${String(post.slug)}|${String(r.day)}`, r);
+        daily += 1;
+      });
+      ((body.reactions ?? []) as Row[]).forEach((r, index) => {
+        const post = findPost(r);
+        if (!post) return void problems.push({ section: "reactions", index, error: "no such post on this Site" });
+        if (body.dry_run === false) site.engagementPicks.set(`${String(post.slug)}|${String(r.visitor_id)}`, r);
+        picks += 1;
+      });
+      return ok({ dry_run: body.dry_run !== false, written: { daily, share_rows: daily, picks }, posts: [], problems });
+    }
+    const costs = /^\/articles\/([^/]+)\/cost-history$/.exec(path);
+    if (costs && req.method === "POST") {
+      const row = site.articles.find((a) => a.id === costs[1]);
+      if (!row) return fail(404, "NOT_FOUND", "No such article.");
+      row.cost_history = body.entries;
+      const total = ((body.entries ?? []) as Row[]).reduce((n, e) => n + Number(e.cost_usd), 0);
+      return ok({ article_id: row.id, imported_total_usd: total, entries: body.entries, problems: [] });
     }
     return fail(404, "NOT_FOUND", `The stub has no route for ${req.method} ${path}.`);
   };
@@ -1162,6 +1195,62 @@ async function main(): Promise<void> {
       !/as much as fits in one call|says what is left|35 seconds/.test(runnerText) && runnerText.includes("call it once, then only check status"),
       runnerText.slice(0, 600),
     );
+  }
+
+  // -- 14f. Engagement history and article cost history ---------------------------
+  console.log("\n[ 14f. Engagement history and cost history travel with the import ]");
+  {
+    currentKey = SECRET_KEY;
+    const doc = {
+      format: "writavo-import",
+      version: 1,
+      articles: [
+        { external_id: "eng:1", status: "draft", title: "Engaged one", slug: "engaged-one", content: "x", cost_history: [{ cost_usd: 0.42, stage: "generate", provider: "openai", occurred_on: "2026-05-10" }] },
+        { external_id: "eng:2", status: "draft", title: "Engaged two", slug: "engaged-two", content: "y" },
+      ],
+      engagement: {
+        daily: [
+          { external_id: "eng:1", day: "2026-05-10", views: 12, reactions: { useful: 2, loved: 1 }, shares: { x: 1 } },
+          { slug: "engaged-two", day: "2026-05-11", views: 5 },
+          { external_id: "eng:missing", day: "2026-05-11", views: 9 },
+          { external_id: "eng:1", day: "2999-01-01", views: 1 },
+        ],
+        reactions: [{ external_id: "eng:1", visitor_id: "anon-123", reaction: "loved", set_at: "2026-05-10T10:00:00Z" }],
+      },
+    };
+    const store = memStore("g:key-engagement");
+    stub.reset();
+    const dry = bodyOf(await handleImportContent(CTX, { data: doc }, store));
+    const engId = /imp_[A-Za-z0-9_-]{22}/.exec(dry)?.[0] ?? "";
+    check(
+      "the dry run summarises the engagement section, flags a row for no post and a future day, and sends nothing",
+      dry.includes("Engagement history: 3 daily rows and 1 visitor reactions for 3 posts") && dry.includes("views 26") &&
+        dry.includes("name a post that is neither in this document nor on the Site") && dry.includes("not a finished day") && site.engagementCalls === 0,
+      dry.slice(dry.indexOf("Engagement"), dry.indexOf("Engagement") + 700),
+    );
+    stub.reset();
+    const applied = bodyOf(await handleImportContent(CTX, { import_id: engId, dry_run: false, background: false }, store));
+    const one = byExternal("eng:1");
+    check(
+      "an apply writes the articles, then sends the engagement history once, keyed by post and day",
+      applied.includes("Import complete") && applied.includes("Engagement history: delivered") && site.engagementCalls === 2 &&
+        site.engagementDaily.has("engaged-one|2026-05-10") && site.engagementDaily.has("engaged-two|2026-05-11") && site.engagementPicks.has("engaged-one|anon-123"),
+      applied.slice(0, 1200),
+    );
+    check("each article's cost history is sent to its own record, apart from Writavo's costs", Array.isArray(one.cost_history) && (one.cost_history as Row[])[0]?.cost_usd === 0.42);
+    const callsBefore = site.engagementCalls;
+    const again = bodyOf(await handleImportContent(CTX, { import_id: engId, dry_run: false, background: false }, store));
+    check("running it again sends nothing new (the section is already delivered)", again.includes("Import complete") && site.engagementCalls === callsBefore, again.slice(0, 300));
+
+    site.engagementOff = true;
+    const doc2 = { ...doc, articles: [{ ...doc.articles[1]!, external_id: "eng:3", slug: "engaged-three" }], engagement: { daily: [{ external_id: "eng:3", day: "2026-05-12", views: 3 }] } };
+    const off = bodyOf(await handleImportContent(CTX, { data: doc2, dry_run: false }, memStore("g:key-engagement-off")));
+    check(
+      "an API without the engagement endpoint does not fail the import: the articles are done and the history is reported as not imported",
+      off.includes("Import complete") && off.includes("Engagement history: NOT imported") && Boolean(byExternal("eng:3").id),
+      off.slice(0, 800),
+    );
+    site.engagementOff = false;
   }
 
   // -- 14c. The store does the document work (the hosted Durable Object) --------

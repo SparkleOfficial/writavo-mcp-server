@@ -58,6 +58,21 @@ export interface ImportProgress {
   filled_authors: number;
   images: Record<string, ProgressImage>;
   items: Record<string, ProgressItem>;
+  /** The engagement section's delivery, when the document has one (sent after every article). */
+  engagement?: EngagementProgress;
+}
+
+export interface EngagementProgress {
+  /** Hash of the section as sent: a changed section is sent again from the start. */
+  hash: string;
+  daily_sent: number;
+  reactions_sent: number;
+  done: boolean;
+  written: { daily: number; share_rows: number; picks: number };
+  /** What the API skipped, first ones only. */
+  problems: string[];
+  /** Why the last attempt could not deliver it (the next apply tries again). */
+  error?: string;
 }
 
 export function newProgress(filePath: string, website: { id: string; name: string }): ImportProgress {

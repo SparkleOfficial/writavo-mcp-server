@@ -3096,6 +3096,64 @@ export const ACTIONS: McpOperation[] = [
     }
   },
   {
+    "tool": "set_article_cost_history",
+    "operationId": "setArticleCostHistory",
+    "method": "POST",
+    "path": "/articles/{id}/cost-history",
+    "tag": "Articles",
+    "surface": "action",
+    "area": "articles",
+    "summary": "Set an article's imported cost history",
+    "brief": "Records what producing the article cost in the system it was imported from (its API spend), for the record. The list REPLACES every entry imported for this article before, so sending the same list again changes nothing, and an empty list cl...",
+    "description": "Set an article's imported cost history. Records what producing the article cost in the system it was imported from (its API spend), for the record. The list REPLACES every entry imported for this article before, so sending the same list again changes nothing, and an empty list clears it. Changes content on the customer's Site. Nothing becomes public: publishing is always a separate call. Needs a secret key (wv_sk_) carrying the articles:write scope.",
+    "scope": "articles:write",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": false,
+    "spendsCredits": false,
+    "spendsMoney": false,
+    "consequence": null,
+    "makesPublic": false,
+    "readOnly": false,
+    "confirm": false,
+    "confirmReason": null,
+    "idempotency": true,
+    "ifMatch": false,
+    "params": [
+      {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "description": "",
+        "explode": false,
+        "kind": "string",
+        "nullable": false,
+        "format": "uuid"
+      },
+      {
+        "name": "entries",
+        "in": "body",
+        "required": true,
+        "description": "",
+        "explode": false,
+        "kind": "array",
+        "nullable": false,
+        "itemKind": "object"
+      }
+    ],
+    "approval": null,
+    "approvalMode": null,
+    "approvalKind": null,
+    "approvalWhen": null,
+    "annotations": {
+      "title": "Set an article's imported cost history",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
     "tool": "create_plan_item",
     "operationId": "createPlanItem",
     "method": "POST",
@@ -7275,6 +7333,73 @@ export const ACTIONS: McpOperation[] = [
     }
   },
   {
+    "tool": "import_engagement",
+    "operationId": "importEngagement",
+    "method": "POST",
+    "path": "/engagement/import",
+    "tag": "Engagement",
+    "surface": "action",
+    "area": "engagement",
+    "summary": "Import engagement history",
+    "brief": "Bring a blog's engagement history to Writavo when it migrates: views, reactions and share clicks per article per day, and each reader's current reaction. Articles are matched by `external_id` or `slug` on this Site, in any status.",
+    "description": "Import engagement history. Bring a blog's engagement history to Writavo when it migrates: views, reactions and share clicks per article per day, and each reader's current reaction. Articles are matched by `external_id` or `slug` on this Site, in any status. Call it from a server with a secret key. Changes Engagement settings. CONSEQUENCE: Sets the imported articles' view, reaction and share counts for the days sent, replacing what was stored for those days. Needs a secret key (wv_sk_) carrying the engagement:write scope.",
+    "scope": "engagement:write",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": false,
+    "spendsCredits": false,
+    "spendsMoney": false,
+    "consequence": "Sets the imported articles' view, reaction and share counts for the days sent, replacing what was stored for those days.",
+    "makesPublic": false,
+    "readOnly": false,
+    "confirm": false,
+    "confirmReason": null,
+    "idempotency": true,
+    "ifMatch": false,
+    "params": [
+      {
+        "name": "dry_run",
+        "in": "body",
+        "required": false,
+        "description": "Check and report without writing. Defaults to true; send false to write.",
+        "explode": false,
+        "kind": "boolean",
+        "nullable": false
+      },
+      {
+        "name": "daily",
+        "in": "body",
+        "required": false,
+        "description": "Per article per UTC day, views, the reaction total and shares per platform.",
+        "explode": false,
+        "kind": "array",
+        "nullable": false,
+        "itemKind": "object"
+      },
+      {
+        "name": "reactions",
+        "in": "body",
+        "required": false,
+        "description": "Each reader's current reaction per article. One row per reader and article.",
+        "explode": false,
+        "kind": "array",
+        "nullable": false,
+        "itemKind": "object"
+      }
+    ],
+    "approval": null,
+    "approvalMode": null,
+    "approvalKind": null,
+    "approvalWhen": null,
+    "annotations": {
+      "title": "Import engagement history",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
     "tool": "get_post_engagement",
     "operationId": "getPostEngagement",
     "method": "GET",
@@ -10080,7 +10205,9 @@ export const ACTION_AREAS = [
   "team",
   "billing",
   "insights",
-  "pipeline"
+  "articles",
+  "pipeline",
+  "engagement"
 ] as const;
 
 /** Something an AI agent can never do, and the next step a person takes instead. */

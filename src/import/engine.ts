@@ -3,7 +3,7 @@ import { WritavoApiError } from "../api/client.js";
 import { MediaError, fetchImage, uploadImage } from "../api/media.js";
 import { newApiStats, type ApiStats, type ToolContext } from "../core/context.js";
 import { formatApiError, text, toolError, type ToolResult } from "../errors.js";
-import { howtoSteps, type ImportArticle, type ImportAuthor, type ImportEnvelope, type ImportTerm } from "./format.js";
+import { howtoSteps, type CostEntry, type ImportArticle, type ImportAuthor, type ImportEnvelope, type ImportTerm } from "./format.js";
 import { articleImages, htmlImageCount, isHttps, rewriteMarkdownImages } from "./images.js";
 import { newProgress, type ImportProgress, type ProgressItem, type ProgressStore } from "./progress.js";
 import {
@@ -21,7 +21,7 @@ import {
   type SiteInfo,
   type SiteTerm,
 } from "./site.js";
-import { checkDocument, itemLabel, type ItemCheck } from "./validate.js";
+import { checkDocument, itemLabel, type EngagementCheck, type ItemCheck } from "./validate.js";
 
 /**
  * The importer. One tool call is either a dry run (reads only, writes nothing, not even the
@@ -178,6 +178,8 @@ interface Loaded {
   envelope: ImportEnvelope;
   /** Problems in the document's top level. The dry run lists them; an apply refuses while any remain. */
   envelopeErrors: string[];
+  /** The engagement section's valid rows and skipped-row problems (validate.ts). */
+  engagement: EngagementCheck;
   /** Where this call's time went, for the reply (timingLine). */
   timing: CallTiming;
   items: ItemCheck[];
@@ -396,6 +398,7 @@ async function load(api: ToolContext, source: ImportSource): Promise<Loaded | To
     source,
     envelope,
     envelopeErrors: checked.envelopeErrors,
+    engagement: checked.engagement,
     timing,
     items: checked.items,
     valid,
@@ -577,6 +580,7 @@ async function dryRun(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
   if (ctx.progressExisted && ctx.source.store) lines.push(`Progress from an earlier run is in ${ctx.source.store.location}.`);
   const precision = subMillisecondNote(valid);
   if (precision) lines.push(precision);
+  lines.push(...engagementDryRun(ctx, byExternalId, bySlug));
 
   const topLevel = ctx.envelopeErrors;
   if (topLevel.length > 0) {
@@ -989,7 +993,9 @@ async function processArticle(state: ApplyState, item: ValidItem): Promise<void>
     }
     const body = buildBody(article, ctx, (url) => (opts.rehostImages ? ctx.progress.images[url]?.url : undefined));
 
-    need(state, needsPublish ? 5 : 3); // find, write, read back (+ publish, re-read)
+    // find, write, read back (+ publish, re-read) (+ the cost history), reserved before the write so
+    // the article is never recorded done with its cost history still unsent
+    need(state, (needsPublish ? 5 : 3) + (article.cost_history !== undefined ? 1 : 0));
     current = await findByExternalId(ctx.api, article.external_id, state.hardDeadline);
     let action: "created" | "updated";
     if (current) {
@@ -1051,6 +1057,7 @@ async function processArticle(state: ApplyState, item: ValidItem): Promise<void>
       error: undefined,
       warnings,
     });
+    if (article.cost_history !== undefined) await sendCostHistory(state, articleId!, article.cost_history, warnings);
     await save(state);
   }
 
@@ -1085,6 +1092,161 @@ async function processArticle(state: ApplyState, item: ValidItem): Promise<void>
   // the next starts. A call killed after this (a client timeout, a runtime limit) loses nothing, so
   // the next call neither re-copies its images nor reports the Site ahead of its own progress.
   await save(state, true);
+}
+
+// ---------------------------------------------------------------------------
+// Engagement history (the document's optional engagement section)
+// ---------------------------------------------------------------------------
+/** Rows per call to POST /engagement/import (the API's caps). */
+const ENGAGEMENT_CHUNK = { daily: 5_000, reactions: 10_000 };
+
+function engagementHash(e: EngagementCheck): string {
+  return sha256(JSON.stringify({ d: e.daily, r: e.reactions }));
+}
+
+/** The section has rows that have not all been delivered, as the document now has them. */
+function engagementPending(ctx: Loaded): boolean {
+  const e = ctx.engagement;
+  if (e.daily.length === 0 && e.reactions.length === 0) return false;
+  const p = ctx.progress.engagement;
+  return !(p && p.hash === engagementHash(e) && p.done);
+}
+
+/**
+ * Send what is left of the section, a chunk per request. Each chunk SETS the totals for its post
+ * days (and replaces its visitors' picks), so a chunk sent twice changes nothing. A reason to stop
+ * (time, requests, a busy API), or null when this call finished (delivered, or refused for a reason
+ * recorded in progress.engagement.error, which the next apply retries).
+ */
+async function sendEngagement(state: ApplyState): Promise<string | null> {
+  const { ctx } = state;
+  const e = ctx.engagement;
+  const hash = engagementHash(e);
+  if (!ctx.progress.engagement || ctx.progress.engagement.hash !== hash) {
+    ctx.progress.engagement = { hash, daily_sent: 0, reactions_sent: 0, done: false, written: { daily: 0, share_rows: 0, picks: 0 }, problems: [] };
+  }
+  const p = ctx.progress.engagement;
+  delete p.error;
+  for (const section of ["daily", "reactions"] as const) {
+    const rows = e[section];
+    const sentKey = section === "daily" ? "daily_sent" : "reactions_sent";
+    while (p[sentKey] < rows.length) {
+      if (Date.now() > state.deadline) return "the time for this call ran out while sending the engagement history";
+      const max = state.opts.budget?.maxRequests;
+      if (max !== undefined && requestsUsed(state) + 1 > max) return REQUEST_BUDGET_SPENT;
+      const chunk = rows.slice(p[sentKey], p[sentKey] + ENGAGEMENT_CHUNK[section]);
+      try {
+        const res = await call<{ written?: { daily?: number; share_rows?: number; picks?: number }; problems?: { section: string; index: number; error: string }[] }>(
+          ctx.api,
+          {
+            method: "POST",
+            path: "/engagement/import",
+            body: { dry_run: false, [section]: chunk },
+            headers: { "Idempotency-Key": `import-engagement-${sha256(section + JSON.stringify(chunk))}` },
+          },
+          state.hardDeadline,
+        );
+        const w = res.data?.written ?? {};
+        p.written.daily += w.daily ?? 0;
+        p.written.share_rows += w.share_rows ?? 0;
+        p.written.picks += w.picks ?? 0;
+        for (const prob of res.data?.problems ?? []) {
+          if (p.problems.length < 40) p.problems.push(`engagement.${prob.section}[${p[sentKey] + prob.index}]: ${prob.error}`);
+        }
+        p[sentKey] += chunk.length;
+        await save(state, true);
+      } catch (err) {
+        if (isFatal(err)) throw err;
+        if (isTransient(err)) return `the API was busy (${apiProblem(err)}) while sending the engagement history`;
+        p.error =
+          err instanceof WritavoApiError && err.status === 404
+            ? "this Site's API does not accept engagement history yet"
+            : apiProblem(err);
+        await save(state, true);
+        return null;
+      }
+    }
+  }
+  p.done = true;
+  await save(state, true);
+  return null;
+}
+
+/**
+ * The dry run's view of the engagement section: what it would set, per post in total, and which
+ * rows point at no post (not in the document and not on the Site). Nothing is sent in a dry run:
+ * the posts may not exist yet.
+ */
+function engagementDryRun(ctx: Loaded, byExternalId: Map<string, SiteArticle>, bySlug: Map<string, SiteArticle>): string[] {
+  const e = ctx.engagement;
+  if (e.daily.length === 0 && e.reactions.length === 0 && e.problems.length === 0) return [];
+  const docIds = new Set(ctx.valid.map((v) => v.article.external_id));
+  const docSlugs = new Set(ctx.valid.map((v) => v.article.slug).filter((x): x is string => Boolean(x)));
+  const known = (row: { external_id?: string; slug?: string }) =>
+    row.external_id !== undefined ? docIds.has(row.external_id) || byExternalId.has(row.external_id) : docSlugs.has(row.slug!) || bySlug.has(row.slug!);
+  const orphanDaily = e.daily.filter((r) => !known(r)).length;
+  const orphanPicks = e.reactions.filter((r) => !known(r)).length;
+  const posts = new Set([...e.daily, ...e.reactions].map((r) => r.external_id ?? `slug:${r.slug}`));
+  const sum = (f: (r: (typeof e.daily)[number]) => number) => e.daily.reduce((n, r) => n + f(r), 0);
+  const views = sum((r) => r.views ?? 0);
+  const reactions = sum((r) => (typeof r.reactions === "number" ? r.reactions : Object.values(r.reactions ?? {}).reduce((a: number, b) => a + (b ?? 0), 0)));
+  const shares = sum((r) => Object.values(r.shares ?? {}).reduce((a: number, b) => a + (b ?? 0), 0));
+  const lines = [
+    "",
+    `Engagement history: ${e.daily.length} daily rows and ${e.reactions.length} visitor reactions for ${posts.size} posts (views ${views}, daily reactions ${reactions}, shares ${shares}). Sent after every article is imported; each row SETS its post and day, replacing what that day held, so re-running never double-counts.`,
+  ];
+  if (orphanDaily || orphanPicks) {
+    lines.push(`${orphanDaily + orphanPicks} engagement rows name a post that is neither in this document nor on the Site; they will be skipped.`);
+  }
+  if (e.problems.length) lines.push(`Engagement rows with problems, skipped (${e.problems.length}):`, ...listed(e.problems.map((x) => `- ${x}`), 20));
+  return lines;
+}
+
+/** The engagement section's lines for an apply reply. */
+function engagementReport(ctx: Loaded): string[] {
+  const e = ctx.engagement;
+  const p = ctx.progress.engagement;
+  if (e.daily.length === 0 && e.reactions.length === 0 && e.problems.length === 0) return [];
+  const lines = [""];
+  if (p?.done && p.hash === engagementHash(e)) {
+    lines.push(`Engagement history: delivered. Days written ${p.written.daily}, share rows ${p.written.share_rows}, visitor reactions ${p.written.picks}.`);
+  } else if (p?.error) {
+    lines.push(`Engagement history: NOT imported, because ${p.error}. The articles are not affected; run the import again later to send it.`);
+  } else {
+    lines.push(`Engagement history: ${p?.daily_sent ?? 0} of ${e.daily.length} daily rows and ${p?.reactions_sent ?? 0} of ${e.reactions.length} visitor reactions sent so far.`);
+  }
+  const skipped = [...e.problems, ...(p?.problems ?? [])];
+  if (skipped.length) lines.push(`Engagement rows skipped (${skipped.length}):`, ...listed(skipped.map((x) => `- ${x}`), 20));
+  return lines;
+}
+
+/**
+ * The article's production cost in the old system, SET (replacing what an earlier import sent).
+ * Kept apart from Writavo's own cost ledger by the API: never billed, never against a spend cap.
+ * A failure here is the article's warning, not its failure: the article itself is written.
+ */
+async function sendCostHistory(state: ApplyState, articleId: string, entries: CostEntry[], warnings: string[]): Promise<void> {
+  need(state, 1);
+  try {
+    const res = await call<{ imported_total_usd?: number; problems?: { index: number; error: string }[] }>(
+      state.ctx.api,
+      {
+        method: "POST",
+        path: `/articles/${encodeURIComponent(articleId)}/cost-history`,
+        body: { entries },
+        headers: { "Idempotency-Key": `import-costs-${sha256(articleId + JSON.stringify(entries))}` },
+      },
+      state.hardDeadline,
+    );
+    for (const p of res.data?.problems ?? []) warnings.push(`cost_history[${p.index}] was not imported: ${p.error}`);
+  } catch (err) {
+    if (isTransient(err) || isFatal(err)) throw err;
+    warnings.push(
+      err instanceof WritavoApiError && err.status === 404
+        ? "its cost history was not imported: this Site's API does not accept cost history yet; run the import again later to add it"
+        : `its cost history was not imported: ${apiProblem(err)}`,
+    );
+  }
 }
 
 async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
@@ -1169,7 +1331,7 @@ async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
         const uncopied = opts.rehostImages
           ? articleImages(item.article).filter((i) => isHttps(i.url) && !ctx.progress.images[i.url]).length
           : 0;
-        if (requestsUsed(state) + 5 + 4 * uncopied > max) {
+        if (requestsUsed(state) + 6 + 4 * uncopied > max) {
           stopped = REQUEST_BUDGET_SPENT;
           break;
         }
@@ -1217,12 +1379,19 @@ async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
   // Counted as the NEXT call will see it, which does not pass retry_failed again.
   const nextOpts = { ...opts, retryFailed: false };
   const remaining = ctx.valid.filter((v) => !isSettled(ctx.progress.items[v.article.external_id], v, nextOpts, mayTouchLive)).length;
+  // Engagement history goes after every article (it is keyed by the posts), in chunks, SET not add.
+  if (remaining === 0 && !stopped && engagementPending(ctx)) {
+    const why = await sendEngagement(state);
+    if (why) stopped = why;
+  }
+  const engagementUnfinished = engagementPending(ctx) && !ctx.progress.engagement?.error;
+  const allDone = remaining === 0 && !engagementUnfinished;
   const c = state.counts;
   const lines: string[] = [];
   const thisCall = `This call: created ${c.created}, updated ${c.updated}, published ${c.published}, left unchanged ${c.deferred}, skipped ${c.skipped}, failed ${c.failed}. Images copied ${c.imagesCopied}${c.imagesFailed ? `, not copied ${c.imagesFailed}` : ""}.`;
   const created = ctx.progress.created;
 
-  if (remaining === 0) {
+  if (allDone) {
     const entries = Object.entries(ctx.progress.items);
     const tally = (pred: (e: ProgressItem) => boolean) => entries.filter(([, e]) => pred(e)).length;
     lines.push(
@@ -1239,6 +1408,7 @@ async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
       lines.push("", "Not imported because of problems in the document:", ...listed(invalid.map((i) => `- ${itemLabel(i)}: ${i.errors.join("; ")}`)));
     }
     if (state.warnings.length > 0) lines.push("", "Warnings from this call:", ...listed(state.warnings));
+    lines.push(...engagementReport(ctx));
     lines.push(
       "",
       ctx.source.store
@@ -1249,7 +1419,9 @@ async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
     );
   } else {
     lines.push(
-      `Imported a batch into the Site "${ctx.site.name}". ${ctx.valid.length - remaining} of ${ctx.valid.length} articles are done and ${remaining} remain.`,
+      remaining === 0
+        ? `Every article is imported into the Site "${ctx.site.name}"; the engagement history is still being sent.`
+        : `Imported a batch into the Site "${ctx.site.name}". ${ctx.valid.length - remaining} of ${ctx.valid.length} articles are done and ${remaining} remain.`,
       "",
       thisCall,
       `Categories created so far ${created.categories}, tags ${created.tags}, authors ${created.authors}.`,
@@ -1257,6 +1429,7 @@ async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
     if (stopped) lines.push(`Stopped early: ${stopped}.`);
     if (state.problems.length > 0) lines.push("", "Problems this call:", ...listed(state.problems));
     if (state.warnings.length > 0) lines.push("", "Warnings this call:", ...listed(state.warnings));
+    lines.push(...engagementReport(ctx));
     if (ctx.source.store) {
       lines.push(
         "",
@@ -1279,7 +1452,7 @@ async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
     }
   }
   lines.push("", timingLine(ctx.timing, ctx.api.stats));
-  return tagged(remaining === 0 ? "complete" : "partial", text(lines.join("\n")));
+  return tagged(allDone ? "complete" : "partial", text(lines.join("\n")));
 }
 
 /** A failure no other article can get past: the API's own guidance, then where the import stands. */

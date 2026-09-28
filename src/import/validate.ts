@@ -2,6 +2,10 @@ import type { z } from "zod/v4";
 import {
   AuthorSchema,
   CategorySchema,
+  EngagementDailySchema,
+  EngagementReactionSchema,
+  type EngagementDaily,
+  type EngagementReaction,
   IMPORT_FORMAT_NAME,
   IMPORT_FORMAT_VERSION,
   ImportArticleSchema,
@@ -28,10 +32,61 @@ export interface ItemCheck {
   warnings: string[];
 }
 
+export interface EngagementCheck {
+  daily: EngagementDaily[];
+  reactions: EngagementReaction[];
+  /** One line per skipped row, "engagement.daily[3]: ...". Never blocks the articles. */
+  problems: string[];
+}
+
 export interface DocumentCheck {
   envelope: ImportEnvelope | null;
   envelopeErrors: string[];
   items: ItemCheck[];
+  engagement: EngagementCheck;
+}
+
+const NO_ENGAGEMENT: EngagementCheck = { daily: [], reactions: [], problems: [] };
+
+/**
+ * The optional engagement section, row by row: a bad row is reported and skipped, never a reason
+ * to refuse the document. Whether the post is on the Site is checked later, in the engine and by
+ * the API.
+ */
+export function checkEngagement(raw: { daily?: unknown[]; reactions?: unknown[] } | undefined, now = Date.now()): EngagementCheck {
+  if (!raw) return NO_ENGAGEMENT;
+  const out: EngagementCheck = { daily: [], reactions: [], problems: [] };
+  const today = new Date(now).toISOString().slice(0, 10);
+  const seenDays = new Set<string>();
+  (raw.daily ?? []).forEach((row, i) => {
+    const parsed = EngagementDailySchema.safeParse(row);
+    if (!parsed.success) {
+      out.problems.push(`engagement.daily[${i}]: ${parsed.error.issues.map((x) => describeIssue(x)).join("; ")}`);
+      return;
+    }
+    const d = parsed.data;
+    if (d.day >= today) return void out.problems.push(`engagement.daily[${i}]: day ${d.day} is not a finished day; today is counted live from the blog and would overwrite it`);
+    if (d.day < "1990-01-01") return void out.problems.push(`engagement.daily[${i}]: day ${d.day} is before 1990`);
+    const key = `${d.external_id ?? `slug:${d.slug}`}|${d.day}`;
+    if (seenDays.has(key)) return void out.problems.push(`engagement.daily[${i}]: a second row for the same post and day ${d.day}; each day appears once`);
+    seenDays.add(key);
+    out.daily.push(d);
+  });
+  const seenPicks = new Set<string>();
+  (raw.reactions ?? []).forEach((row, i) => {
+    const parsed = EngagementReactionSchema.safeParse(row);
+    if (!parsed.success) {
+      out.problems.push(`engagement.reactions[${i}]: ${parsed.error.issues.map((x) => describeIssue(x)).join("; ")}`);
+      return;
+    }
+    const r = parsed.data;
+    if (Date.parse(r.set_at) > now) return void out.problems.push(`engagement.reactions[${i}]: set_at is in the future`);
+    const key = `${r.external_id ?? `slug:${r.slug}`}|${r.visitor_id}`;
+    if (seenPicks.has(key)) return void out.problems.push(`engagement.reactions[${i}]: a second pick by the same visitor on the same post; a visitor has one current pick`);
+    seenPicks.add(key);
+    out.reactions.push(r);
+  });
+  return out;
 }
 
 /** The Writavo API refuses an original date before this (articleLifecycle.ts readPastDate). */
@@ -79,6 +134,9 @@ function salvageEnvelope(value: unknown): ImportEnvelope | null {
     authors: keep(raw.authors, AuthorSchema),
     categories: keep(raw.categories, CategorySchema),
     tags: keep(raw.tags, TagSchema),
+    ...(raw.engagement && typeof raw.engagement === "object" && !Array.isArray(raw.engagement)
+      ? { engagement: raw.engagement as { daily?: unknown[]; reactions?: unknown[] } }
+      : {}),
     articles: raw.articles,
   };
 }
@@ -97,6 +155,7 @@ export function checkDocument(value: unknown, now = Date.now()): DocumentCheck {
       envelope: null,
       envelopeErrors: envelopeErrors.length > 0 ? envelopeErrors : ["The file is not a Writavo import document."],
       items: [],
+      engagement: NO_ENGAGEMENT,
     };
   }
 
@@ -186,5 +245,5 @@ export function checkDocument(value: unknown, now = Date.now()): DocumentCheck {
     return check;
   });
 
-  return { envelope, envelopeErrors, items };
+  return { envelope, envelopeErrors, items, engagement: checkEngagement(envelope.engagement, now) };
 }

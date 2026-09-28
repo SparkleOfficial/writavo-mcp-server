@@ -171,17 +171,23 @@ type Json = Record<string, unknown>;
 const isObject = (v: unknown): v is Json => !!v && typeof v === "object" && !Array.isArray(v);
 
 /** Entries of `base` and `part` merged on `key`: a part's entry replaces the stored one with the same key, in place. */
-function mergeOn(base: unknown, part: unknown, key: string): unknown[] | undefined {
+function mergeOn(base: unknown, part: unknown, key: string | ((entry: Json) => string | undefined)): unknown[] | undefined {
   const a = Array.isArray(base) ? base : [];
   const b = Array.isArray(part) ? part : [];
   if (!Array.isArray(base) && !Array.isArray(part)) return undefined;
+  const keyOf = (entry: unknown): string | undefined => {
+    if (!isObject(entry)) return undefined;
+    if (typeof key === "function") return key(entry);
+    return typeof entry[key] === "string" ? (entry[key] as string) : undefined;
+  };
   const out = [...a];
   const at = new Map<unknown, number>();
   out.forEach((entry, i) => {
-    if (isObject(entry) && typeof entry[key] === "string") at.set(entry[key], i);
+    const k = keyOf(entry);
+    if (k !== undefined) at.set(k, i);
   });
   for (const entry of b) {
-    const k = isObject(entry) && typeof entry[key] === "string" ? entry[key] : undefined;
+    const k = keyOf(entry);
     const existing = k === undefined ? undefined : at.get(k);
     if (existing !== undefined) out[existing] = entry;
     else {
@@ -206,6 +212,17 @@ export function mergeImportDocuments(stored: unknown, part: unknown): Json | str
   for (const [field, key] of [["authors", "ref"], ["categories", "slug"], ["tags", "slug"], ["articles", "external_id"]] as const) {
     const value = mergeOn(stored[field], part[field], key);
     if (value !== undefined) merged[field] = value;
+  }
+  // Engagement rows merge on their post (external_id or slug) and day, picks on post and visitor.
+  if (isObject(part.engagement)) {
+    const stored = isObject(merged.engagement) ? (merged.engagement as Json) : {};
+    const post = (e: Json) => (typeof e.external_id === "string" ? e.external_id : typeof e.slug === "string" ? `slug:${e.slug}` : undefined);
+    const engagement: Json = { ...stored };
+    const daily = mergeOn(stored.daily, part.engagement.daily, (e) => (post(e) && typeof e.day === "string" ? `${post(e)}|${e.day}` : undefined));
+    const reactions = mergeOn(stored.reactions, part.engagement.reactions, (e) => (post(e) && typeof e.visitor_id === "string" ? `${post(e)}|${e.visitor_id}` : undefined));
+    if (daily !== undefined) engagement.daily = daily;
+    if (reactions !== undefined) engagement.reactions = reactions;
+    merged.engagement = engagement;
   }
   for (const field of Object.keys(part)) if (!(field in merged)) merged[field] = part[field];
   return merged;

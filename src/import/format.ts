@@ -159,6 +159,21 @@ export const TagSchema = z.strictObject({
 export const TermSchema = TagSchema;
 
 /** Fields shared by drafts and published articles. */
+/**
+ * What producing the article cost in the old system (its API spend), for the record. Stored apart
+ * from Writavo's own cost ledger: never billed, never counted against a spend cap.
+ */
+export const CostEntrySchema = z.strictObject({
+  cost_usd: z.number().min(0).max(100_000).describe("What this cost, in US dollars."),
+  stage: text(60).optional().describe("A label for what it paid for: research, generate, images..."),
+  provider: text(60).optional().describe("Who was paid: openai, dataforseo..."),
+  calls: z.number().int().min(0).optional(),
+  tokens: z.number().int().min(0).optional(),
+  occurred_on: z.iso.date({ error: "must be a date, YYYY-MM-DD" }).optional(),
+  description: text(500).optional(),
+});
+export type CostEntry = z.infer<typeof CostEntrySchema>;
+
 const articleFields = {
   external_id: z
     .string()
@@ -181,9 +196,72 @@ const articleFields = {
   tags: z.array(z.string().min(1)).optional().describe("tags[].slug values, or slugs of tags already on the Site."),
   format: z.string().min(1).optional().describe("A content type key on the Site, for example how_to. Optional."),
   source: ArticleSourceSchema.nullable().optional().describe("Where the article came from. Private."),
+  cost_history: z
+    .array(CostEntrySchema)
+    .max(500)
+    .optional()
+    .describe("What producing it cost in the old system, for the record: shown beside Writavo's own costs, never billed or counted against a spend cap. Replaces any cost history imported for it before."),
   published_at: dateTime.optional().describe("When the article was FIRST published at the source."),
   content_updated_at: dateTime.optional().describe("When its content last changed at the source. Not before published_at."),
 };
+
+// ---------------------------------------------------------------------------
+// Engagement history (optional): the old blog's per-post views, reactions and shares
+// ---------------------------------------------------------------------------
+
+/** Writavo's six reactions and four share platforms (0106): the only values the API accepts. */
+export const ENGAGEMENT_REACTIONS = ["useful", "mind_blown", "insightful", "skeptical", "loved", "hot_take"] as const;
+export const SHARE_PLATFORMS = ["x", "linkedin", "facebook", "other"] as const;
+
+const engagementCount = z.number().int().min(0).max(10_000_000);
+const postKey = {
+  external_id: z.string().regex(EXTERNAL_ID_PATTERN, "must be 1 to 255 printable ASCII characters with no spaces").optional().describe("The article's external_id (from articles[] or already on the Site)."),
+  slug: slug(LIMITS.slug).optional().describe("Or the article's slug on the Site."),
+};
+const onePostKey = (row: { external_id?: string; slug?: string }) => (row.external_id === undefined) !== (row.slug === undefined);
+const ONE_POST_KEY = { message: "give exactly one of external_id or slug", path: ["external_id"] };
+
+export const EngagementDailySchema = z
+  .strictObject({
+    ...postKey,
+    day: z.iso.date({ error: "must be a date, YYYY-MM-DD (UTC)" }).describe("The UTC day: any finished day (not today, which is counted live)."),
+    views: engagementCount.optional(),
+    reactions: z
+      .union([engagementCount, z.strictObject(Object.fromEntries(ENGAGEMENT_REACTIONS.map((r) => [r, engagementCount.optional()])))])
+      .optional()
+      .describe("That day's reactions: a number, or per type (Writavo keeps the day's total; the per-type counts come from reactions[])."),
+    shares: z.strictObject(Object.fromEntries(SHARE_PLATFORMS.map((p) => [p, engagementCount.optional()]))).optional(),
+  })
+  .refine(onePostKey, ONE_POST_KEY);
+
+export const EngagementReactionSchema = z
+  .strictObject({
+    ...postKey,
+    visitor_id: z.string().min(1).max(200).describe("The visitor's anonymous id at the old blog. Hashed by Writavo, never stored raw."),
+    reaction: z.enum(ENGAGEMENT_REACTIONS),
+    set_at: dateTime.describe("When the visitor made this pick."),
+  })
+  .refine(onePostKey, ONE_POST_KEY);
+
+const ENGAGEMENT_DESCRIPTION =
+  "Optional engagement history (views, reactions, shares per post). Imported after every article; each row SETS the totals for its post and day (replacing whatever that day held), so re-running never double-counts. Any finished day; not today, which is counted live.";
+
+/** The section as documented (the JSON Schema): every row typed. */
+export const EngagementSchema = z
+  .strictObject({
+    daily: z.array(EngagementDailySchema).optional().describe("Per post per day: views, reactions, shares."),
+    reactions: z.array(EngagementReactionSchema).optional().describe("Each visitor's current reaction per post."),
+  })
+  .describe(ENGAGEMENT_DESCRIPTION);
+
+/** The section as parsed: rows left unparsed, so each is checked (and reported) on its own. */
+export const EngagementEnvelopeSchema = z.strictObject({
+  daily: z.array(z.unknown()).optional(),
+  reactions: z.array(z.unknown()).optional(),
+});
+
+export type EngagementDaily = z.infer<typeof EngagementDailySchema>;
+export type EngagementReaction = z.infer<typeof EngagementReactionSchema>;
 
 export const PublishedArticleSchema = z.strictObject({
   ...articleFields,
@@ -214,6 +292,7 @@ const documentFields = {
   authors: z.array(AuthorSchema).optional(),
   categories: z.array(CategorySchema).optional(),
   tags: z.array(TagSchema).optional(),
+  engagement: EngagementSchema.optional(),
 };
 
 export const ImportDocumentSchema = z
@@ -229,6 +308,9 @@ export const ImportDocumentSchema = z
  */
 export const ImportEnvelopeSchema = z.strictObject({
   ...documentFields,
+  // Rows are checked one by one (validate.ts), so one bad row is reported and skipped rather than
+  // failing the document or the articles.
+  engagement: EngagementEnvelopeSchema.optional(),
   articles: z.array(z.unknown()).min(1),
 });
 
@@ -337,9 +419,27 @@ Top level:
     article is and labels it inspiration (85%+ original) or rewrite; without it, originality_pct
     is kept as the old system's reported figure. metrics: seo_score, organic_traffic, backlinks,
     referring_domains, ranking_keywords, top10_keywords.
+  - cost_history: optional. What producing the article cost in the old system, for the record:
+    [{ cost_usd, stage?, provider?, calls?, tokens?, occurred_on? (YYYY-MM-DD), description? }], at most
+    500. Shown beside Writavo's own costs for the article, never billed and never counted against
+    a spend cap. Sending it again replaces what was imported before.
   - published_at: required when published. When the article was FIRST published at the source,
     ISO 8601 with a timezone, in the past, not before 1990.
   - content_updated_at: optional. When its content last changed. Not before published_at.
+
+Engagement (optional, top level): the old blog's views, reactions and shares, so a migrated blog
+keeps its counts. { daily: [...], reactions: [...] }, every row keyed by external_id (an article
+in this document or already on the Site) or slug:
+- daily: [{ external_id | slug, day (YYYY-MM-DD, UTC; any finished day, not today), views?,
+  reactions? (a number, or per type: ${ENGAGEMENT_REACTIONS.join(", ")}), shares? ({ ${SHARE_PLATFORMS.join(", ")} }) }].
+  Each row SETS that post's totals for that day, replacing whatever the day held, so re-running
+  never double-counts. Writavo keeps a day's reactions as a total; the per-type counts on a post
+  come from reactions[].
+- reactions: [{ external_id | slug, visitor_id, reaction, set_at }]: each visitor's current pick.
+  visitor_id is the anonymous id the old blog gave the visitor; Writavo stores only a hash of it,
+  and when the new site sends the same id, the visitor still sees their pick.
+It is sent after every article is imported; a bad row is reported and skipped, never a reason to
+refuse the articles.
 
 Images: inline markdown images ![alt](https://...), featured images, how-to step images and
 author avatars are copied into the Site's media library and the URLs rewritten, unless

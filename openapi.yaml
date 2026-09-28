@@ -259,6 +259,12 @@ tags:
       internal links, LLM mentions, engagement, backlinks, the disavow list and link
       opportunities. Reads and curation are free; the seven scans marked `x-spends-credits` or
       `x-spends-money` cost money and always need a person's approval when an AI agent asks.
+  - name: Engagement
+    x-mcp-surface: action
+    description: |
+      Bringing a migrated blog's engagement history with it: per post per day views, reactions and
+      share clicks, and each reader's current reaction. Recording live engagement and reading an
+      article's counters are under SEO.
   - name: Outreach
     x-mcp-surface: action
     description: |
@@ -949,6 +955,94 @@ paths:
         "422": { $ref: "#/components/responses/ValidationFailed" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /articles/{id}/cost-history:
+    parameters:
+      - $ref: "#/components/parameters/ArticleId"
+    post:
+      operationId: setArticleCostHistory
+      tags: [Articles]
+      summary: Set an article's imported cost history
+      description: |
+        Records what producing the article cost in the system it was imported from (its API
+        spend), for the record. The list REPLACES every entry imported for this article before, so
+        sending the same list again changes nothing, and an empty list clears it.
+
+        This is history for display, kept apart from Writavo's own cost ledger: it is shown beside
+        Writavo's measured costs in `GET /insights/articles/{id}/costs` (as `imported_total_usd` and
+        `imported`) and in the dashboard, and it is **never** billed, counted against a spend cap,
+        or added to credits, usage or the cost overview.
+
+        Each entry is checked on its own: problems come back in `problems` and valid entries are
+        written. `import_content` sends each article's `cost_history` here.
+      x-scope: articles:write
+      x-permission: articles.write
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-cross-tenant: 404
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyRequired"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [entries]
+              additionalProperties: false
+              properties:
+                entries:
+                  type: array
+                  maxItems: 500
+                  items:
+                    type: object
+                    required: [cost_usd]
+                    additionalProperties: false
+                    properties:
+                      cost_usd: { type: number, minimum: 0, maximum: 100000, description: "What it cost, in US dollars." }
+                      stage: { type: string, maxLength: 60, description: "What it paid for: research, generate, images..." }
+                      provider: { type: string, maxLength: 60, description: "Who was paid: openai, dataforseo..." }
+                      calls: { type: integer, minimum: 0 }
+                      tokens: { type: integer, minimum: 0 }
+                      occurred_on: { type: string, format: date, description: "Not in the future; not before 1990." }
+                      description: { type: string, maxLength: 500 }
+            examples:
+              history:
+                value: { entries: [ { stage: generate, provider: openai, cost_usd: 0.0421, calls: 3, tokens: 18250, occurred_on: "2026-05-10" } ] }
+      responses:
+        "200":
+          description: The article's imported cost history, as now stored.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [article_id, imported_total_usd, entries, problems]
+                        properties:
+                          article_id: { type: string, format: uuid }
+                          imported_total_usd: { type: number }
+                          entries: { type: array, items: { $ref: "#/components/schemas/ArticleCostEntry" } }
+                          problems:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                index: { type: integer }
+                                error: { type: string }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/InternalError" }
 
   /articles/{id}/unpublish:
@@ -6070,6 +6164,126 @@ paths:
         "503": { $ref: "#/components/responses/Maintenance" }
         "500": { $ref: "#/components/responses/InternalError" }
 
+  /engagement/import:
+    post:
+      operationId: importEngagement
+      tags: [Engagement]
+      summary: Import engagement history
+      description: |
+        Bring a blog's engagement history to Writavo when it migrates: views, reactions and share
+        clicks per article per day, and each reader's current reaction. Articles are matched by
+        `external_id` or `slug` on this Site, in any status. Call it from a server with a secret key.
+
+        **SET, never add.** A `daily` row replaces that article's counts for that day: each field
+        you send (`views`, `reactions`, `shares`) replaces that field, a field you leave out keeps
+        its stored value (0 on a new day), and `shares` replaces all four platforms (a platform you
+        do not name becomes 0). A `reactions` row replaces that reader's current reaction on that
+        article. Sending the same payload twice changes nothing, so a retried or repeated import can
+        never double-count.
+
+        **Which days.** Any UTC day from 1990-01-01 up to yesterday, including days that already
+        have live counts: the import replaces them. Today is refused only because Writavo rewrites
+        today's counts from the live events every hour, so an import for today would be overwritten
+        within the hour; import it tomorrow. `set_at` on a reaction may be any past instant.
+
+        **Reactions.** Writavo keeps a per-day reaction TOTAL and, separately, one current reaction
+        per reader (which is what the per-type counts are made of). A `daily` row's `reactions` may
+        be a number or per-type counts, which are summed. An imported reader's reaction replaces a
+        live one and moves the day totals like a live change does (one off the day the old reaction
+        was made, one onto the day of `set_at`). Daily rows are applied after reactions, so a day
+        whose total you send explicitly ends at exactly that number.
+
+        **Dry run first.** `dry_run` defaults to true: every row is checked and matched, `posts`
+        and `problems` are reported, and nothing is written. Send `dry_run: false` to write. A row
+        with a problem is skipped and listed in `problems`; the valid rows are still written.
+
+        Imported rows are marked as imported internally and count everywhere exactly like live
+        engagement: the public counters, the dashboard and `GET /seo/engagement`. `visitor_id` is
+        hashed with the Site's id before it is stored, the same way `POST /engagement/events` does,
+        so a reader keeps their imported reaction when they come back. Each applied import is
+        recorded in the audit log with its counts.
+      x-scope: engagement:write
+      x-permission: articles.write
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-agent-consequence: Sets the imported articles' view, reaction and share counts for the days sent, replacing what was stored for those days.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyRequired"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EngagementImportInput" }
+            examples:
+              dry_run:
+                summary: Check two days and two readers' reactions, write nothing
+                value:
+                  daily:
+                    - external_id: "blog:1"
+                      day: "2026-05-10"
+                      views: 120
+                      reactions: { useful: 2, insightful: 1 }
+                      shares: { x: 1, linkedin: 3 }
+                    - slug: how-to-choose-a-headless-cms
+                      day: "2026-05-11"
+                      views: 87
+                  reactions:
+                    - external_id: "blog:1"
+                      visitor_id: anon_7f3a9c
+                      reaction: useful
+                      set_at: "2026-05-10T14:03:00Z"
+              apply:
+                summary: Write the same rows
+                value:
+                  dry_run: false
+                  daily:
+                    - external_id: "blog:1"
+                      day: "2026-05-10"
+                      views: 120
+                      reactions: 3
+                      shares: { x: 1, linkedin: 3 }
+      responses:
+        "200":
+          description: The report. With `dry_run` it describes what would be written.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/EngagementImportResult" }
+              examples:
+                applied:
+                  summary: One article imported, one row skipped
+                  value:
+                    ok: true
+                    data:
+                      dry_run: false
+                      written: { daily: 1, share_rows: 2, picks: 1 }
+                      posts:
+                        - slug: how-to-choose-a-headless-cms
+                          external_id: "blog:1"
+                          days: 1
+                          views: 120
+                          reactions: 3
+                          shares: 4
+                          picks: 1
+                      problems:
+                        - section: daily
+                          index: 1
+                          error: no article with this slug on this Site
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
   /engagement/posts/{slug}:
     get:
       operationId: getPostEngagement
@@ -8351,6 +8565,10 @@ paths:
       description: |
         What one article cost to research, write, improve and illustrate, by stage and by provider.
         Zero for an article written by hand.
+
+        An imported article can also carry its production cost in the system it came from:
+        `imported_total_usd` and the `imported` entries. That history is shown beside Writavo's own
+        cost and is never added into `total_usd`, billing, credits or spending limits.
       x-scope: insights:read
       x-permission: analytics.view
       x-entitlement: none
@@ -10064,6 +10282,125 @@ components:
         user_reaction:
           type: [string, "null"]
           description: The reader's current reaction when visitor_id was sent, else null.
+
+    EngagementImportInput:
+      type: object
+      additionalProperties: false
+      description: |
+        At most 5,000 `daily` rows and 10,000 `reactions` rows per call; split a larger history
+        into several calls (each row SETs, so the order of calls does not matter). A body that is
+        not this shape, or is over a cap, is refused whole with 422; a bad ROW is only skipped and
+        reported in `problems`.
+      properties:
+        dry_run:
+          type: boolean
+          default: true
+          description: Check and report without writing. Defaults to true; send false to write.
+        daily:
+          type: array
+          maxItems: 5000
+          description: Per article per UTC day, views, the reaction total and shares per platform.
+          items: { $ref: "#/components/schemas/EngagementImportDay" }
+        reactions:
+          type: array
+          maxItems: 10000
+          description: Each reader's current reaction per article. One row per reader and article.
+          items: { $ref: "#/components/schemas/EngagementImportPick" }
+
+    EngagementImportDay:
+      type: object
+      additionalProperties: false
+      required: [day]
+      description: Give exactly one of `external_id` or `slug`, and at least one of `views`, `reactions`, `shares`.
+      properties:
+        external_id: {type: string, pattern: "^[!-~]{1,255}$", description: The article's external_id on this Site.}
+        slug: {type: string, minLength: 1, maxLength: 200, description: Or the article's slug on this Site.}
+        day:
+          type: string
+          format: date
+          description: The UTC day, from 1990-01-01 to yesterday. Today is refused (the hourly rollup owns it).
+        views: {type: integer, minimum: 0, maximum: 10000000, description: That day's views. Replaces the stored value.}
+        reactions:
+          description: That day's reaction total, or counts per reaction (summed; at most 10,000,000 in all).
+          oneOf:
+            - {type: integer, minimum: 0, maximum: 10000000}
+            - type: object
+              additionalProperties: false
+              properties:
+                useful: {type: integer, minimum: 0, maximum: 10000000}
+                mind_blown: {type: integer, minimum: 0, maximum: 10000000}
+                insightful: {type: integer, minimum: 0, maximum: 10000000}
+                skeptical: {type: integer, minimum: 0, maximum: 10000000}
+                loved: {type: integer, minimum: 0, maximum: 10000000}
+                hot_take: {type: integer, minimum: 0, maximum: 10000000}
+        shares:
+          type: object
+          additionalProperties: false
+          description: Share clicks per platform. Replaces all four; a platform left out becomes 0.
+          properties:
+            x: {type: integer, minimum: 0, maximum: 10000000}
+            linkedin: {type: integer, minimum: 0, maximum: 10000000}
+            facebook: {type: integer, minimum: 0, maximum: 10000000}
+            other: {type: integer, minimum: 0, maximum: 10000000, description: Copied links and system share sheets.}
+
+    EngagementImportPick:
+      type: object
+      additionalProperties: false
+      required: [visitor_id, reaction, set_at]
+      description: Give exactly one of `external_id` or `slug`.
+      properties:
+        external_id: {type: string, pattern: "^[!-~]{1,255}$", description: The article's external_id on this Site.}
+        slug: {type: string, minLength: 1, maxLength: 200, description: Or the article's slug on this Site.}
+        visitor_id:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: |
+            The reader's anonymous id at the old blog. Hashed with the Site's id before it is stored,
+            the same way POST /engagement/events hashes it; never stored raw.
+        reaction: {type: string, enum: [useful, mind_blown, insightful, skeptical, loved, hot_take]}
+        set_at:
+          type: string
+          format: date-time
+          description: When the reader made this reaction, with a timezone. Not in the future, not before 1990.
+
+    EngagementImportResult:
+      type: object
+      required: [dry_run, written, posts, problems]
+      properties:
+        dry_run: {type: boolean}
+        written:
+          type: object
+          description: What this call wrote. All zeros on a dry run.
+          required: [daily, share_rows, picks]
+          properties:
+            daily: {type: integer, description: Days set (one per valid daily row).}
+            share_rows: {type: integer, description: Per-platform share rows written (platforms above 0).}
+            picks: {type: integer, description: Readers' reactions that changed. An identical reaction is not rewritten, so a repeat reports 0.}
+        posts:
+          type: array
+          description: Per matched article, what the valid rows carry (the same on a dry run).
+          items:
+            type: object
+            required: [slug, external_id, days, views, reactions, shares, picks]
+            properties:
+              slug: {type: string}
+              external_id: {type: [string, "null"]}
+              days: {type: integer}
+              views: {type: integer}
+              reactions: {type: integer}
+              shares: {type: integer}
+              picks: {type: integer}
+        problems:
+          type: array
+          description: The rows that were skipped, and why.
+          items:
+            type: object
+            required: [section, index, error]
+            properties:
+              section: {type: string, enum: [daily, reactions]}
+              index: {type: integer, description: The row's position in its array, from 0.}
+              error: {type: string}
 
     PipelineStage:
       type: string
@@ -13597,10 +13934,10 @@ components:
 
     ArticleCosts:
       type: object
-      required: [article_id, total_usd, by_stage, by_provider]
+      required: [article_id, total_usd, by_stage, by_provider, imported_total_usd, imported]
       properties:
         article_id: {type: string, format: uuid}
-        total_usd: {type: number}
+        total_usd: {type: number, description: "Writavo's own measured cost for this article."}
         by_stage:
           type: array
           items:
@@ -13619,6 +13956,27 @@ components:
               provider: {type: string}
               cost_usd: {type: number}
               calls: {type: integer}
+        imported_total_usd:
+          type: number
+          description: |
+            The sum of `imported`: what the article cost in the system it was imported from. Display
+            only; never part of `total_usd`. 0 when there is none.
+        imported:
+          type: array
+          description: The imported production cost entries, in the order they were recorded.
+          items: { $ref: "#/components/schemas/ArticleCostEntry" }
+
+    ArticleCostEntry:
+      type: object
+      required: [stage, provider, cost_usd, calls, tokens, occurred_on, description]
+      properties:
+        stage: {type: [string, "null"], description: "A free label, e.g. research, generate, images."}
+        provider: {type: [string, "null"]}
+        cost_usd: {type: number}
+        calls: {type: [integer, "null"]}
+        tokens: {type: [integer, "null"]}
+        occurred_on: {type: [string, "null"], format: date}
+        description: {type: [string, "null"]}
 
     TaxonomyCounts:
       type: object
