@@ -2,45 +2,45 @@
  * Writavo MCP server, smoke test.
  * =================================================================================
  *
- * Runs entirely offline. It covers every API-6 acceptance test that does not need a deployed API,
- * which at the time of writing is all of them except the live round trip:
+ * Runs entirely offline, against the runtime-agnostic core the hosted server at
+ * https://mcp.writavo.com/mcp mounts (the only Writavo MCP server; the npm stdio package is
+ * discontinued, owner ruling 2026-09-28). It covers every API-6 acceptance test that does not need
+ * a deployed API:
  *
- *   1  the package builds and the generated surface is coherent
- *   2  a REAL MCP client handshake over stdio: initialize, tools/list, resources/list,
- *      prompts/list, tools/call, with every stdout frame asserted to be a protocol message
+ *   1  the generated surface is coherent
+ *   2  a real MCP client (in memory) against the core with no key: initialize, the hosted
+ *      instructions, tools/list, resources/list, prompts/list, and the calls that need no key
  *   4  the no-key experience, with the real links
  *   5  the scope probe: a publishable key naming the scope it lacks
  *   6  the credit probe: an exhausted balance producing an actionable message with a billing link
  *   7  the confirmation probe, asserted by counting requests that reached the API (zero)
  *   8  the leak probe, including an API that echoes the key back in an error
  *  10  the em-dash ban across every user-visible string
- *  11  the saved sign-in: file permissions, round trip, expiry and precedence
- *  12  browser sign-in end to end against a stub: start, poll, approve, key in use, logout
  *  13  the plan purchase link
- *  14  the importer: validation, dry run, apply, re-run as a no-op, update, and content kept
- *      verbatim except for re-hosted image URLs
- *  15  MCP-2: the runtime-agnostic core as the hosted server mounts it (the tool list minus the
- *      sign-in tools, annotations on every tool, inline import and base64 upload), approvals
- *      (approval_id on gated tools, a 428 turned into an instruction, the refusal codes), the
- *      Writavo-Mcp-Tool header, logout revoking the key, the key auto-extension, the generator's
- *      handling of x-writavo-approval and of the host-owned /auth/key/* routes, and the core's
- *      import graph staying free of the filesystem and the environment
+ *  14  the importer, through stored imports (the hosted import jobs): validation, dry run, apply,
+ *      re-run as a no-op, update in place by a part sent with the import_id, retry_failed, and
+ *      content kept verbatim except for re-hosted image URLs
+ *  14b stored imports: one-pass checks, parts, upload links, leases, request budgets
+ *  15  MCP-2: the core as the Worker mounts it (the tool list, annotations on every tool, inline
+ *      import and base64 upload), approvals (approval_id on gated tools, a 428 turned into an
+ *      instruction, the refusal codes), the Writavo-Mcp-Tool header, the generator's handling of
+ *      x-writavo-approval and of the host-owned /auth/key/* routes, the package manifests, and the
+ *      whole package's import graph staying free of the filesystem and the environment
  *  16  MCP-3: the actions catalog (a fixture specification through the real generator), the
  *      search ranking, run_writavo_action's schema validation, unknown-operation refusal, the
- *      confirmation step and the approval passthrough, both hosts, and the new instructions
+ *      confirmation step and the approval passthrough, and the hosted instructions
  *
  * The live round trip is scripts/integration.ts, which needs a real key and a deployed API.
  *
  *   pnpm --filter @writavo/mcp-server smoke
  */
 
-import { spawn, spawnSync } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { dirname, join, relative } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 
 // upload_media and import_content fetch images from URLs the caller names, which is exactly what
@@ -49,7 +49,6 @@ const OPEN_WORLD_TOOLS = new Set(["upload_media", "import_content"]);
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = join(HERE, "..");
-const ENTRYPOINT = join(PACKAGE_ROOT, "dist", "index.js");
 
 const SECRET_KEY = "wv_sk_smoke0000000000000000000000000000000000";
 const PUBLISHABLE_KEY = "wv_pub_smoke00000000000000000000000000000000";
@@ -68,9 +67,7 @@ function check(name: string, ok: boolean, detail = ""): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// A stub API on loopback. The server only accepts a base URL override for a loopback address,
-// which is the point: this harness can exist without opening a route for a key to be sent
-// anywhere else.
+// A stub API on loopback, passed to the core as its apiBase exactly as the Worker passes its own.
 // ---------------------------------------------------------------------------
 interface StubRequest {
   method: string;
@@ -136,257 +133,26 @@ class StubApi {
 }
 
 // ---------------------------------------------------------------------------
-// A real MCP client, speaking the protocol over stdio to the real entrypoint.
-// ---------------------------------------------------------------------------
-interface RpcMessage {
-  jsonrpc?: string;
-  id?: number;
-  result?: Record<string, unknown>;
-  error?: { code: number; message: string };
-  method?: string;
-}
-
-async function clientProbe(): Promise<void> {
-  console.log("\n[ 2. A real MCP client over stdio, no key configured ]");
-
-  const child = spawn(process.execPath, [ENTRYPOINT], {
-    stdio: ["pipe", "pipe", "pipe"],
-    // Deliberately no WRITAVO_API_KEY: the tool list must load for someone who has not signed up.
-    env: { ...process.env, WRITAVO_API_KEY: "", WRITAVO_API_BASE_URL: "" },
-  });
-
-  const frames: RpcMessage[] = [];
-  const badLines: string[] = [];
-  let stderr = "";
-  let buffer = "";
-
-  child.stdout.setEncoding("utf8");
-  child.stdout.on("data", (chunk: string) => {
-    buffer += chunk;
-    const lines = buffer.split("\n");
-    buffer = lines.pop() ?? "";
-    for (const line of lines) {
-      if (line.trim() === "") continue;
-      try {
-        frames.push(JSON.parse(line) as RpcMessage);
-      } catch {
-        // API-6 non-negotiable 2: on a stdio server, anything on stdout that is not a protocol
-        // message breaks the connection. A line that does not parse is the whole failure mode.
-        badLines.push(line);
-      }
-    }
-  });
-  child.stderr.setEncoding("utf8");
-  child.stderr.on("data", (chunk: string) => {
-    stderr += chunk;
-  });
-
-  const send = (message: Record<string, unknown>): void => {
-    child.stdin.write(`${JSON.stringify(message)}\n`);
-  };
-
-  const waitFor = (id: number, timeoutMs = 15_000): Promise<RpcMessage> =>
-    new Promise((resolve, reject) => {
-      const started = Date.now();
-      const poll = setInterval(() => {
-        const found = frames.find((f) => f.id === id);
-        if (found) {
-          clearInterval(poll);
-          resolve(found);
-        } else if (Date.now() - started > timeoutMs) {
-          clearInterval(poll);
-          reject(new Error(`no reply to request ${id} within ${timeoutMs}ms. stderr: ${stderr.slice(0, 400)}`));
-        } else if (child.exitCode !== null) {
-          clearInterval(poll);
-          reject(new Error(`the server exited with code ${child.exitCode}. stderr: ${stderr.slice(0, 400)}`));
-        }
-      }, 25);
-    });
-
-  try {
-    send({
-      jsonrpc: "2.0",
-      id: 1,
-      method: "initialize",
-      params: {
-        protocolVersion: "2025-06-18",
-        capabilities: {},
-        clientInfo: { name: "writavo-mcp-smoke", version: "1.0.0" },
-      },
-    });
-    const initialized = await waitFor(1);
-    check(
-      "the server completes the MCP initialize handshake",
-      Boolean(initialized.result?.serverInfo),
-      JSON.stringify(initialized).slice(0, 300),
-    );
-    const serverInfo = initialized.result?.serverInfo as { name?: string; version?: string } | undefined;
-    check("it identifies itself as writavo with a version", serverInfo?.name === "writavo" && Boolean(serverInfo?.version));
-    const stdioInstructions = String((initialized.result as { instructions?: string } | undefined)?.instructions ?? "");
-    check(
-      `the stdio instructions (${stdioInstructions.length} characters) stay under 6000, point at the actions and carry no dashes`,
-      stdioInstructions.length > 0 && stdioInstructions.length < 6000 && stdioInstructions.includes("search_writavo_actions") &&
-        stdioInstructions.includes("run_writavo_action") && stdioInstructions.includes("read_writavo_action") && !/[\u2014\u2013]/.test(stdioInstructions),
-    );
-
-    send({ jsonrpc: "2.0", method: "notifications/initialized" });
-
-    send({ jsonrpc: "2.0", id: 2, method: "tools/list" });
-    const listed = await waitFor(2);
-    const tools = (listed.result?.tools ?? []) as {
-      name: string;
-      description: string;
-      inputSchema: { properties?: Record<string, unknown> };
-      annotations?: Record<string, unknown>;
-    }[];
-    const { OPERATIONS } = await import("../src/generated/operations.js");
-    const { LOCAL_TOOL_NAMES } = await import("../src/server.js");
-    check(
-      `the tool list loads: ${tools.length} tools`,
-      tools.length === OPERATIONS.length + LOCAL_TOOL_NAMES.length,
-      `expected ${OPERATIONS.length + LOCAL_TOOL_NAMES.length} (${OPERATIONS.length} generated plus ${LOCAL_TOOL_NAMES.join(", ")}), got ${tools.length}`,
-    );
-    check(
-      "every hand-written tool is listed",
-      LOCAL_TOOL_NAMES.every((name) => tools.some((t) => t.name === name)),
-      LOCAL_TOOL_NAMES.filter((name) => !tools.some((t) => t.name === name)).join(", "),
-    );
-    check(
-      "every tool carries a description and an input schema",
-      tools.every((t) => t.description && t.description.length > 40 && t.inputSchema),
-      tools.filter((t) => !t.description || t.description.length <= 40).map((t) => t.name).join(", "),
-    );
-
-    check(
-      "every stdio tool carries annotations",
-      tools.every((t) => typeof t.annotations?.readOnlyHint === "boolean" && t.annotations?.openWorldHint === OPEN_WORLD_TOOLS.has(t.name)),
-      tools.filter((t) => !t.annotations).map((t) => t.name).join(", "),
-    );
-    const props = (name: string) => Object.keys(tools.find((t) => t.name === name)?.inputSchema?.properties ?? {});
-    check(
-      "the stdio import_content and upload_media also take a local path",
-      ["data", "path"].every((p) => props("import_content").includes(p)) && ["path", "url", "base64"].every((p) => props("upload_media").includes(p)),
-      `${props("import_content").join(",")} | ${props("upload_media").join(",")}`,
-    );
-
-    send({ jsonrpc: "2.0", id: 3, method: "resources/list" });
-    const resources = ((await waitFor(3)).result?.resources ?? []) as { uri: string }[];
-    check(
-      "the four resources are listed, including the import format",
-      resources.length === 4 && resources.some((r) => r.uri === "writavo://import-format"),
-      resources.map((r) => r.uri).join(", "),
-    );
-
-    send({ jsonrpc: "2.0", id: 4, method: "prompts/list" });
-    const prompts = ((await waitFor(4)).result?.prompts ?? []) as { name: string }[];
-    check(
-      "all three prompts are listed",
-      prompts.length === 3 &&
-        ["draft-article", "publish-checklist", "migrate-content"].every((name) => prompts.some((p) => p.name === name)),
-      prompts.map((p) => p.name).join(", "),
-    );
-
-    send({
-      jsonrpc: "2.0",
-      id: 5,
-      method: "tools/call",
-      params: { name: "get_api_docs", arguments: { section: "overview" } },
-    });
-    const docs = await waitFor(5);
-    const docsText = JSON.stringify(docs.result ?? {});
-    check(
-      "get_api_docs answers with no key configured",
-      docs.result?.isError !== true && docsText.includes("Writavo Content API"),
-      docsText.slice(0, 300),
-    );
-
-    send({
-      jsonrpc: "2.0",
-      id: 6,
-      method: "tools/call",
-      params: { name: "list_articles", arguments: {} },
-    });
-    const refused = await waitFor(6);
-    const refusedText = JSON.stringify(refused.result ?? {});
-    check(
-      "a key-requiring tool returns the actionable no-key message",
-      refused.result?.isError === true &&
-        refusedText.includes("app.writavo.com/settings/api-keys") &&
-        refusedText.includes("app.writavo.com/signup"),
-      refusedText.slice(0, 400),
-    );
-
-    send({ jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "login_status", arguments: {} } });
-    const status = JSON.stringify((await waitFor(7)).result ?? {});
-    check("login_status answers with no key: not signed in", status.includes("Not signed in"), status.slice(0, 200));
-
-    send({ jsonrpc: "2.0", id: 8, method: "tools/call", params: { name: "import_content", arguments: {} } });
-    const format = await waitFor(8);
-    const formatText = JSON.stringify(format.result ?? {});
-    check(
-      "import_content with no file describes the format, with no key",
-      format.result?.isError !== true && formatText.includes("writavo-import") && formatText.includes("JSON Schema"),
-      formatText.slice(0, 200),
-    );
-
-    send({ jsonrpc: "2.0", id: 9, method: "resources/read", params: { uri: "writavo://import-format" } });
-    const resource = JSON.stringify((await waitFor(9)).result ?? {});
-    check("the import format resource reads", resource.includes("external_id") && resource.includes("json-schema.org/draft/2020-12"), resource.slice(0, 200));
-
-    // Everything above ran on one connection. If a stray write had corrupted the stream the
-    // requests after it would never have been answered.
-    check("nothing extraneous was written to stdout", badLines.length === 0, badLines.slice(0, 3).join(" | "));
-    check(
-      "every stdout frame is a JSON-RPC message",
-      frames.every((f) => f.jsonrpc === "2.0"),
-      JSON.stringify(frames.filter((f) => f.jsonrpc !== "2.0")).slice(0, 200),
-    );
-    check("the client is still connected after nine exchanges", child.exitCode === null);
-    check("no key material appeared on stderr", !/wv_(sk|pub)_[A-Za-z0-9]/.test(stderr), stderr.slice(0, 200));
-  } finally {
-    child.kill();
-  }
-}
-
-// ---------------------------------------------------------------------------
 async function main(): Promise<void> {
   console.log("================================================");
   console.log("  Writavo MCP server, smoke test (offline)");
   console.log("================================================");
 
-  if (!existsSync(ENTRYPOINT)) {
-    console.error(`\nBuild first: no ${ENTRYPOINT}. Run \`pnpm --filter @writavo/mcp-server build\`.`);
-    process.exit(2);
-  }
-
-  // The stub has to exist before the modules under test are imported, because the base URL is read
-  // once at import time and cannot be changed afterwards. That is the property being relied on.
   const stub = new StubApi();
   const baseUrl = await stub.listen();
-  process.env.WRITAVO_API_BASE_URL = baseUrl;
-  process.env.WRITAVO_API_KEY = "";
-  // A private config directory, so a real saved sign-in on this machine is never read, used or
-  // overwritten by the test. Every child process below inherits it.
-  process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), "writavo-mcp-smoke-"));
 
-  const { CONFIG, redact, NO_API_KEY_MESSAGE, activateKey, clearKey } = await import("../src/config.js");
+  const { createWritavoMcpServer, toolContext, CORE_LOCAL_TOOL_NAMES, VERSION, redact } = await import("../src/core/index.js");
   const { OPERATIONS, REFUSALS } = await import("../src/generated/operations.js");
   const { ERROR_CATALOG } = await import("../src/generated/errors.js");
   const { REFERENCE_SECTIONS } = await import("../src/generated/reference.js");
   const { callOperation } = await import("../src/tools/call.js");
-  const { STDIO_CONTEXT } = await import("../src/stdio/context.js");
-  const { IMPORT_FILES, MEDIA_FILES } = await import("../src/stdio/files.js");
   const { handleGetApiDocs } = await import("../src/tools/api-docs.js");
   const { handleUploadMedia } = await import("../src/tools/upload-media.js");
   const { inputShapeFor } = await import("../src/tools/schema.js");
-  const { keySource, hasApiKey, loginIdentity } = await import("../src/config.js");
-  const { LOGIN, LOGIN_STATUS, LOGOUT, handleLogin, handleLoginStatus, handleLogout } = await import("../src/tools/login.js");
   const { START_PLAN_PURCHASE, handleStartPlanPurchase } = await import("../src/tools/plan-purchase.js");
   const { IMPORT_CONTENT, handleImportContent, importContentTool } = await import("../src/tools/import-content.js");
-  const { UPLOAD_MEDIA, uploadMediaTool } = await import("../src/tools/upload-media.js");
+  const { UPLOAD_MEDIA } = await import("../src/tools/upload-media.js");
   const { NOT_SIGNED_IN_REMOTE } = await import("../src/core/messages.js");
-  const { DEFAULT_SCOPES } = await import("../src/auth/device.js");
-  const { credentialsPath, deleteCredentials, readCredentials, writeCredentials } = await import("../src/credentials.js");
   const { IMPORT_FORMAT_GUIDE, IMPORT_SAMPLE, ImportDocumentSchema, importFormatJsonSchema } = await import("../src/import/format.js");
   const { migrateContentPrompt } = await import("../src/prompts/migrate-content.js");
 
@@ -396,6 +162,48 @@ async function main(): Promise<void> {
     const found = OPERATIONS.find((o) => o.tool === tool);
     if (!found) throw new Error(`no generated operation for ${tool}`);
     return found;
+  };
+  const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+  const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+
+  // The connection's key, as the Worker hands it to the core per request: null is "not signed in".
+  let currentKey: string | null = null;
+  const USER_AGENT = `writavo-mcp-server/${VERSION}`;
+  const CTX = toolContext({ apiKey: () => currentKey, apiBase: baseUrl, userAgent: USER_AGENT, host: "remote" });
+
+  // A store that behaves like the Worker's Durable Objects: scoped to one owner, strongly
+  // consistent. Every import below runs through one, as every import on the hosted server does.
+  type ImportJobStore = import("../src/import/jobs.js").ImportJobStore;
+  const jobRows = new Map<string, { owner: string; doc: string | null; progress: string | null; lease?: { holder: string; until: number }; uploadHash?: string }>();
+  const memStore = (owner: string): ImportJobStore => {
+    const row = (id: string) => {
+      const r = jobRows.get(id);
+      return r && r.owner === owner ? r : null;
+    };
+    return {
+      async create() {
+        const id = `imp_${randomUUID().replace(/-/g, "").slice(0, 22)}`;
+        jobRows.set(id, { owner, doc: null, progress: null });
+        return id;
+      },
+      async info(id) {
+        const r = row(id);
+        return r ? { status: r.doc === null ? "awaiting_upload" : "ready", bytes: r.doc?.length ?? 0, created_at: "", updated_at: "" } : null;
+      },
+      async getDocument(id) { return row(id)?.doc ?? null; },
+      async putDocument(id, json) { const r = row(id); if (!r) throw new Error("gone"); r.doc = json; },
+      async readProgress(id) { return row(id)?.progress ?? null; },
+      async writeProgress(id, json) { const r = row(id); if (!r) throw new Error("gone"); r.progress = json; },
+      async acquire(id, holder, ttl) {
+        const r = row(id);
+        if (!r) return { ok: false, until: null };
+        if (r.lease && r.lease.holder !== holder && r.lease.until > Date.now()) return { ok: false, until: r.lease.until };
+        r.lease = { holder, until: Date.now() + ttl };
+        return { ok: true, until: r.lease.until };
+      },
+      async release(id, holder) { const r = row(id); if (r?.lease?.holder === holder) delete r.lease; },
+      async createUpload(id) { const r = row(id)!; r.uploadHash = "t"; return { url: `https://mcp.example.test/imports/${id}`, token: "T".repeat(43), expires_at: "2099-01-01T00:00:00Z" }; },
+    };
   };
 
   // -- 1. the generated surface ---------------------------------------------
@@ -437,25 +245,117 @@ async function main(): Promise<void> {
     ...REFUSALS.map((r) => r.reason),
     ...ERROR_CATALOG.flatMap((e) => [e.meaning, e.action, ...e.links.map((l) => l.label)]),
     ...REFERENCE_SECTIONS.map((s) => s.body),
-    NO_API_KEY_MESSAGE,
-    ...[LOGIN, LOGIN_STATUS, LOGOUT, START_PLAN_PURCHASE, IMPORT_CONTENT, importContentTool(IMPORT_FILES), UPLOAD_MEDIA, uploadMediaTool(MEDIA_FILES)].map((t) => t.description),
+    ...[START_PLAN_PURCHASE, IMPORT_CONTENT, importContentTool(memStore("g:em-dash")), UPLOAD_MEDIA].map((t) => t.description),
     NOT_SIGNED_IN_REMOTE,
-    migrateContentPrompt({}, "remote").messages[0]!.content.text,
-    IMPORT_FORMAT_GUIDE,
     migrateContentPrompt({}).messages[0]!.content.text,
+    IMPORT_FORMAT_GUIDE,
   ];
   const withDash = userVisible.filter((s) => /[—–]/.test(s));
   check(`10. no em-dash or en-dash in ${userVisible.length} user-visible strings`, withDash.length === 0, withDash[0]?.slice(0, 120) ?? "");
 
+  // -- 2. a real MCP client against the core, no key ---------------------------
+  console.log("\n[ 2. A real MCP client (in memory) against the hosted core, no key ]");
+  {
+    // Deliberately no key: the tool list must load for someone who has not signed in yet.
+    const server = createWritavoMcpServer({ apiKey: () => null, apiBase: baseUrl, userAgent: USER_AGENT, host: "remote" });
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "writavo-mcp-smoke", version: "1.0.0" });
+    await Promise.all([server.connect(serverSide), client.connect(clientSide)]);
+    stub.reset();
+
+    const serverInfo = client.getServerVersion();
+    check("the server completes the MCP initialize handshake and identifies itself as writavo with a version", serverInfo?.name === "writavo" && serverInfo?.version === VERSION);
+    const instructions = client.getInstructions() ?? "";
+    check(
+      `the instructions (${instructions.length} characters) stay under 6000, point at the actions and carry no dashes`,
+      instructions.length > 0 && instructions.length < 6000 && instructions.includes("search_writavo_actions") &&
+        instructions.includes("run_writavo_action") && instructions.includes("read_writavo_action") && !/[\u2014\u2013]/.test(instructions),
+    );
+    check(
+      "the instructions describe the hosted server only: browser sign-in, stored imports, no login tool, no local files",
+      instructions.includes("https://mcp.writavo.com/mcp") && instructions.includes("import_id") && instructions.includes("upload: true") &&
+        !/\blogin(_status)?\b/.test(instructions) && !/on this machine|absolute path|npx|@writavo\/mcp-server/.test(instructions),
+      instructions.slice(0, 300),
+    );
+
+    const tools = (await client.listTools()).tools;
+    check(
+      `the tool list loads: ${tools.length} tools`,
+      tools.length === OPERATIONS.length + CORE_LOCAL_TOOL_NAMES.length,
+      `expected ${OPERATIONS.length + CORE_LOCAL_TOOL_NAMES.length} (${OPERATIONS.length} generated plus ${CORE_LOCAL_TOOL_NAMES.join(", ")}), got ${tools.length}`,
+    );
+    check(
+      "every hand-written tool is listed",
+      CORE_LOCAL_TOOL_NAMES.every((name) => tools.some((t) => t.name === name)),
+      CORE_LOCAL_TOOL_NAMES.filter((name) => !tools.some((t) => t.name === name)).join(", "),
+    );
+    check(
+      "every tool carries a description and an input schema",
+      tools.every((t) => t.description && t.description.length > 40 && t.inputSchema),
+      tools.filter((t) => !t.description || t.description.length <= 40).map((t) => t.name).join(", "),
+    );
+    check(
+      "no tool takes a local path",
+      tools.every((t) => !("path" in ((t.inputSchema as { properties?: object }).properties ?? {}))),
+      tools.filter((t) => "path" in ((t.inputSchema as { properties?: object }).properties ?? {})).map((t) => t.name).join(", "),
+    );
+
+    const resources = (await client.listResources()).resources;
+    check(
+      "the four resources are listed, including the import format",
+      resources.length === 4 && resources.some((r) => r.uri === "writavo://import-format"),
+      resources.map((r) => r.uri).join(", "),
+    );
+    const prompts = (await client.listPrompts()).prompts;
+    check(
+      "all three prompts are listed",
+      prompts.length === 3 && ["draft-article", "publish-checklist", "migrate-content"].every((name) => prompts.some((p) => p.name === name)),
+      prompts.map((p) => p.name).join(", "),
+    );
+    const migrate = JSON.stringify((await client.getPrompt({ name: "migrate-content", arguments: {} })).messages);
+    check(
+      "the migrate-content prompt is the hosted workflow: reconnect, stored imports, background apply",
+      migrate.includes("reconnect") && migrate.includes("upload: true") && migrate.includes("status: true") && !/login_status|absolute\s+path/.test(migrate),
+      migrate.slice(0, 300),
+    );
+
+    const docs = await client.callTool({ name: "get_api_docs", arguments: { section: "overview" } });
+    const docsText = JSON.stringify(docs.content);
+    check("get_api_docs answers with no key", docs.isError !== true && docsText.includes("Writavo Content API"), docsText.slice(0, 300));
+
+    const refused = await client.callTool({ name: "list_articles", arguments: {} });
+    const refusedText = JSON.stringify(refused.content);
+    check(
+      "a key-requiring tool returns the actionable reconnect message",
+      refused.isError === true && refusedText.includes("Reconnect Writavo") && refusedText.includes("https://mcp.writavo.com/mcp") &&
+        refusedText.includes("app.writavo.com/settings/agents"),
+      refusedText.slice(0, 400),
+    );
+
+    const format = await client.callTool({ name: "import_content", arguments: {} });
+    const formatText = JSON.stringify(format.content);
+    check(
+      "import_content with no document describes the format, with no key",
+      format.isError !== true && formatText.includes("writavo-import") && formatText.includes("JSON Schema"),
+      formatText.slice(0, 200),
+    );
+    const resource = JSON.stringify(await client.readResource({ uri: "writavo://import-format" }));
+    check("the import format resource reads", resource.includes("external_id") && resource.includes("json-schema.org/draft/2020-12"), resource.slice(0, 200));
+    const contentTypes = JSON.stringify(await client.readResource({ uri: "writavo://content-types" }));
+    check("the content types resource says to reconnect, with no key", contentTypes.includes("Reconnect Writavo") && !contentTypes.includes("WRITAVO_API_KEY"), contentTypes.slice(0, 200));
+    check("with no key, nothing reached the API", stub.requests.length === 0);
+    await client.close();
+  }
+
   // -- 4. the no-key experience ---------------------------------------------
   console.log("\n[ 4. The no-key experience ]");
-  clearKey();
+  currentKey = null;
   stub.reset();
-  const noKey = await callOperation(STDIO_CONTEXT, operation("list_articles"), {});
+  const noKey = await callOperation(CTX, operation("list_articles"), {});
   check(
-    "a key-requiring tool explains how to get a key, pointing at the hosted server and never at npx",
+    "a key-requiring tool explains how to reconnect, pointing at the hosted server and never at npx",
     noKey.isError === true &&
-      bodyOf(noKey).includes("app.writavo.com/settings/api-keys") &&
+      bodyOf(noKey).includes("app.writavo.com/settings/agents") &&
       bodyOf(noKey).includes("https://mcp.writavo.com/mcp") &&
       !bodyOf(noKey).includes("npx") &&
       !bodyOf(noKey).includes("@writavo/mcp-server"),
@@ -463,16 +363,18 @@ async function main(): Promise<void> {
   );
   check("it made no request at all", stub.requests.length === 0);
   check("get_api_docs still works", !handleGetApiDocs({ section: "authentication" }).isError);
+  const uploadNoKey = await handleUploadMedia(CTX, { url: "https://img.example.test/x.png" });
   check(
-    "upload_media explains the same thing",
-    (await handleUploadMedia(STDIO_CONTEXT, { path: "/tmp/x.png" }, MEDIA_FILES)).isError === true,
+    "upload_media explains the same thing, and fetches nothing",
+    uploadNoKey.isError === true && bodyOf(uploadNoKey).includes("Reconnect Writavo") && stub.requests.length === 0,
+    bodyOf(uploadNoKey).slice(0, 200),
   );
 
   // -- 5. the scope probe ----------------------------------------------------
   console.log("\n[ 5. The scope probe ]");
-  activateKey(PUBLISHABLE_KEY, "env");
+  currentKey = PUBLISHABLE_KEY;
   stub.reset();
-  const scoped = await callOperation(STDIO_CONTEXT, operation("publish_article"), { id: "00000000-0000-4000-8000-000000000000", confirm: true });
+  const scoped = await callOperation(CTX, operation("publish_article"), { id: "00000000-0000-4000-8000-000000000000", confirm: true });
   const scopedBody = bodyOf(scoped);
   check(
     "a publishable key naming the scope it lacks, not a raw 401 or 403",
@@ -485,13 +387,13 @@ async function main(): Promise<void> {
   check("it did not send the key to be refused", stub.requests.length === 0);
 
   // The same code arriving from the API maps to the same answer.
-  activateKey(SECRET_KEY, "env");
+  currentKey = SECRET_KEY;
   stub.reset();
   stub.respond = () => ({
     status: 403,
     body: { ok: false, error: { code: "INSUFFICIENT_SCOPE", message: "This key does not carry the scope this operation needs." } },
   });
-  const apiScope = await callOperation(STDIO_CONTEXT, operation("list_media"), {});
+  const apiScope = await callOperation(CTX, operation("list_media"), {});
   check(
     "a 403 from the API maps to the same actionable answer",
     apiScope.isError === true &&
@@ -510,7 +412,7 @@ async function main(): Promise<void> {
       error: { code: "INSUFFICIENT_CREDITS", message: "This organisation cannot afford the next unit of work.", request_id: "req_smoke" },
     },
   });
-  const credits = await callOperation(STDIO_CONTEXT, operation("trigger_pipeline_run"), { confirm: true });
+  const credits = await callOperation(CTX, operation("trigger_pipeline_run"), { confirm: true });
   const creditsBody = bodyOf(credits);
   check(
     "an exhausted balance produces an actionable message with a billing link",
@@ -527,7 +429,7 @@ async function main(): Promise<void> {
     status: 402,
     body: { ok: false, error: { code: "NOT_ENTITLED", message: "This plan does not include AI generation." } },
   });
-  const entitlement = await callOperation(STDIO_CONTEXT, operation("trigger_pipeline_run"), { confirm: true });
+  const entitlement = await callOperation(CTX, operation("trigger_pipeline_run"), { confirm: true });
   check(
     "a plan failure names the plan feature",
     bodyOf(entitlement).includes("ai.article_generation") && bodyOf(entitlement).includes("app.writavo.com/billing"),
@@ -540,7 +442,7 @@ async function main(): Promise<void> {
   for (const tool of ["publish_article", "delete_article", "trigger_pipeline_run", "schedule_article"]) {
     stub.reset();
     const op = operation(tool);
-    const unconfirmed = await callOperation(STDIO_CONTEXT, op, { id: "00000000-0000-4000-8000-000000000000", scheduled_publish_at: "2030-01-01T00:00:00Z" });
+    const unconfirmed = await callOperation(CTX, op, { id: "00000000-0000-4000-8000-000000000000", scheduled_publish_at: "2030-01-01T00:00:00Z" });
     const body = bodyOf(unconfirmed);
     check(
       `${tool} does nothing without confirm: true`,
@@ -549,7 +451,7 @@ async function main(): Promise<void> {
     );
   }
   stub.reset();
-  const confirmed = await callOperation(STDIO_CONTEXT, operation("publish_article"), { id: "00000000-0000-4000-8000-000000000000", confirm: true });
+  const confirmed = await callOperation(CTX, operation("publish_article"), { id: "00000000-0000-4000-8000-000000000000", confirm: true });
   check(
     "and it does act once confirmed",
     stub.requests.length === 1 && confirmed.isError !== true,
@@ -566,10 +468,10 @@ async function main(): Promise<void> {
     status: 500,
     body: { ok: false, error: { code: "INTERNAL_ERROR", message: `Upstream rejected key ${SECRET_KEY} at gateway.` } },
   });
-  transcript.push(bodyOf(await callOperation(STDIO_CONTEXT, operation("list_articles"), {})));
-  transcript.push(bodyOf(await callOperation(STDIO_CONTEXT, operation("get_article"), { id: "00000000-0000-4000-8000-000000000000" })));
+  transcript.push(bodyOf(await callOperation(CTX, operation("list_articles"), {})));
+  transcript.push(bodyOf(await callOperation(CTX, operation("get_article"), { id: "00000000-0000-4000-8000-000000000000" })));
   stub.respond = () => ({ status: 200, body: { ok: true, data: { echo: SECRET_KEY } } });
-  transcript.push(bodyOf(await callOperation(STDIO_CONTEXT, operation("get_usage"), {})));
+  transcript.push(bodyOf(await callOperation(CTX, operation("get_usage"), {})));
   transcript.push(redact(`a stray log line with ${SECRET_KEY} in it`));
 
   check(
@@ -583,81 +485,9 @@ async function main(): Promise<void> {
   );
   check("the request that failed still carried the key to the API", stub.requests.every((r) => r.hasAuth));
 
-  // -- 11. the saved sign-in ------------------------------------------------
-  console.log("\n[ 11. The saved sign-in ]");
-  const configHome = process.env.XDG_CONFIG_HOME as string;
-  const modeOf = (path: string) => statSync(path).mode & 0o777;
-  const fileKey = `wv_sk_${"c".repeat(32)}`;
-  const credentials = {
-    version: 1 as const,
-    api_key: fileKey,
-    key_id: "00000000-0000-4000-8000-00000000c0de",
-    key_prefix: fileKey.slice(0, 12),
-    website: { id: "00000000-0000-4000-8000-0000000051e0", name: "Saved Site" },
-    scopes: ["articles:read"],
-    expires_at: new Date(Date.now() + 86_400_000).toISOString(),
-    created_at: new Date().toISOString(),
-  };
-  const credsFile = writeCredentials(credentials);
-  check("it is written under XDG_CONFIG_HOME/writavo", credsFile === join(configHome, "writavo", "credentials.json") && credsFile === credentialsPath());
-  check("the file is 0600", modeOf(credsFile) === 0o600, modeOf(credsFile).toString(8));
-  check("its directory is 0700", modeOf(dirname(credsFile)) === 0o700, modeOf(dirname(credsFile)).toString(8));
-  const readBack = readCredentials();
-  check("it reads back as a valid sign-in", readBack.state === "valid" && readBack.credentials.api_key === fileKey, readBack.state);
-  writeCredentials({ ...credentials, expires_at: new Date(Date.now() - 1000).toISOString() });
-  check("a past expires_at reads as expired", readCredentials().state === "expired");
-  check("a rewrite keeps the file 0600", modeOf(credsFile) === 0o600);
-  writeFileSync(credsFile, "{ not json");
-  check("a damaged file reads as invalid, not as a key", readCredentials().state === "invalid");
-  check("delete removes it", deleteCredentials() === true && !existsSync(credsFile));
-  check("a second delete reports there was nothing", deleteCredentials() === false);
-
-  // Precedence is decided at start up, so it is probed in fresh processes against the build.
-  const probeConfig = (env: Record<string, string>, expect: string) =>
-    new Promise<{ source?: string; key?: string; message?: string }>((resolve) => {
-      const child = spawn(
-        process.execPath,
-        [
-          "-e",
-          "import('./dist/config.js').then(m => { const k = m.apiKey(); process.stderr.write(JSON.stringify({ source: m.keySource(), key: k === process.env.EXPECT ? 'expected' : (k ? 'other' : 'none'), message: m.noKeyMessage().slice(0, 300) })) })",
-        ],
-        { cwd: PACKAGE_ROOT, env: { ...process.env, WRITAVO_API_BASE_URL: "", EXPECT: expect, ...env } },
-      );
-      let out = "";
-      child.stderr.on("data", (c: Buffer) => {
-        out += c.toString();
-      });
-      child.on("close", () => {
-        try {
-          resolve(JSON.parse(out));
-        } catch {
-          resolve({ message: out });
-        }
-      });
-    });
-  const homeWith = (expiresAt: string) => {
-    const home = mkdtempSync(join(tmpdir(), "writavo-mcp-smoke-home-"));
-    process.env.XDG_CONFIG_HOME = home;
-    writeCredentials({ ...credentials, expires_at: expiresAt });
-    process.env.XDG_CONFIG_HOME = configHome;
-    return home;
-  };
-  const validHome = homeWith(new Date(Date.now() + 86_400_000).toISOString());
-  const fromFile = await probeConfig({ XDG_CONFIG_HOME: validHome, WRITAVO_API_KEY: "" }, fileKey);
-  check("with no env key, the saved sign-in is used", fromFile.source === "login" && fromFile.key === "expected", JSON.stringify(fromFile));
-  const fromEnv = await probeConfig({ XDG_CONFIG_HOME: validHome, WRITAVO_API_KEY: SECRET_KEY }, SECRET_KEY);
-  check("WRITAVO_API_KEY outranks the saved sign-in", fromEnv.source === "env" && fromEnv.key === "expected", JSON.stringify(fromEnv));
-  const expiredHome = homeWith(new Date(Date.now() - 1000).toISOString());
-  const fromExpired = await probeConfig({ XDG_CONFIG_HOME: expiredHome, WRITAVO_API_KEY: "" }, fileKey);
-  check(
-    "an expired sign-in is treated as signed out, and says so",
-    fromExpired.source === "none" && fromExpired.key === "none" && /expired/.test(fromExpired.message ?? "") && /login/.test(fromExpired.message ?? ""),
-    JSON.stringify(fromExpired),
-  );
-
   // -- a Site in memory, behind the stub --------------------------------------
-  // Enough of the API for sign-in, billing and the importer to run against: taxonomy, articles
-  // with external_id, idempotent creates, publish with original dates, the upload handshake.
+  // Enough of the API for billing and the importer to run against: taxonomy, articles with
+  // external_id, idempotent creates, publish with original dates, the upload handshake.
   type Row = Record<string, unknown>;
   const site = {
     categories: [] as Row[],
@@ -667,8 +497,6 @@ async function main(): Promise<void> {
     articles: [] as Row[],
     replays: new Map<string, { status: number; body: unknown }>(),
   };
-  const device = { mode: "approve" as "approve" | "deny", polls: 0, started: [] as Row[] };
-  const keyRoutes = { revoke: "ok" as "ok" | "fail", extendTo: null as string | null };
   const ok = (data: unknown, status = 200) => ({ status, body: { ok: true, data } });
   const fail = (status: number, code: string, message: string) => ({ status, body: { ok: false, error: { code, message } } });
   const project = (row: Row, fields: string | null): Row =>
@@ -679,45 +507,6 @@ async function main(): Promise<void> {
     const q = url.searchParams;
     const body = (req.body ? JSON.parse(req.body) : {}) as Row;
 
-    if (path === "/auth/device" && req.method === "POST") {
-      device.started.push(body);
-      device.polls = 0;
-      return ok(
-        {
-          device_code: `dc_${randomUUID()}`,
-          user_code: "BCDF-GHJK",
-          verification_uri: "https://app.writavo.com/device",
-          verification_uri_complete: "https://app.writavo.com/device?code=BCDF-GHJK",
-          expires_in: 1800,
-          interval: 1,
-        },
-        201,
-      );
-    }
-    if (path === "/auth/device/token" && req.method === "POST") {
-      device.polls += 1;
-      if (device.polls < 2) return ok({ status: "pending" });
-      if (device.mode === "deny") return ok({ status: "denied" });
-      const started = device.started[device.started.length - 1]!;
-      return ok({
-        status: "approved",
-        key: {
-          id: "00000000-0000-4000-8000-0000000000aa",
-          key_prefix: started.key_prefix,
-          scopes: started.scopes,
-          expires_at: new Date(Date.now() + 90 * 86_400_000).toISOString(),
-        },
-        website: { id: "00000000-0000-4000-8000-0000000051e1", name: "Smoke Site" },
-      });
-    }
-    if (path === "/auth/key/revoke" && req.method === "POST") {
-      return keyRoutes.revoke === "ok" ? ok({ revoked: true }) : fail(503, "MAINTENANCE", "Down for a moment.");
-    }
-    if (path === "/auth/key/extend" && req.method === "POST") {
-      return keyRoutes.extendTo
-        ? ok({ key: { id: "00000000-0000-4000-8000-0000000000aa", expires_at: keyRoutes.extendTo }, extended: true })
-        : ok({ key: { id: "00000000-0000-4000-8000-0000000000aa", expires_at: null }, extended: false, reason: "max_lifetime" });
-    }
     if (req.method === "GET" && path === "/site") return ok({ id: "00000000-0000-4000-8000-0000000051e1", name: "Smoke Site" });
     if (req.method === "GET" && path === "/usage") {
       return ok({ plan: { key: "free", name: "Free" }, limits: [{ key: "documents", limit: 10000, used: 5 }], credits: { balance: 0 } });
@@ -817,109 +606,12 @@ async function main(): Promise<void> {
     return true;
   };
   const writes = () => stub.requests.filter((r) => r.method !== "GET");
-  const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
-  const leakTranscript: string[] = [];
 
-  // -- 12. browser sign-in ---------------------------------------------------
-  console.log("\n[ 12. Browser sign-in ]");
-  clearKey();
-  stub.reset();
+  // -- 12. client names -------------------------------------------------------
+  console.log("\n[ 12. Client names ]");
   stub.respond = siteRespond;
-  device.mode = "approve";
-  const started = bodyOf(await handleLogin({}));
-  leakTranscript.push(started);
-  check(
-    "login returns the link and the code to show the user",
-    started.includes("https://app.writavo.com/device?code=BCDF-GHJK") && started.includes("BCDF-GHJK") && started.includes("login_status"),
-    started.slice(0, 300),
-  );
-  check("it tells a new user to finish onboarding and how to bring articles", started.includes("onboarding") && started.includes("Bring my existing articles"));
-  const startRequest = stub.requests.find((r) => r.path.endsWith("/auth/device"));
-  const startBody = JSON.parse(startRequest?.body ?? "{}") as Row;
-  check("the sign-in request carries no API key", startRequest !== undefined && !startRequest.hasAuth);
-  check(
-    "it sends only the hash and a 12 character prefix of the secret",
-    /^[0-9a-f]{64}$/.test(String(startBody.key_hash)) && /^wv_sk_[A-Za-z0-9_-]{6}$/.test(String(startBody.key_prefix)) && !("api_key" in startBody),
-    JSON.stringify(startBody).slice(0, 200),
-  );
-  check(
-    "it asks for the default scopes, never keys or webhooks",
-    JSON.stringify(startBody.scopes) === JSON.stringify(DEFAULT_SCOPES) && !JSON.stringify(startBody.scopes).match(/keys:|webhooks:/),
-  );
-  check(
-    "with no handshake name yet, the key is named for an AI assistant on this machine",
-    startBody.client_name === "AI assistant (local MCP)" && typeof startBody.client_host === "string" && String(startBody.client_host).length > 0,
-    JSON.stringify({ client_name: startBody.client_name, client_host: startBody.client_host }),
-  );
-  check("nothing is saved or in use while it is pending", !existsSync(credentialsPath()) && !hasApiKey());
-
-  const approved = await waitUntil(() => bodyOf(handleLoginStatus()).startsWith("Approved"));
-  const statusText = bodyOf(handleLoginStatus());
-  leakTranscript.push(statusText);
-  check("the background poll picks up the approval", approved, statusText.slice(0, 200));
-  check("login_status names the Site and the scopes", statusText.includes("Smoke Site") && statusText.includes("articles:write"));
-  const savedLogin = existsSync(credentialsPath()) ? (JSON.parse(readFileSync(credentialsPath(), "utf8")) as Row) : {};
-  check(
-    "the saved key is the secret whose hash was approved",
-    typeof savedLogin.api_key === "string" && sha256(savedLogin.api_key) === startBody.key_hash,
-  );
-  check("the saved file is 0600", existsSync(credentialsPath()) && modeOf(credentialsPath()) === 0o600);
-  check("the saved file names the Site", (savedLogin.website as Row | undefined)?.name === "Smoke Site");
-  check("the key is in use at once, with no restart", keySource() === "login" && hasApiKey());
-  stub.reset();
-  leakTranscript.push(bodyOf(await callOperation(STDIO_CONTEXT, operation("get_site_info"), {})));
-  check("the next tool call sends the new key", stub.requests[0]?.authorization === `Bearer ${String(savedLogin.api_key)}`);
-
-  stub.reset();
-  const again = bodyOf(await handleLogin({}));
-  leakTranscript.push(again);
-  check(
-    "a second login says it is already signed in, names the Site, and starts nothing",
-    again.includes("Already signed in") && again.includes("Smoke Site") && again.includes("force: true") && stub.requests.length === 0,
-    again.slice(0, 200),
-  );
-
-  stub.reset();
-  const loggedOut = bodyOf(await handleLogout());
-  leakTranscript.push(loggedOut);
-  const revokeCall = stub.requests.find((r) => r.path.endsWith("/auth/key/revoke"));
-  check(
-    "logout revokes the key on Writavo first, authenticated as that key",
-    revokeCall !== undefined && revokeCall.method === "POST" && revokeCall.authorization === `Bearer ${String(savedLogin.api_key)}`,
-    stub.requests.map((r) => `${r.method} ${r.path}`).join(", "),
-  );
-  check("logout deletes the saved sign-in", !existsSync(credentialsPath()));
-  check("logout stops using the key", !hasApiKey() && keySource() === "none");
-  check("logout says the key was revoked", /was revoked on Writavo/.test(loggedOut), loggedOut.slice(0, 300));
-
-  // A revoke that cannot reach Writavo still signs out locally, and says what to do by hand.
-  writeCredentials({ ...credentials, api_key: fileKey, expires_at: new Date(Date.now() + 86_400_000).toISOString() });
-  activateKey(fileKey, "login", { ...credentials, api_key: fileKey }, credentialsPath());
-  keyRoutes.revoke = "fail";
-  stub.reset();
-  const failedLogout = bodyOf(await handleLogout());
-  leakTranscript.push(failedLogout);
-  keyRoutes.revoke = "ok";
-  check(
-    "a revoke that fails is reported, with where to revoke by hand, and the file is still deleted",
-    /could NOT be revoked/.test(failedLogout) && failedLogout.includes("app.writavo.com/settings/api-keys") && !existsSync(credentialsPath()),
-    failedLogout.slice(0, 300),
-  );
-
-  device.mode = "deny";
-  stub.reset();
-  leakTranscript.push(bodyOf(await handleLogin({})));
-  const denied = await waitUntil(() => bodyOf(handleLoginStatus()).includes("denied"));
-  leakTranscript.push(bodyOf(handleLoginStatus()));
-  check("a denied request is reported as denied", denied);
-  check("and nothing is saved or in use", !existsSync(credentialsPath()) && !hasApiKey());
-  check(
-    "no sign-in reply ever carries a key",
-    !leakTranscript.some((t) => t.includes(String(savedLogin.api_key)) || /wv_sk_(?!REDACTED)[A-Za-z0-9_-]{20,}/.test(t)),
-    leakTranscript.find((t) => /wv_sk_[A-Za-z0-9_-]{20,}/.test(t))?.slice(0, 200) ?? "",
-  );
-
-  // The key is named after the connected client, from the initialize handshake (Addendum B).
+  // The Worker names a key after the connected client (Addendum B): a registered OAuth client's
+  // raw name becomes the one a person sees in Settings > API keys and Settings > AI agents.
   {
     const { friendlyClientName } = await import("../src/core/index.js");
     const cases: [string | undefined, string][] = [
@@ -945,34 +637,13 @@ async function main(): Promise<void> {
       wrong.length === 0,
       wrong.map(([raw, want]) => `${JSON.stringify(raw)} -> ${JSON.stringify(friendlyClientName(raw))}, wanted ${want}`).join("; "),
     );
-
-    // Through the real stdio server: a client that says it is claude-code gets a key named so.
-    const { createServer: createStdioServer } = await import("../src/server.js");
-    const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
-    const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
-    const stdioServer = createStdioServer();
-    const [c, srv] = InMemoryTransport.createLinkedPair();
-    const named = new Client({ name: "claude-code", version: "2.0.0" });
-    await Promise.all([stdioServer.connect(srv), named.connect(c)]);
-    clearKey();
-    device.mode = "deny";
-    stub.reset();
-    await named.callTool({ name: "login", arguments: { force: true } });
-    const namedStart = JSON.parse(stub.requests.find((r) => r.path.endsWith("/auth/device"))?.body ?? "{}") as Row;
-    check(
-      "login names the key after the connected client: Claude Code (local MCP), on this machine",
-      namedStart.client_name === "Claude Code (local MCP)" && typeof namedStart.client_host === "string" && String(namedStart.client_host).length > 0,
-      JSON.stringify({ client_name: namedStart.client_name, client_host: namedStart.client_host }),
-    );
-    await waitUntil(() => bodyOf(handleLoginStatus()).includes("denied"));
-    await named.close();
   }
 
   // -- 13. the plan purchase link --------------------------------------------
   console.log("\n[ 13. The plan purchase link ]");
-  clearKey();
+  currentKey = null;
   stub.reset();
-  const planNoKey = bodyOf(await handleStartPlanPurchase(STDIO_CONTEXT, { plan: "growth", interval: "year" }));
+  const planNoKey = bodyOf(await handleStartPlanPurchase(CTX, { plan: "growth", interval: "year" }));
   check(
     "it returns the billing deep link with the plan and interval",
     planNoKey.includes("https://app.writavo.com/billing?plan=growth&interval=year"),
@@ -984,8 +655,8 @@ async function main(): Promise<void> {
   );
   check("it says to confirm with get_usage afterwards", planNoKey.includes("get_usage"));
   check("with no key it makes no request", stub.requests.length === 0);
-  activateKey(SECRET_KEY, "env");
-  const planWithKey = bodyOf(await handleStartPlanPurchase(STDIO_CONTEXT, {}));
+  currentKey = SECRET_KEY;
+  const planWithKey = bodyOf(await handleStartPlanPurchase(CTX, {}));
   check(
     "with a key it names the current plan",
     planWithKey.includes("Current plan: Free") && planWithKey.includes("https://app.writavo.com/billing\n"),
@@ -1003,7 +674,10 @@ async function main(): Promise<void> {
       JSON.stringify(jsonSchema).includes('"additionalProperties":false'),
   );
 
-  const workDir = mkdtempSync(join(tmpdir(), "writavo-mcp-import-"));
+  // Every import runs as the hosted server runs it: a stored import (an import job) on a store
+  // scoped to this connection, sent as data once and then continued with just its import_id.
+  const importJobs = memStore("g:key-import");
+  const importIdOf = (reply: string) => /imp_[A-Za-z0-9_-]{22}/.exec(reply)?.[0] ?? "";
   const EM = "\u2014";
   const firstContent = `Intro ${EM} kept exactly as written, "quotes" and all.\n\n![A kit](https://img.example.test/a.png)\n\n![Old](http://insecure.example.test/b.png "legacy")\n\nThe end.`;
   const fixture = {
@@ -1053,31 +727,29 @@ async function main(): Promise<void> {
       },
     ],
   };
-  const fixturePath = join(workDir, "import.json");
-  writeFileSync(fixturePath, JSON.stringify(fixture, null, 2));
-  const progressFile = `${fixturePath}.writavo-progress.json`;
   const importTranscript: string[] = [];
+  const importCall = async (args: Record<string, unknown>) => {
+    const reply = bodyOf(await handleImportContent(CTX, args, importJobs));
+    importTranscript.push(reply);
+    return reply;
+  };
 
   // Validation: every problem surfaces against its own external_id, and nothing is written.
-  const badPath = join(workDir, "bad.json");
-  writeFileSync(
-    badPath,
-    JSON.stringify({
-      format: "writavo-import",
-      version: 1,
-      articles: [
-        { external_id: "bad:1", status: "published", title: "No date", slug: "no-date", content: "x" },
-        { external_id: "bad:2", status: "draft", slug: "Bad Slug" },
-        { external_id: "bad:3", status: "draft", category: "nope" },
-        { external_id: "bad:4", status: "draft", body: "misnamed" },
-        { external_id: "bad:5", status: "published", title: "Later", slug: "later", content: "x", published_at: "2999-01-01T00:00:00Z" },
-        { external_id: "good:1", status: "draft", title: "Fine" },
-      ],
-    }),
-  );
+  const badDoc = {
+    format: "writavo-import",
+    version: 1,
+    articles: [
+      { external_id: "bad:1", status: "published", title: "No date", slug: "no-date", content: "x" },
+      { external_id: "bad:2", status: "draft", slug: "Bad Slug" },
+      { external_id: "bad:3", status: "draft", category: "nope" },
+      { external_id: "bad:4", status: "draft", body: "misnamed" },
+      { external_id: "bad:5", status: "published", title: "Later", slug: "later", content: "x", published_at: "2999-01-01T00:00:00Z" },
+      { external_id: "good:1", status: "draft", title: "Fine" },
+    ],
+  };
   stub.reset();
-  const invalid = bodyOf(await handleImportContent(STDIO_CONTEXT, { path: badPath }, IMPORT_FILES));
-  importTranscript.push(invalid);
+  const invalid = await importCall({ data: badDoc });
+  const badImportId = importIdOf(invalid);
   check(
     "a dry run reports each problem against its external_id",
     ["bad:1", "bad:2", "bad:3", "bad:4", "bad:5"].every((id) => invalid.includes(id)) && !/good:1 \(/.test(invalid),
@@ -1093,11 +765,15 @@ async function main(): Promise<void> {
     invalid.slice(0, 900),
   );
   check("a dry run writes nothing to the Site", writes().length === 0, writes().map((r) => `${r.method} ${r.path}`).join(", "));
-  check("a dry run writes no progress file", !existsSync(`${badPath}.writavo-progress.json`));
+  check(
+    "a dry run keeps the document as an import, and records no progress",
+    badImportId !== "" && jobRows.get(badImportId)?.doc !== null && jobRows.get(badImportId)?.progress === null,
+    invalid.slice(0, 200),
+  );
 
   stub.reset();
-  const dry = bodyOf(await handleImportContent(STDIO_CONTEXT, { path: fixturePath }, IMPORT_FILES));
-  importTranscript.push(dry);
+  const dry = await importCall({ data: fixture });
+  const fixtureId = importIdOf(dry);
   check(
     "a clean dry run counts what it would do",
     dry.includes("Nothing was written") && dry.includes("- create: 3") && dry.includes("to publish with their original dates: 2"),
@@ -1109,12 +785,15 @@ async function main(): Promise<void> {
     dry.slice(0, 900),
   );
   check("it reads the document allowance", dry.includes("Documents: 5 of 10000"));
-  check("it names the next call, with confirm because it publishes", dry.includes('"dry_run":false') && dry.includes('"confirm":true'));
-  check("and it wrote nothing, not even progress", writes().length === 0 && !existsSync(progressFile));
+  check(
+    "it names the next call by import_id, with confirm because it publishes",
+    dry.includes(`"import_id":"${fixtureId}"`) && dry.includes('"dry_run":false') && dry.includes('"confirm":true'),
+    dry.slice(-600),
+  );
+  check("and it wrote nothing, not even progress", writes().length === 0 && jobRows.get(fixtureId)?.progress === null);
 
   stub.reset();
-  const unconfirmed = bodyOf(await handleImportContent(STDIO_CONTEXT, { path: fixturePath, dry_run: false }, IMPORT_FILES));
-  importTranscript.push(unconfirmed);
+  const unconfirmed = await importCall({ import_id: fixtureId, dry_run: false });
   check(
     "an import that publishes does nothing without confirm: true",
     unconfirmed.startsWith("Nothing has been done.") && writes().length === 0,
@@ -1122,9 +801,8 @@ async function main(): Promise<void> {
   );
 
   stub.reset();
-  const applied = bodyOf(await handleImportContent(STDIO_CONTEXT, { path: fixturePath, dry_run: false, confirm: true }, IMPORT_FILES));
-  importTranscript.push(applied);
-  check("the import completes in one batch", applied.includes("Import complete"), applied.slice(0, 600));
+  const applied = await importCall({ import_id: fixtureId, dry_run: false, confirm: true });
+  check("the import, named by its import_id alone, completes in one call", applied.includes("Import complete"), applied.slice(0, 600));
   const posts = (suffix: string) => writes().filter((r) => r.method === "POST" && r.path.replace(/\?.*$/, "").endsWith(suffix));
   check("missing taxonomy is created, existing taxonomy is matched", posts("/categories").length === 1 && posts("/tags").length === 1);
   const authorBody = JSON.parse(posts("/authors")[0]?.body ?? "{}") as Row;
@@ -1177,6 +855,13 @@ async function main(): Promise<void> {
   check("an em-dash in the customer's prose is kept as written", firstBody.includes(EM));
   check("a non-https image keeps its URL", firstBody.includes('](http://insecure.example.test/b.png "legacy")'));
   check("the featured image is re-hosted", String(first.featured_image_url).startsWith("https://cdn.example.test/"));
+  check("the featured image's alt is sent as the article's featured_image_alt", first.featured_image_alt === "Soil", String(first.featured_image_alt));
+  check(
+    "a post live at the source carries its original dates on the article, for a first publish from any path",
+    first.original_published_at === "2021-03-04T09:30:00Z" && first.original_content_updated_at === "2022-01-10T12:00:00Z" &&
+      byExternal("blog:2").original_published_at === undefined,
+    `${String(first.original_published_at)} / ${String(first.original_content_updated_at)}`,
+  );
   check(
     "references resolve to the Site's ids",
     first.category_id === site.categories[0]?.id &&
@@ -1195,22 +880,20 @@ async function main(): Promise<void> {
     "they are live with those dates, and the draft stays a draft",
     first.status === "published" && first.published_at === "2021-03-04T09:30:00Z" && byExternal("blog:2").status === "draft",
   );
-  check("progress is saved next to the file", existsSync(progressFile));
+  check("progress is kept with the import on the server", typeof jobRows.get(fixtureId)?.progress === "string");
 
   stub.reset();
-  const rerun = bodyOf(await handleImportContent(STDIO_CONTEXT, { path: fixturePath, dry_run: false, confirm: true }, IMPORT_FILES));
-  importTranscript.push(rerun);
+  const rerun = await importCall({ import_id: fixtureId, dry_run: false, confirm: true });
   check(
     "running it again is a no-op",
     rerun.includes("Import complete") && writes().length === 0 && site.articles.length === 3,
     `${writes().length} writes: ${writes().map((r) => `${r.method} ${r.path}`).join(", ")}`,
   );
 
-  fixture.articles[1] = { ...fixture.articles[1]!, title: "Winter notes, revised" };
-  writeFileSync(fixturePath, JSON.stringify(fixture, null, 2));
+  // A correction is sent as a part with the import_id: same external_id replaces the stored entry.
+  const revised = { ...fixture.articles[1]!, title: "Winter notes, revised" };
   stub.reset();
-  const updated = bodyOf(await handleImportContent(STDIO_CONTEXT, { path: fixturePath, dry_run: false, confirm: true }, IMPORT_FILES));
-  importTranscript.push(updated);
+  const updated = await importCall({ data: { format: "writavo-import", version: 1, articles: [revised] }, import_id: fixtureId, dry_run: false, confirm: true });
   const draft = byExternal("blog:2");
   check(
     "a changed article is updated in place by external_id, not duplicated",
@@ -1223,21 +906,327 @@ async function main(): Promise<void> {
     updated.includes("Across the whole import: created 3, updated 0"),
     updated.slice(0, 400),
   );
+  const storedTitles = (JSON.parse(jobRows.get(fixtureId)?.doc ?? "{}") as { articles?: { external_id: string; title?: string }[] }).articles ?? [];
+  check(
+    "the stored document now holds the corrected entry in place, not a second copy",
+    storedTitles.length === 3 && storedTitles.find((a) => a.external_id === "blog:2")?.title === "Winter notes, revised",
+    JSON.stringify(storedTitles.map((a) => a.external_id)),
+  );
+
+  // retry_failed: an article skipped for a slug another article owns stays skipped until asked.
+  site.articles.push({ id: randomUUID(), slug: "taken-slug", title: "Someone else's", status: "draft", published_at: null });
+  const retryDoc = {
+    format: "writavo-import",
+    version: 1,
+    articles: [
+      { external_id: "retry:1", status: "draft", title: "Wants a taken slug", slug: "taken-slug", content: "Mine." },
+      { external_id: "retry:2", status: "draft", title: "Fine", content: "Also mine." },
+    ],
+  };
+  const retryDry = await importCall({ data: retryDoc });
+  const retryId = importIdOf(retryDry);
+  stub.reset();
+  const skippedRun = await importCall({ import_id: retryId, dry_run: false });
+  check(
+    "an article whose slug another article owns is skipped, with the owner named and retry_failed suggested",
+    skippedRun.includes("retry:1") && skippedRun.includes('slug "taken-slug" is already used') && skippedRun.includes("retry_failed: true") &&
+      Boolean(byExternal("retry:2").id) && !byExternal("retry:1").id,
+    skippedRun.slice(0, 900),
+  );
+  site.articles = site.articles.filter((a) => a.slug !== "taken-slug" || a.external_id === "retry:1");
+  stub.reset();
+  const withoutRetry = await importCall({ import_id: retryId, dry_run: false });
+  check(
+    "continuing without retry_failed leaves a skipped article alone",
+    writes().filter((r) => r.method === "POST" && r.path.replace(/\?.*$/, "").endsWith("/articles")).length === 0 && !byExternal("retry:1").id,
+    withoutRetry.slice(0, 300),
+  );
+  stub.reset();
+  const retried = await importCall({ import_id: retryId, dry_run: false, retry_failed: true });
+  check(
+    "retry_failed: true tries the skipped article again once the slug is free, and only that one",
+    retried.includes("Import complete") && byExternal("retry:1").slug === "taken-slug" &&
+      writes().filter((r) => r.method === "POST" && r.path.replace(/\?.*$/, "").endsWith("/articles")).length === 1,
+    retried.slice(0, 600),
+  );
   check(
     "no import reply ever carries the key",
     !importTranscript.some((t) => t.includes(SECRET_KEY) || /wv_sk_(?!REDACTED)[A-Za-z0-9_-]{20,}/.test(t)),
   );
 
-  // -- 15. MCP-2: the core, approvals, headers, key lifecycle ----------------
-  console.log("\n[ 15. The remote-safe core, approvals and the key lifecycle ]");
-  const { createWritavoMcpServer, CORE_LOCAL_TOOL_NAMES, VERSION } = await import("../src/core/index.js");
-  const { STDIO_TOOL_NAMES } = await import("../src/server.js");
-  const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
-  const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+  // -- 14b. Stored imports (the hosted server's import jobs) ------------------
+  console.log("\n[ 14b. Stored imports: one-pass dry run, import_id, parts, upload links ]");
+  {
+    const { checkDocument } = await import("../src/import/validate.js");
+    const { mergeImportDocuments, IMPORT_ID_RE } = await import("../src/import/jobs.js");
+
+    // One pass: a bad author, a bad tag and bad articles are all reported together.
+    const onePass = checkDocument({
+      format: "writavo-import",
+      version: 1,
+      authors: [{ ref: "ok", name: "Fine Author" }, { ref: "broken", name: "Broken", socials: { myspace: "https://myspace.test/x" } }],
+      tags: [{ slug: "Not A Slug", name: "Bad" }, { slug: "good", name: "Good" }],
+      articles: [
+        { external_id: "p:1", status: "published", title: "No date", slug: "no-date", content: "x", author: "broken" },
+        { external_id: "p:2", status: "draft", title: "Fine", author: "ok", tags: ["good"] },
+      ],
+    });
+    check(
+      "a document with top-level problems still has every article checked (one pass)",
+      onePass.envelope !== null && onePass.envelopeErrors.length === 2 && onePass.items.length === 2 &&
+        onePass.items[0]!.errors.some((e) => e.includes("published_at")) && onePass.items[1]!.errors.length === 0,
+      JSON.stringify({ env: onePass.envelopeErrors, items: onePass.items.map((i) => i.errors) }),
+    );
+    check(
+      "an article naming an author whose own entry is broken is not reported twice",
+      !onePass.items[0]!.errors.some((e) => e.includes("authors[].ref")),
+      onePass.items[0]!.errors.join("; "),
+    );
+    check("salvaging keeps only the entries that parse", onePass.envelope?.authors?.length === 1 && onePass.envelope?.tags?.length === 1);
+
+    const merged = mergeImportDocuments(
+      { format: "writavo-import", version: 1, authors: [{ ref: "a", name: "A" }], articles: [{ external_id: "x:1", title: "old" }, { external_id: "x:2" }] },
+      { authors: [{ ref: "a", name: "A2" }, { ref: "b", name: "B" }], articles: [{ external_id: "x:1", title: "new" }, { external_id: "x:3" }] },
+    ) as { authors: { name: string }[]; articles: { external_id: string; title?: string }[] };
+    check(
+      "parts merge on their keys: a repeated key replaces in place, a new one is appended",
+      merged.authors.map((a) => a.name).join() === "A2,B" && merged.articles.map((a) => a.external_id).join() === "x:1,x:2,x:3" && merged.articles[0]!.title === "new",
+      JSON.stringify(merged),
+    );
+
+    const jobs = memStore("g:key-1");
+    const jobDoc = {
+      format: "writavo-import",
+      version: 1,
+      categories: [{ slug: "guides", name: "Guides" }],
+      articles: [
+        { external_id: "job:1", status: "draft", title: "Stored one", content: "One." },
+        { external_id: "job:2", status: "draft", title: "Stored two", content: "Two." },
+      ],
+    };
+
+    const hosted = importContentTool(jobs);
+    const props = Object.keys(hosted.inputSchema);
+    check("with job support, import_content takes url, upload and import_id, and no path", ["url", "upload", "import_id"].every((k) => props.includes(k)) && !props.includes("path"));
+
+    stub.reset();
+    const firstDry = bodyOf(await handleImportContent(CTX, { data: jobDoc }, jobs));
+    const importId = /imp_[A-Za-z0-9_-]{22}/.exec(firstDry)?.[0] ?? "";
+    check(
+      "an inline dry run is stored as an import and names its import_id in the next call",
+      IMPORT_ID_RE.test(importId) && firstDry.includes("Nothing was written") && firstDry.includes(`"import_id":"${importId}"`) && writes().length === 0,
+      firstDry.slice(0, 800),
+    );
+
+    const part2 = { format: "writavo-import", version: 1, articles: [{ external_id: "job:3", status: "draft", title: "Stored three", content: "Three." }] };
+    stub.reset();
+    const withPart = bodyOf(await handleImportContent(CTX, { data: part2, import_id: importId }, jobs));
+    check("a second part with the import_id is added to the stored document", withPart.includes("- create: 3"), withPart.slice(0, 600));
+
+    stub.reset();
+    const applied = bodyOf(await handleImportContent(CTX, { import_id: importId, dry_run: false }, jobs));
+    check(
+      "applying by import_id alone imports the stored document and keeps progress on the server",
+      applied.includes("Import complete") && ["job:1", "job:2", "job:3"].every((id) => byExternal(id).id) && jobRows.get(importId)?.progress !== null,
+      applied.slice(0, 600),
+    );
+    check(
+      "an apply reply says where its time went: phases, then API requests by kind with their average",
+      /Where this call's time went: .*checks [0-9.]+ s, Site reads [0-9.]+ s/.test(applied) && /API: \d+ writes [0-9.]+ s \([0-9.]+ s each\)/.test(applied),
+      applied.slice(-400),
+    );
+    check(
+      "the dry run's estimate is time-based: it names the per-call working time",
+      firstDry.includes("each works for about 18 seconds") && firstDry.includes("where its time went"),
+      firstDry.slice(0, 1200),
+    );
+    stub.reset();
+    const again = bodyOf(await handleImportContent(CTX, { import_id: importId, dry_run: false }, jobs));
+    check("continuing a finished import writes nothing", again.includes("Import complete") && writes().length === 0, again.slice(0, 300));
+
+    const other = memStore("g:key-2");
+    const foreign = await handleImportContent(CTX, { import_id: importId }, other);
+    check("another connection's import_id answers as if it did not exist", foreign.isError === true && bodyOf(foreign).includes(`There is no import ${importId}`));
+
+    jobRows.get(importId)!.lease = { holder: "someone-else", until: Date.now() + 60_000 };
+    const busy = bodyOf(await handleImportContent(CTX, { import_id: importId, dry_run: false }, jobs));
+    check("a second call while another holds the import starts nothing, and says when the hold ends", busy.includes("still running") && /hold ends by \d{4}-\d\d-\d\dT/.test(busy), busy.slice(0, 300));
+    delete jobRows.get(importId)!.lease;
+
+    // A request budget (a free Cloudflare plan's 50 per invocation): the call stops cleanly before
+    // the cap, records what it did, and the next call carries on until everything is done.
+    const budgetDoc = {
+      format: "writavo-import",
+      version: 1,
+      articles: Array.from({ length: 6 }, (_, i) => ({ external_id: `budget:${i}`, status: "draft", title: `Budget ${i}`, content: "x" })),
+    };
+    stub.reset();
+    const tightFirst = bodyOf(await handleImportContent(CTX, { data: budgetDoc, dry_run: false }, jobs, { workMs: 18_000, graceMs: 7_000, maxRequests: 14 }));
+    const budgetId = /imp_[A-Za-z0-9_-]{22}/.exec(tightFirst)?.[0] ?? "";
+    const firstCallRequests = stub.requests.length;
+    let rounds = 1;
+    let tightLast = tightFirst;
+    while (!tightLast.includes("Import complete") && rounds < 10) {
+      tightLast = bodyOf(await handleImportContent(CTX, { import_id: budgetId, dry_run: false }, jobs, { workMs: 18_000, graceMs: 7_000, maxRequests: 14 }));
+      rounds += 1;
+    }
+    check(
+      "a request budget stops a call cleanly before its cap, and later calls finish the import",
+      tightFirst.includes("request budget ran out") && firstCallRequests <= 14 && tightLast.includes("Import complete") && rounds > 1 &&
+        Array.from({ length: 6 }, (_, i) => byExternal(`budget:${i}`).id).every(Boolean),
+      `${firstCallRequests} requests, ${rounds} calls: ${tightFirst.slice(0, 300)}`,
+    );
+
+    const link = bodyOf(await handleImportContent(CTX, { upload: true }, jobs));
+    const uploadId = /imp_[A-Za-z0-9_-]{22}/.exec(link)?.[0] ?? "";
+    check(
+      "upload: true returns a curl command with a one-time bearer, and nothing is checked yet",
+      link.includes("curl") && link.includes("Authorization: Bearer") && link.includes(`/imports/${uploadId}`) && link.includes("--data-binary @"),
+      link.slice(0, 500),
+    );
+    const early = await handleImportContent(CTX, { import_id: uploadId }, jobs);
+    check("an import that is still waiting for its upload says so", early.isError === true && bodyOf(early).includes("Nothing has been uploaded"));
+
+    const notHttps = await handleImportContent(CTX, { url: "http://example.test/import.json" }, jobs);
+    check("url must be https, and nothing is stored for a refused fetch", notHttps.isError === true && bodyOf(notHttps).includes("https"));
+    const both = await handleImportContent(CTX, { data: jobDoc, url: "https://example.test/x.json" }, jobs);
+    check("data and url together are refused", both.isError === true && bodyOf(both).includes("not several"));
+
+    stub.reset();
+    const topLevelBad = { ...jobDoc, tags: [{ slug: "Bad Slug", name: "x" }], articles: [...jobDoc.articles, { external_id: "job:9", status: "published", title: "t", slug: "t", content: "c" }] };
+    const onePassDry = bodyOf(await handleImportContent(CTX, { data: topLevelBad }, jobs));
+    check(
+      "the dry run reports top-level and article problems together, and refuses to apply until fixed",
+      onePassDry.includes("top level") && onePassDry.includes("tags[0].slug") && onePassDry.includes("job:9") && writes().length === 0,
+      onePassDry.slice(0, 900),
+    );
+    const badId = /imp_[A-Za-z0-9_-]{22}/.exec(onePassDry)?.[0] ?? "";
+    const refusedApply = await handleImportContent(CTX, { import_id: badId, dry_run: false }, jobs);
+    check("an apply with top-level problems writes nothing", refusedApply.isError === true && writes().length === 0, bodyOf(refusedApply).slice(0, 300));
+  }
+
+  // -- 14d. Background status replies and date precision ------------------------
+  console.log("\n[ 14d. Background status replies never tell an agent to apply again; date precision is reported ]");
+  {
+    const { backgroundStatusText } = await import("../src/tools/import-content.js");
+    const batch = [
+      "Imported a batch into the Site \"X\". 10 of 106 articles are done and 96 remain.",
+      "",
+      "Progress is saved in the import job imp_x.",
+      "Next: call import_content again with the same arguments to continue:",
+      'import_content {"import_id":"imp_AAAAAAAAAAAAAAAAAAAAAA","dry_run":false}',
+      "",
+      "Where this call's time went: checks 0.1 s.",
+    ].join("\n");
+    const progress = { articles_total: 106, articles_done: 10, articles_failed: 0, articles_skipped: 0, images_copied: 30, images_failed: 0, categories_created: 8, tags_created: 39, authors_created: 2 };
+    const reply = backgroundStatusText("imp_AAAAAAAAAAAAAAAAAAAAAA", {
+      state: "running", started_at: "2026-09-28T15:00:00Z", updated_at: "2026-09-28T15:01:00Z", finished_at: null, batches: 3, error: null, last_report: batch, progress,
+    });
+    check(
+      "a running import's status quotes the last batch without its apply-again instructions",
+      reply.includes("Imported a batch") && reply.includes("time went") && !reply.includes("Next: call import_content again") && !/"dry_run":false/.test(reply) && reply.includes("Do not start it again"),
+      reply,
+    );
+
+    const preciseDoc = {
+      format: "writavo-import",
+      version: 1,
+      articles: [{ external_id: "precise:1", status: "published", title: "Precise", slug: "precise-dates", content: "x", published_at: "2021-03-04T16:33:34.967476Z" }],
+    };
+    stub.reset();
+    const preciseDry = bodyOf(await handleImportContent(CTX, { data: preciseDoc }, memStore("g:key-precise")));
+    check("the dry run says when source dates are more precise than a millisecond", preciseDry.includes("more than millisecond precision") && preciseDry.includes("34.967476"), preciseDry.slice(0, 900));
+  }
+
+  // -- 14c. The store does the document work (the hosted Durable Object) --------
+  console.log("\n[ 14c. The store does the document work: the tool never reads a stored document ]");
+  {
+    const { runImport } = await import("../src/import/engine.js");
+    const { jobSource, mergeImportDocuments } = await import("../src/import/jobs.js");
+    const { readInlinePart } = await import("../src/tools/import-content.js");
+    // What the Durable Object implements, done locally. Every read of the stored document by the
+    // tool is recorded: on this path there must be none (a free-plan Worker cannot afford one).
+    const toolReads: string[] = [];
+    const base = memStore("g:key-docstore");
+    const rawGet = base.getDocument.bind(base);
+    const docStore: ImportJobStore = {
+      ...base,
+      async getDocument(id) {
+        toolReads.push(id);
+        return rawGet(id);
+      },
+      async addPart(id, part) {
+        const read = readInlinePart(part);
+        if ("error" in read) return { ok: false, error: read.error };
+        const stored = await rawGet(id);
+        const merged = stored ? mergeImportDocuments(JSON.parse(stored), read.document) : read.document;
+        if (typeof merged === "string") return { ok: false, error: merged };
+        const json = JSON.stringify(merged);
+        await base.putDocument(id, json);
+        const articles = (merged as { articles?: unknown[] }).articles;
+        return { ok: true, bytes: json.length, articles: Array.isArray(articles) ? articles.length : null };
+      },
+      async addFromUrl() {
+        return { ok: false, error: "no URL fetches in the smoke test" };
+      },
+      async runStored(id, run) {
+        const doc = JSON.parse((await rawGet(id))!);
+        const result = await runImport({ ...CTX, apiKey: () => run.apiKey }, jobSource(base, id, doc), {
+          dryRun: run.dryRun,
+          confirm: run.confirm,
+          publish: run.publish,
+          rehostImages: run.rehostImages,
+          retryFailed: run.retryFailed,
+          batchSize: run.batchSize ?? 100,
+        });
+        return { text: bodyOf(result), isError: result.isError === true, importStatus: result.importStatus };
+      },
+    };
+    currentKey = SECRET_KEY;
+    const doc = {
+      format: "writavo-import",
+      version: 1,
+      articles: [
+        { external_id: "store:1", status: "draft", title: "Store one", content: "One." },
+        { external_id: "store:2", status: "draft", title: "Store two", content: "Two." },
+      ],
+    };
+    stub.reset();
+    const dry = bodyOf(await handleImportContent(CTX, { data: doc }, docStore));
+    const storeId = /imp_[A-Za-z0-9_-]{22}/.exec(dry)?.[0] ?? "";
+    check(
+      "an inline dry run goes to the store: stored, dry-run there, named by its import_id",
+      Boolean(storeId) && dry.includes("Nothing was written") && dry.includes("- create: 2") && writes().length === 0,
+      dry.slice(0, 500),
+    );
+    const part = await handleImportContent(CTX, { data: { format: "writavo-import", version: 1, articles: [{ external_id: "store:3", status: "draft", title: "Store three", content: "Three." }] }, import_id: storeId }, docStore);
+    check("a part is merged by the store, then dry-run there", bodyOf(part).includes("- create: 3"), bodyOf(part).slice(0, 300));
+    stub.reset();
+    const applied = bodyOf(await handleImportContent(CTX, { import_id: storeId, dry_run: false, background: false }, docStore));
+    check(
+      "a foreground apply by import_id runs in the store and imports everything",
+      applied.includes("Import complete") && ["store:1", "store:2", "store:3"].every((e) => byExternal(e).id),
+      applied.slice(0, 400),
+    );
+    check("on this path the tool itself never read the stored document", toolReads.length === 0, toolReads.join(", "));
+    const missing = await handleImportContent(CTX, { import_id: "imp_AAAAAAAAAAAAAAAAAAAAAA" }, docStore);
+    check("an unknown import_id on this path is refused as missing", missing.isError === true && bodyOf(missing).includes("There is no import"));
+  }
+
+  // -- 15. MCP-2: the core, approvals, headers ------------------------------
+  console.log("\n[ 15. The core as the Worker mounts it, approvals and headers ]");
 
   // The version is one constant, and every file that states it agrees.
   const pkg = JSON.parse(readFileSync(join(PACKAGE_ROOT, "package.json"), "utf8")) as { version: string };
-  const pkgJson = JSON.parse(readFileSync(join(PACKAGE_ROOT, "package.json"), "utf8")) as { private?: boolean; publishConfig?: unknown; scripts?: Record<string, string> };
+  const pkgJson = JSON.parse(readFileSync(join(PACKAGE_ROOT, "package.json"), "utf8")) as {
+    private?: boolean;
+    publishConfig?: unknown;
+    scripts?: Record<string, string>;
+    bin?: unknown;
+    main?: unknown;
+    files?: unknown;
+    exports?: Record<string, unknown>;
+  };
   const serverJson = JSON.parse(readFileSync(join(PACKAGE_ROOT, "server.json"), "utf8")) as { version: string; packages?: unknown[]; remotes?: { type: string; url: string }[] };
   const mcpJson = JSON.parse(readFileSync(join(PACKAGE_ROOT, "mcp.json"), "utf8")) as { mcpServers: Record<string, { type?: string; command?: string }> };
   const pluginJson = JSON.parse(readFileSync(join(PACKAGE_ROOT, ".claude-plugin", "plugin.json"), "utf8")) as { version: string };
@@ -1255,6 +1244,13 @@ async function main(): Promise<void> {
     "the package is private and never published (no publishConfig, no prepublishOnly)",
     pkgJson.private === true && pkgJson.publishConfig === undefined && pkgJson.scripts?.prepublishOnly === undefined,
   );
+  check(
+    "package.json has no bin, no main entry and no files list, and exports only ./core",
+    pkgJson.bin === undefined && pkgJson.main === undefined && pkgJson.files === undefined &&
+      JSON.stringify(Object.keys(pkgJson.exports ?? {}).sort()) === JSON.stringify(["./core", "./package.json"]) &&
+      pkgJson.scripts?.start === undefined,
+    JSON.stringify({ bin: pkgJson.bin, main: pkgJson.main, exports: Object.keys(pkgJson.exports ?? {}) }),
+  );
   check("server.json lists no npm/stdio package, only the hosted remote", serverJson.packages === undefined || serverJson.packages.length === 0);
   check(
     "mcp.json offers no local stdio server",
@@ -1262,6 +1258,7 @@ async function main(): Promise<void> {
   );
 
   // The core as the Worker mounts it: a key from the grant, no filesystem, no login tools.
+  const STDIO_ONLY_TOOLS = ["login", "login_status", "logout"];
   let remoteKey: string | null = SECRET_KEY;
   const remote = createWritavoMcpServer({
     apiKey: () => remoteKey,
@@ -1284,7 +1281,7 @@ async function main(): Promise<void> {
   );
   check(
     "the hosted server has no login, login_status or logout",
-    STDIO_TOOL_NAMES.every((n) => !remoteTools.some((t) => t.name === n)),
+    STDIO_ONLY_TOOLS.every((n) => !remoteTools.some((t) => t.name === n) && !(CORE_LOCAL_TOOL_NAMES as readonly string[]).includes(n)),
   );
   check(
     "every tool carries all four annotations, and only the URL-fetching tools claim an open world",
@@ -1433,7 +1430,7 @@ async function main(): Promise<void> {
       },
     },
   });
-  const parked = await callOperation(STDIO_CONTEXT, gatedDelete, { id: "00000000-0000-4000-8000-000000000000", confirm: true });
+  const parked = await callOperation(CTX, gatedDelete, { id: "00000000-0000-4000-8000-000000000000", confirm: true });
   const parkedBody = bodyOf(parked);
   check(
     "a 428 becomes an ordinary result: open the link, approve, call again with approval_id",
@@ -1459,7 +1456,7 @@ async function main(): Promise<void> {
       status: 428,
       body: { ok: false, error: { code: "APPROVAL_REQUIRED", message: "x", approval: { id: APPROVAL_ID, url: bad, expires_at: null, status: "pending" } } },
     });
-    const shown = bodyOf(await callOperation(STDIO_CONTEXT, gatedDelete, { id: "00000000-0000-4000-8000-000000000000", confirm: true }));
+    const shown = bodyOf(await callOperation(CTX, gatedDelete, { id: "00000000-0000-4000-8000-000000000000", confirm: true }));
     check(
       `an approval link other than app.writavo.com/approvals/<id> is replaced: ${bad}`,
       !shown.includes(bad) && shown.includes(`https://app.writavo.com/approvals/${APPROVAL_ID}`),
@@ -1468,19 +1465,19 @@ async function main(): Promise<void> {
   }
   stub.reset();
   stub.respond = () => ({ status: 200, body: { ok: true, data: { id: "x" } } });
-  await callOperation(STDIO_CONTEXT, gatedDelete, { id: "00000000-0000-4000-8000-000000000000", confirm: true, approval_id: APPROVAL_ID });
+  await callOperation(CTX, gatedDelete, { id: "00000000-0000-4000-8000-000000000000", confirm: true, approval_id: APPROVAL_ID });
   check(
     "the retry sends the approval as Writavo-Approval, with the tool name",
     stub.requests[0]?.approval === APPROVAL_ID && stub.requests[0]?.mcpTool === "delete_article",
     JSON.stringify(stub.requests[0] ?? {}).slice(0, 300),
   );
   stub.reset();
-  await callOperation(STDIO_CONTEXT, { ...operation("delete_article"), approval: null }, { id: "00000000-0000-4000-8000-000000000000", confirm: true, approval_id: APPROVAL_ID });
+  await callOperation(CTX, { ...operation("delete_article"), approval: null }, { id: "00000000-0000-4000-8000-000000000000", confirm: true, approval_id: APPROVAL_ID });
   check("an ungated tool never sends Writavo-Approval", stub.requests[0]?.approval === null);
 
   const refusal = async (status: number, code: string) => {
     stub.respond = () => ({ status, body: { ok: false, error: { code, message: `The API said ${code}.` } } });
-    return callOperation(STDIO_CONTEXT, gatedDelete, { id: "00000000-0000-4000-8000-000000000000", confirm: true, approval_id: APPROVAL_ID });
+    return callOperation(CTX, gatedDelete, { id: "00000000-0000-4000-8000-000000000000", confirm: true, approval_id: APPROVAL_ID });
   };
   const deniedApproval = await refusal(403, "APPROVAL_DENIED");
   check(
@@ -1508,48 +1505,12 @@ async function main(): Promise<void> {
 
   // Every request an operation makes is labelled with its tool.
   stub.reset();
-  await callOperation(STDIO_CONTEXT, operation("list_articles"), {});
+  await callOperation(CTX, operation("list_articles"), {});
   check(
-    "every API request names its tool in Writavo-Mcp-Tool and the user agent carries the version",
-    stub.requests[0]?.mcpTool === "list_articles" && stub.requests[0]?.userAgent === `writavo-mcp-server/${VERSION}`,
+    "every API request names its tool in Writavo-Mcp-Tool and sends the host's user agent",
+    stub.requests[0]?.mcpTool === "list_articles" && stub.requests[0]?.userAgent === USER_AGENT,
     JSON.stringify(stub.requests[0] ?? {}).slice(0, 200),
   );
-
-  // The key auto-extension: only when due, at most once a day, and the file follows.
-  const { extendSavedKeyIfDue } = await import("../src/stdio/key-lifecycle.js");
-  const soon = new Date(Date.now() + 10 * 86_400_000).toISOString();
-  const later = new Date(Date.now() + 90 * 86_400_000).toISOString();
-  writeCredentials({ ...credentials, api_key: fileKey, expires_at: soon });
-  activateKey(fileKey, "login", { ...credentials, api_key: fileKey, expires_at: soon }, credentialsPath());
-  keyRoutes.extendTo = later;
-  stub.reset();
-  const extended = await extendSavedKeyIfDue();
-  const afterExtend = readCredentials();
-  check(
-    "a saved key within 30 days of expiry is extended, with that key, and the file is rewritten",
-    extended.state === "extended" &&
-      stub.requests.some((r) => r.path.endsWith("/auth/key/extend") && r.authorization === `Bearer ${fileKey}`) &&
-      afterExtend.state === "valid" && afterExtend.credentials.expires_at === later && Boolean(afterExtend.credentials.extend_checked_at),
-    `${JSON.stringify(extended)} ${afterExtend.state}`,
-  );
-  check("the key in use carries the new expiry", loginIdentity()?.expiresAt === later);
-  stub.reset();
-  const notDue = await extendSavedKeyIfDue();
-  check("a key with more than 30 days left is not sent at all", notDue.state === "skipped" && stub.requests.length === 0, JSON.stringify(notDue));
-  writeCredentials({ ...credentials, api_key: fileKey, expires_at: soon, extend_checked_at: new Date().toISOString() });
-  stub.reset();
-  const twice = await extendSavedKeyIfDue();
-  check("it asks at most once a day", twice.state === "skipped" && stub.requests.length === 0, JSON.stringify(twice));
-  writeCredentials({ ...credentials, api_key: fileKey, expires_at: soon });
-  keyRoutes.extendTo = null;
-  const capped = await extendSavedKeyIfDue();
-  check(
-    "a key at its maximum lifetime is left as it is, and the check is recorded",
-    capped.state === "unchanged" && readCredentials().state === "valid" && (readCredentials() as { credentials: { extend_checked_at?: string } }).credentials.extend_checked_at !== undefined,
-    JSON.stringify(capped),
-  );
-  clearKey();
-  deleteCredentials();
 
   // The generated surface never exposes the host-owned key routes.
   check(
@@ -1601,27 +1562,50 @@ async function main(): Promise<void> {
     rmSync(genDir, { recursive: true, force: true });
   }
 
-  // The core must run where there is no filesystem and no environment: walk what it imports.
+  // The package must run where there is no filesystem and no environment: every module under src/,
+  // not only what the core entry reaches, and every one of them reachable from that entry (so no
+  // host code is left behind unused).
+  const srcRoot = join(PACKAGE_ROOT, "src");
+  const allModules = (readdirSync(srcRoot, { recursive: true }) as string[])
+    .filter((f) => f.endsWith(".ts") && !f.endsWith(".d.ts"))
+    .map((f) => join(srcRoot, f));
   const coreGraph = new Set<string>();
   const forbidden: string[] = [];
+  const scan = (file: string): string[] => {
+    // Comments may mention process.env; code may not.
+    const source = readFileSync(file, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    const name = relative(PACKAGE_ROOT, file);
+    const local: string[] = [];
+    const specs = [
+      ...[...source.matchAll(/^\s*(?:import|export)\s[^;]*?from\s+"([^"]+)"/gms)].map((m) => m[1]!),
+      // import("...") too: a dynamic import (or a type-only one) reaches a module just the same.
+      ...[...source.matchAll(/\bimport\(\s*"([^"]+)"\s*\)/g)].map((m) => m[1]!),
+    ];
+    for (const spec of specs) {
+      if (/^(node:)?(fs|fs\/promises|os|path|child_process|net|http|https|worker_threads|readline)$/.test(spec)) forbidden.push(`${name} imports ${spec}`);
+      if (/@modelcontextprotocol\/sdk\/server\/stdio/.test(spec)) forbidden.push(`${name} imports the stdio transport`);
+      if (spec.startsWith(".")) local.push(join(dirname(file), spec.replace(/\.js$/, ".ts")));
+    }
+    if (/process\.(env|argv|cwd|exit|platform|stdout|stderr|stdin)/.test(source)) forbidden.push(`${name} reads process`);
+    return local;
+  };
+  for (const file of allModules) scan(file);
   const walk = (file: string): void => {
     if (coreGraph.has(file)) return;
     coreGraph.add(file);
-    // Comments may mention process.env or src/stdio; code may not.
-    const source = readFileSync(file, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
-    for (const m of source.matchAll(/^\s*(?:import|export)\s[^;]*?from\s+"([^"]+)"/gms)) {
-      const spec = m[1]!;
-      if (/^node:(fs|os|child_process|net|http|https|worker_threads)/.test(spec)) forbidden.push(`${file.replace(PACKAGE_ROOT, "")} imports ${spec}`);
-      if (spec.startsWith(".")) walk(join(dirname(file), spec.replace(/\.js$/, ".ts")));
-    }
-    if (/process\.(env|argv|cwd|exit|platform)/.test(source)) forbidden.push(`${file.replace(PACKAGE_ROOT, "")} reads process`);
-    if (/\/(config|credentials)\.js"|\/stdio\/|\/auth\/device\.js"|\/tools\/login\.js"/.test(source)) forbidden.push(`${file.replace(PACKAGE_ROOT, "")} imports a stdio-only module`);
+    for (const next of scan(file)) walk(next);
   };
-  walk(join(PACKAGE_ROOT, "src", "core", "index.ts"));
+  walk(join(srcRoot, "core", "index.ts"));
   check(
-    `the core's ${coreGraph.size} modules touch no filesystem, no environment and no stdio-only module`,
-    forbidden.length === 0 && coreGraph.size > 15,
-    forbidden.join("; "),
+    `all ${allModules.length} modules in src/ touch no filesystem, no environment and no stdio transport`,
+    forbidden.length === 0 && allModules.length > 15,
+    [...new Set(forbidden)].join("; "),
+  );
+  const orphans = allModules.filter((f) => !coreGraph.has(f)).map((f) => relative(PACKAGE_ROOT, f));
+  check(`every module in src/ is reachable from the core entry (${coreGraph.size} of ${allModules.length})`, orphans.length === 0, orphans.join(", "));
+  check(
+    "the stdio host is gone: no entry point, no saved sign-in, no device login, no local file support",
+    ["index.ts", "server.ts", "config.ts", "credentials.ts", "stdio", "auth", join("tools", "login.ts")].every((f) => !existsSync(join(srcRoot, f))),
   );
   globalThis.fetch = realFetch;
 
@@ -1645,7 +1629,7 @@ async function main(): Promise<void> {
   };
 
   check(
-    "search_writavo_actions, read_writavo_action and run_writavo_action are core tools on both hosts, and listed for the docs page",
+    "search_writavo_actions, read_writavo_action and run_writavo_action are core tools, and listed for the docs page",
     ["search_writavo_actions", "read_writavo_action", "run_writavo_action"].every(
       (n) => CORE_LOCAL_TOOL_NAMES.includes(n as never) && surfaceModule.LOCAL_TOOLS.some((t) => t.name === n),
     ),
@@ -1662,14 +1646,6 @@ async function main(): Promise<void> {
     "every gated action has a consequence and an approval mode; every paid action asks first",
     REAL_ACTIONS.filter((a) => a.approval).every((a) => a.consequence && a.approvalMode) &&
       REAL_ACTIONS.filter((a) => a.spendsCredits || a.spendsMoney).every((a) => a.confirm),
-  );
-  check(
-    "the login default is the 30 agent scopes, sorted, never keys:* or webhooks:*",
-    DEFAULT_SCOPES.length === 30 &&
-      [...DEFAULT_SCOPES].sort().join() === DEFAULT_SCOPES.join() &&
-      !DEFAULT_SCOPES.some((s: string) => /^(keys|webhooks):/.test(s)) &&
-      ["site:read", "team:write", "billing:write", "org:write", "logs:read"].every((s) => (DEFAULT_SCOPES as readonly string[]).includes(s)),
-    DEFAULT_SCOPES.join(","),
   );
   check(
     "the NEVER list names a next step for each item",
@@ -1978,10 +1954,10 @@ async function main(): Promise<void> {
     check("searching needs no key and makes no request", (() => { stub.reset(); handleSearchActions({ query: "domain" }, FIXTURE_ACTIONS); return stub.requests.length === 0; })());
 
     // Run: validation before anything is sent.
-    activateKey(SECRET_KEY, "env");
+    currentKey = SECRET_KEY;
     stub.reset();
     stub.respond = () => ({ status: 200, body: { ok: true, data: { ok: "yes" } } });
-    const run = (args: Record<string, unknown>) => handleRunAction(STDIO_CONTEXT, args, FIXTURE_ACTIONS);
+    const run = (args: Record<string, unknown>) => handleRunAction(CTX, args, FIXTURE_ACTIONS);
     const badType = await run({ operation_id: "inviteTeamMember", arguments: { email: 5, role: "editor" }, confirm: true });
     const unknownField = await run({ operation_id: "inviteTeamMember", arguments: { email: "a@example.com", role: "editor", website_id: "x" }, confirm: true });
     const missing = await run({ operation_id: "inviteTeamMember", arguments: { role: "editor" }, confirm: true });
@@ -2057,7 +2033,7 @@ async function main(): Promise<void> {
       JSON.stringify(stub.requests[0] ?? {}).slice(0, 300),
     );
     stub.reset();
-    const read = (args: Record<string, unknown>) => handleReadAction(STDIO_CONTEXT, args, FIXTURE_ACTIONS);
+    const read = (args: Record<string, unknown>) => handleReadAction(CTX, args, FIXTURE_ACTIONS);
     const readViaRun = await run({ operation_id: "getBillingSummary" });
     const writeViaRead = await read({ operation_id: "inviteTeamMember", arguments: inviteArgs, confirm: true });
     check(
@@ -2097,7 +2073,7 @@ async function main(): Promise<void> {
       twoScopes.isError === true && bodyOf(twoScopes).includes("seo:write and plan:write"),
       bodyOf(twoScopes).slice(0, 300),
     );
-    clearKey();
+    currentKey = null;
     stub.reset();
     const noKeyRun = await read({ operation_id: "getBillingSummary" });
     check("run: with no key it says how to sign in and sends nothing", noKeyRun.isError === true && stub.requests.length === 0);
@@ -2106,7 +2082,7 @@ async function main(): Promise<void> {
     check("the fixture catalog was generated", false, "the fixture generator produced no actions");
   }
 
-  // Both hosts register the two tools, and the instructions point at them.
+  // The core registers the action tools, and the instructions point at them.
   {
     const remote2 = createWritavoMcpServer({ apiKey: () => SECRET_KEY, apiBase: baseUrl, userAgent: "writavo-mcp-smoke-worker/1.0", host: "remote" });
     const [c2, s2] = InMemoryTransport.createLinkedPair();
@@ -2155,28 +2131,7 @@ async function main(): Promise<void> {
     await client2.close();
   }
 
-  // -- the base URL guard ----------------------------------------------------
-  console.log("\n[ The base URL guard ]");
-  check("the harness reaches the stub over loopback", CONFIG.apiBaseUrl.startsWith("http://127.0.0.1"));
-  const guard = spawn(process.execPath, ["-e", "import('./dist/config.js').then(m => process.stderr.write(m.CONFIG.apiBaseUrl))"], {
-    cwd: PACKAGE_ROOT,
-    env: { ...process.env, WRITAVO_API_BASE_URL: "https://not-writavo.example.com/v1", WRITAVO_API_KEY: SECRET_KEY },
-  });
-  const guarded = await new Promise<string>((resolve) => {
-    let out = "";
-    guard.stderr.on("data", (c: Buffer) => {
-      out += c.toString();
-    });
-    guard.on("close", () => resolve(out));
-  });
-  check(
-    "a non-loopback base URL override is ignored",
-    guarded.includes("https://api.writavo.com/v1") && !guarded.includes("not-writavo"),
-    guarded.slice(0, 200),
-  );
-
   await stub.close();
-  await clientProbe();
 
   console.log("\n================================================");
   const failed = checks.filter((c) => !c.ok);

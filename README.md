@@ -122,9 +122,20 @@ current system with the access you already have, write an import file, dry run, 
 verify. Slugs are kept so URLs do not change, published posts keep their original publication
 dates, drafts stay drafts, and images are copied into your media library.
 
-The document is the **Writavo Import Format v1**, a single JSON document, passed inline as `data`,
-up to 50 articles and 2 MB per call. The assistant reads your export and splits a bigger blog into
-several documents:
+The document is the **Writavo Import Format v1**, a single JSON document. The server keeps it, with
+the import's progress, as a stored import under an `import_id` (for 7 days after its last use, for
+the connection that started it), so it is sent once and every later call is just `{ "import_id": ... }`.
+Three ways in, up to 10 MB:
+
+- **`upload: true`** returns a one-time link and a `curl` command that PUTs the file straight to
+  the server. Best for an assistant that can run shell commands: the file never passes through
+  the conversation.
+- **`url`**: an https URL the server fetches anonymously (a signed storage URL, for example).
+- **`data`**: the document inline, up to 50 articles and 2 MB per call. Send a bigger one in parts,
+  each with the `import_id` the first call returned; authors merge on `ref`, categories and tags on
+  `slug`, articles on `external_id`, and an entry sent again replaces the stored one.
+
+A document looks like this:
 
 ```json
 {
@@ -153,11 +164,18 @@ The full field list and the JSON Schema are in the `writavo://import-format` res
 `import_content` with no arguments. `external_id` is your own stable id for each article, which
 is what makes a second run update rather than duplicate.
 
-`import_content` is a dry run unless told otherwise: it checks every article against the Site and
-reports what it would create, update and publish, every problem by `external_id`, the images to
-copy and a time estimate, and writes nothing. An import that publishes needs `confirm: true`. A call that
-runs out of time lists the articles still to do, and sending an article again updates it rather
-than duplicating it, so an import is safe to run again. It never deletes or unpublishes anything, and it changes
+`import_content` is a dry run unless told otherwise: it checks the whole document against the Site
+in one pass and reports what it would create, update and publish, every problem (top-level entries
+and each article by `external_id`, together), the images to copy and a time estimate, and writes
+nothing. An import that publishes needs `confirm: true`. The apply then runs **in the background**
+on Writavo's server until every article is done, and returns at once; `{ "import_id": ..., "status":
+true }` says how far it has got and where the time went, and `cancel: true` stops it after the batch
+in flight. Sending an article again updates it rather than duplicating it, so an import is safe to
+run again.
+
+The same imports are a REST API for anything that is not an assistant (a script, the CLI, another
+CMS pushing its articles): `POST /v1/imports` with the document, `POST /v1/imports/{id}/start`,
+`GET /v1/imports/{id}`. See https://writavo.com/docs/migrate. It never deletes or unpublishes anything, and it changes
 nothing in your content except the URLs of the images it copied.
 
 ## What it will not do without asking
@@ -250,18 +268,18 @@ import { createWritavoMcpServer } from "@writavo/mcp-server/core";
 const server = createWritavoMcpServer({
   apiKey: () => key,              // null makes every key-requiring tool say how to connect
   userAgent: "my-host/1.0",
-  host: "remote",                 // or "stdio"
 });
 ```
 
-Nothing reachable from that entry reads the environment, touches a filesystem or keeps a key in
-module state, so it runs in a Cloudflare Worker (the hosted server mounts exactly this). The stdio
-entry (`src/index.ts`) is kept only as a test harness for the offline smoke checks; it is not
-distributed. Tool schemas, descriptions and reference text are generated, not written:
+Nothing in the package reads the environment, touches a filesystem or keeps a key in module
+state, so it runs in a Cloudflare Worker (the hosted server mounts exactly this). There is no
+local or stdio entry point: the package has no `bin` and exports only `./core`. Tool schemas,
+descriptions and reference text are generated, not written:
 
 ```
+npm run build       check the generated tools are current, then compile
 npm run gen         regenerate from the vendored openapi.yaml
-npm test            run the offline smoke checks (sign-in, import and more, against a stub)
+npm test            run the offline smoke checks (the core over an in-memory MCP client, imports and more, against a stub API)
 npm run gen:check   fails if the committed tool surface is stale
 ```
 
@@ -270,8 +288,8 @@ marked `x-writavo-approval` gains an `approval_id` argument by itself. The thirt
 operations are individual tools; every other operation lands in the `ACTIONS` catalog in
 `src/generated/operations.ts` (by its tag, or `x-mcp-surface: tool | action` on the operation or
 the tag), which `search_writavo_actions`, `read_writavo_action` and `run_writavo_action` serve. Editing anything under
-`src/generated/` fails CI. The ten hand-written tools live in `src/tools/` and are listed in
-`LOCAL_TOOLS` in the monorepo's `scripts/mcp-surface.mjs`.
+`src/generated/` fails CI. The seven hand-written tools live in `src/tools/` (`CORE_LOCAL_TOOL_NAMES`
+in `src/core/server.ts`) and are listed in `LOCAL_TOOLS` in the monorepo's `scripts/mcp-surface.mjs`.
 
 ## Licence
 

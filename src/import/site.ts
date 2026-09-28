@@ -34,6 +34,7 @@ export async function call<T>(ctx: ToolContext, request: ApiRequest, deadline = 
       const retryAfter = err instanceof WritavoApiError && err.retryAfter ? Number.parseInt(err.retryAfter, 10) * 1000 : NaN;
       const wait = Math.min(Number.isFinite(retryAfter) ? retryAfter : 2_000 * 2 ** attempt, 30_000);
       if (Date.now() + wait > deadline) throw err;
+      if (ctx.stats) ctx.stats.waitMs += wait;
       await sleep(wait);
     }
   }

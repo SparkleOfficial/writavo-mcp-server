@@ -2,7 +2,19 @@ import { z } from "zod";
 import { hasKey, keyKindOf, forTool, type ToolContext } from "../core/context.js";
 import { publishableKeyRefusal, text, toolError, type ToolResult } from "../errors.js";
 import { importFormatDocument } from "../import/format.js";
-import { runImport, type ImportSource } from "../import/engine.js";
+import { runImport, type ImportBudget, type ImportSource } from "../import/engine.js";
+import {
+  IMPORT_ID_RE,
+  JOB_TTL_DAYS,
+  MAX_JOB_BYTES,
+  UPLOAD_LINK_MINUTES,
+  byteLength,
+  fetchImportDocument,
+  jobSource,
+  mergeImportDocuments,
+  type BackgroundStatus,
+  type ImportJobStore,
+} from "../import/jobs.js";
 import type { ToolArgs } from "./call.js";
 
 /**
@@ -11,30 +23,40 @@ import type { ToolArgs } from "./call.js";
  * exactly right (matching, idempotency, dates, images, rate limits, resuming) is done here, in
  * code, where it can be tested, rather than left to a model orchestrating a few hundred tool calls.
  *
- * Two ways in. `data` is the document inline, which works everywhere, the hosted server included,
- * and is capped per call. `path` is a file on this machine, which only the stdio host offers: it
- * has no size cap, imports in batches and keeps a progress file beside the document. The host
- * injects file support; the tool itself never touches a filesystem.
+ * How the document arrives:
+ *   - `data`, the document inline, capped per call;
+ *   - on the hosted server, every document becomes an IMPORT JOB (src/import/jobs.ts) kept on the
+ *     server with its progress: sent inline (in parts if it is big), fetched from an https `url`,
+ *     or PUT straight to the server with an `upload` link, and continued with just { import_id }.
+ * The host injects job support; the tool itself never touches a filesystem or storage.
  */
 
-/** Per call, for an inline document. Past this the document belongs in several calls, or a file. */
+/** Per call, for an inline document or part. Past this the document belongs in several parts, a URL or an upload. */
 export const MAX_INLINE_ARTICLES = 50;
 export const MAX_INLINE_BYTES = 2 * 1024 * 1024;
 
-/** What a host that has a filesystem adds: turn a path into a document and a progress store. */
-export interface ImportFileSupport {
-  open(path: string): Promise<ImportSource | ToolResult>;
+interface Capabilities {
+  jobs: boolean;
+  /** The host can run a stored import to the end on its own (ImportJobStore.startBackground). */
+  background: boolean;
 }
 
 const NAME = "import_content";
+const MB = (bytes: number) => `${bytes / 1024 / 1024} MB`;
 
-function description(withFiles: boolean): string {
+function description(can: Capabilities): string {
+  const ways = can.jobs
+    ? [
+        `Give the document one of three ways, and it is kept on the server as an import job with its own progress: inline as data (at most ${MAX_INLINE_ARTICLES} articles and 2 MB per call; send a bigger document in parts, each with the import_id the first call returned); as an https url the server fetches (a signed storage URL, for example; up to ${MB(MAX_JOB_BYTES)}); or, if you can run a shell command, call with upload: true for a one-time link and curl the file to it (up to ${MB(MAX_JOB_BYTES)}).`,
+        can.background
+          ? "Every call after that is just import_id. An apply (dry_run false) runs IN THE BACKGROUND on the server until it is done, with nobody connected: it returns at once, and import_id with status: true says how far it has got. Check every minute or two; do not call apply again while it runs."
+          : "Every call after that is just import_id (plus dry_run, confirm): nothing is sent again.",
+      ]
+    : [`Give the document inline as data, at most ${MAX_INLINE_ARTICLES} articles and 2 MB per call; split a bigger blog across several calls, each carrying the authors, categories and tags its articles use.`];
   return [
     "Import a blog into the Site from a document in the Writavo Import Format: articles with their original slugs and original publish dates, drafts kept as drafts, authors, categories and tags, and images copied into the media library.",
-    withFiles
-      ? `Give the document either inline as data (at most ${MAX_INLINE_ARTICLES} articles and 2 MB per call) or as the absolute path of a JSON file on this machine (no size limit; progress is saved next to the file).`
-      : `Give the document inline as data, at most ${MAX_INLINE_ARTICLES} articles and 2 MB per call; split a bigger blog across several calls, each carrying the authors, categories and tags its articles use.`,
-    "Runs as a dry run by default, which checks everything against the Site and writes nothing. An apply imports as much as fits in one call and says what is left.",
+    ...ways,
+    "Runs as a dry run by default, which checks the whole document against the Site, reports every problem in one pass, and writes nothing. An apply imports as much as fits in one call (about 35 seconds) and says what is left.",
     "Articles are matched by external_id, so running it again updates rather than duplicates. It never deletes or unpublishes anything.",
     "Applying with publish true makes articles publicly visible on the customer's own live site, so it needs confirm: true, which you pass only after the user has agreed.",
     "Call it with no document to get the format's JSON Schema and a sample.",
@@ -42,20 +64,39 @@ function description(withFiles: boolean): string {
   ].join(" ");
 }
 
-function inputSchema(withFiles: boolean): Record<string, z.ZodTypeAny> {
+function inputSchema(can: Capabilities): Record<string, z.ZodTypeAny> {
+  const oneOf = can.jobs ? "Give at most one of data, url or upload." : "";
   return {
     data: z
       .union([z.record(z.unknown()), z.string()])
       .optional()
       .describe(
-        `The import document itself, as a JSON object (or its JSON text): { "format": "writavo-import", "version": 1, "articles": [...] }. At most ${MAX_INLINE_ARTICLES} articles and 2 MB per call.${withFiles ? " Give this or path, not both." : ""} Omit it to get the format description, JSON Schema and a sample instead.`,
+        `The import document itself, as a JSON object (or its JSON text): { "format": "writavo-import", "version": 1, "articles": [...] }. At most ${MAX_INLINE_ARTICLES} articles and 2 MB per call.${can.jobs ? " With import_id, it is added to that import: authors merge on ref, categories and tags on slug, articles on external_id, and an entry with the same key replaces the stored one." : ""} ${oneOf} Omit every document argument to get the format description, JSON Schema and a sample instead.`.trim(),
       ),
-    ...(withFiles
+    ...(can.jobs
       ? {
-          path: z
+          url: z
             .string()
             .optional()
-            .describe("Absolute path to an import JSON file on this machine. Give this or data, not both. No size limit: it is imported in batches, with progress saved next to the file."),
+            .describe(`An https URL the server fetches the whole document from, anonymously (a signed storage URL, a raw gist URL). Up to ${MB(MAX_JOB_BYTES)}. With import_id, the fetched document is added to that import.`),
+          upload: z
+            .boolean()
+            .optional()
+            .describe(`true: returns a one-time link and a curl command to PUT the document file straight to the server (up to ${MB(MAX_JOB_BYTES)}, link valid ${UPLOAD_LINK_MINUTES} minutes), without passing it through this conversation. Use it when you can run a shell command. Then call again with the import_id.`),
+          import_id: z
+            .string()
+            .optional()
+            .describe(`The import_id a previous call returned (imp_...). Alone, it dry-runs or continues that import from where it stopped. Stored imports are kept ${JOB_TTL_DAYS} days after their last use, for this connection only.`),
+        }
+      : {}),
+    ...(can.background
+      ? {
+          background: z
+            .boolean()
+            .optional()
+            .describe("Defaults to true for a stored import: an apply runs on the server until the import is complete, and the call returns at once. false runs one short batch in this call instead."),
+          status: z.boolean().optional().describe("With import_id: how far the import has got (and its last report). Reads only."),
+          cancel: z.boolean().optional().describe("With import_id: stop a background import after its current batch. What is already imported stays."),
         }
       : {}),
     dry_run: z
@@ -74,11 +115,7 @@ function inputSchema(withFiles: boolean): Record<string, z.ZodTypeAny> {
       .min(1)
       .max(100)
       .optional()
-      .describe(
-        withFiles
-          ? "How many articles one call imports at most. Defaults to 20 for a file and to the whole document for inline data. A call also stops after about 35 seconds, whatever this is."
-          : "How many articles one call imports at most. Defaults to the whole document. A call also stops after about 35 seconds, whatever this is.",
-      ),
+      .describe("How many articles one call imports at most. Defaults to as many as fit. A call also stops after about 35 seconds, whatever this is."),
     rehost_images: z
       .boolean()
       .optional()
@@ -87,34 +124,36 @@ function inputSchema(withFiles: boolean): Record<string, z.ZodTypeAny> {
       .boolean()
       .optional()
       .describe("Defaults to true: articles with status published are published with their original dates. False imports everything as a draft and leaves articles already live untouched."),
-    ...(withFiles
+    ...(can.jobs
       ? {
           retry_failed: z
             .boolean()
             .optional()
-            .describe("For a file import: try again, once, the articles an earlier call skipped or failed, for example after fixing a slug conflict on the Site. Leave it out otherwise."),
+            .describe("For a stored import: try again, once, the articles an earlier call skipped or failed, for example after fixing a slug conflict on the Site. Leave it out otherwise."),
         }
       : {}),
   };
 }
 
-/** The tool as a host registers it. File support is what makes `path` appear. */
-export function importContentTool(files: ImportFileSupport | null) {
+/** The tool as a host registers it. Job support makes `url`, `upload` and `import_id` appear. */
+export function importContentTool(jobs: ImportJobStore | null = null) {
+  const can = { jobs: jobs !== null, background: typeof jobs?.startBackground === "function" };
   return {
     name: NAME,
-    description: description(files !== null),
+    description: description(can),
     scope: "articles:write",
-    inputSchema: inputSchema(files !== null),
+    inputSchema: inputSchema(can),
   };
 }
 
 /** The remote-safe definition, kept for callers that want the name and text without a host. */
-export const IMPORT_CONTENT = importContentTool(null);
+export const IMPORT_CONTENT = importContentTool();
 
-const byteLength = (value: string): number => new TextEncoder().encode(value).byteLength;
-
-/** An inline document, parsed and held to the per-call limits. */
-function inlineSource(data: unknown): ImportSource | ToolResult {
+/**
+ * An inline document or part, parsed and held to the per-call limits. Exported for the hosted
+ * import store, which applies the same limits to a part the Worker relays to it unparsed.
+ */
+export function readInlinePart(data: unknown): { document: unknown; serialised: string } | { error: string } {
   let serialised: string;
   let document: unknown;
   if (typeof data === "string") {
@@ -122,7 +161,7 @@ function inlineSource(data: unknown): ImportSource | ToolResult {
     try {
       document = JSON.parse(data);
     } catch (err) {
-      return toolError(`data is not valid JSON: ${err instanceof Error ? err.message : String(err)}. Send the import document as a JSON object.`);
+      return { error: `data is not valid JSON: ${err instanceof Error ? err.message : String(err)}. Send the import document as a JSON object.` };
     }
   } else {
     document = data;
@@ -131,46 +170,324 @@ function inlineSource(data: unknown): ImportSource | ToolResult {
 
   const size = byteLength(serialised);
   if (size > MAX_INLINE_BYTES) {
-    return toolError(
-      `The inline document is ${size} bytes, and one call takes at most ${MAX_INLINE_BYTES} (2 MB). Nothing was checked or written. Split it into several documents of at most ${MAX_INLINE_ARTICLES} articles, each carrying the authors, categories and tags its articles use, and send them one call at a time.`,
-    );
+    return {
+      error: `The inline document is ${size} bytes, and one call takes at most ${MAX_INLINE_BYTES} (2 MB). Nothing was checked or written. Split it into several documents of at most ${MAX_INLINE_ARTICLES} articles, each carrying the authors, categories and tags its articles use, and send them one call at a time.`,
+    };
   }
   const articles = (document as { articles?: unknown } | null)?.articles;
   if (Array.isArray(articles) && articles.length > MAX_INLINE_ARTICLES) {
-    return toolError(
-      `The inline document has ${articles.length} articles, and one call takes at most ${MAX_INLINE_ARTICLES}. Nothing was checked or written. Split it into documents of at most ${MAX_INLINE_ARTICLES} articles, each carrying the authors, categories and tags its articles use, and send them one call at a time. Articles are matched by external_id, so the order of the calls does not matter and nothing is duplicated.`,
-    );
+    return {
+      error: `The inline document has ${articles.length} articles, and one call takes at most ${MAX_INLINE_ARTICLES}. Nothing was checked or written. Split it into documents of at most ${MAX_INLINE_ARTICLES} articles, each carrying the authors, categories and tags its articles use, and send them one call at a time. Articles are matched by external_id, so the order of the calls does not matter and nothing is duplicated.`,
+    };
   }
-  return { label: "the inline document", document, store: null, reference: null, lockKey: null };
+  return { document, serialised };
 }
 
-export async function handleImportContent(ctx: ToolContext, rawArgs: ToolArgs, files: ImportFileSupport | null = null): Promise<ToolResult> {
+function parseInline(data: unknown): { document: unknown; serialised: string } | ToolResult {
+  const read = readInlinePart(data);
+  return "error" in read ? toolError(read.error) : read;
+}
+
+function inlineSource(data: unknown): ImportSource | ToolResult {
+  const parsed = parseInline(data);
+  if ("content" in parsed) return parsed;
+  return {
+    label: "the inline document",
+    document: parsed.document,
+    store: null,
+    reference: null,
+    lease: null,
+    defaultBatchSize: MAX_INLINE_ARTICLES,
+  };
+}
+
+const NO_SUCH_IMPORT = (id: string) =>
+  `There is no import ${id} for this connection. Imports are kept ${JOB_TTL_DAYS} days after their last use, and only the connection that started one can use it. Send the document again without import_id to start a new import; articles already imported are found again by external_id, so nothing is duplicated.`;
+
+/**
+ * The hosted path: turn the call's document argument (if any) into a stored import, merged into
+ * the named one when there is an import_id, and hand the engine that import.
+ */
+async function jobSourceFor(jobs: ImportJobStore, args: { data?: unknown; url?: string; import_id?: string }, hasData: boolean): Promise<ImportSource | ToolResult> {
+  const opened = Date.now();
+  let part: unknown = undefined;
+  if (hasData) {
+    const parsed = parseInline(args.data);
+    if ("content" in parsed) return parsed;
+    part = parsed.document;
+  } else if (typeof args.url === "string" && args.url) {
+    const fetched = await fetchImportDocument(args.url);
+    if ("error" in fetched) return toolError(`Could not read the document at url: ${fetched.error}. Nothing was checked or written.`);
+    try {
+      part = JSON.parse(fetched.text);
+    } catch (err) {
+      return toolError(`The document at url is not valid JSON: ${err instanceof Error ? err.message : String(err)}. Nothing was checked or written.`);
+    }
+  }
+
+  let importId = typeof args.import_id === "string" ? args.import_id.trim() : "";
+  let document: unknown;
+  if (importId) {
+    if (!IMPORT_ID_RE.test(importId)) return toolError(`import_id "${importId.slice(0, 40)}" is not an import id. They look like imp_ followed by 22 characters, exactly as a previous call returned.`);
+    const info = await jobs.info(importId);
+    if (!info) return toolError(NO_SUCH_IMPORT(importId));
+    const storedText = info.status === "ready" ? await jobs.getDocument(importId) : null;
+    if (info.status === "ready" && storedText === null) return toolError(NO_SUCH_IMPORT(importId));
+    if (part === undefined) {
+      if (storedText === null) {
+        return toolError(
+          `Nothing has been uploaded to the import ${importId} yet. Run the upload command that call returned (it PUTs the file to the server), or call import_content with upload: true and this import_id for a new link.`,
+        );
+      }
+      document = JSON.parse(storedText);
+    } else {
+      const merged = storedText === null ? part : mergeImportDocuments(JSON.parse(storedText), part);
+      if (typeof merged === "string") return toolError(`Could not add to the import ${importId}: ${merged}. Nothing was changed.`);
+      const serialised = JSON.stringify(merged);
+      if (byteLength(serialised) > MAX_JOB_BYTES) {
+        return toolError(
+          `With this part the import ${importId} would be ${byteLength(serialised)} bytes, over the ${MB(MAX_JOB_BYTES)} limit for one import. Nothing was changed. Start a second import (without import_id) for the rest of the articles, each carrying the authors, categories and tags its articles use; articles are matched by external_id, so nothing is duplicated.`,
+        );
+      }
+      await jobs.putDocument(importId, serialised);
+      document = merged;
+    }
+  } else {
+    const serialised = JSON.stringify(part);
+    if (byteLength(serialised) > MAX_JOB_BYTES) {
+      return toolError(`The document is ${byteLength(serialised)} bytes, over the ${MB(MAX_JOB_BYTES)} limit for one import. Nothing was checked or written. Split it into two imports, each carrying the authors, categories and tags its articles use.`);
+    }
+    importId = await jobs.create();
+    await jobs.putDocument(importId, serialised);
+    document = part;
+  }
+  return { ...jobSource(jobs, importId, document), openMs: Date.now() - opened };
+}
+
+async function uploadLink(jobs: ImportJobStore, importId: string | undefined): Promise<ToolResult> {
+  let id = importId?.trim() ?? "";
+  if (id) {
+    if (!IMPORT_ID_RE.test(id) || !(await jobs.info(id))) return toolError(NO_SUCH_IMPORT(id));
+  } else {
+    id = await jobs.create();
+  }
+  const link = await jobs.createUpload(id);
+  return text(
+    [
+      `Import ${id} is waiting for its document. Nothing has been checked or written yet.`,
+      "",
+      `PUT the import file (JSON, up to ${MB(MAX_JOB_BYTES)}) to the server with this command, replacing the path. The link works once, for ${UPLOAD_LINK_MINUTES} minutes (until ${link.expires_at}). If this import already holds a document, the upload is added to it (entries with the same ref, slug or external_id replace the stored ones).`,
+      "",
+      `curl -sS --fail-with-body -X PUT -H "Content-Type: application/json" -H "Authorization: Bearer ${link.token}" --data-binary @/absolute/path/to/import.json ${link.url}`,
+      "",
+      "The token in that command is a credential for this upload only: do not show it to anyone else or put it in a file.",
+      `When it answers ok, call import_content ${JSON.stringify({ import_id: id })} for the dry run.`,
+    ].join("\n"),
+  );
+}
+
+/**
+ * A batch's own report, as a status reply quotes it. The batch ends with how to carry on BY HAND
+ * ("Next: call import_content again with the same arguments", then the call), which is right for
+ * a foreground batch and wrong here: the background run carries on by itself, and an agent that
+ * followed it would start a second apply. Those lines are dropped; the status reply says what to do.
+ */
+function batchReportForStatus(report: string): string {
+  const out: string[] = [];
+  const lines = report.split("\n");
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i]!;
+    if (/^Next: call import_content again/.test(line)) {
+      if (/^import_content \{/.test(lines[i + 1] ?? "")) i += 1;
+      continue;
+    }
+    if (/^(To apply, call:|Then call it again with the same arguments)/.test(line) || /^import_content \{/.test(line)) continue;
+    out.push(line);
+  }
+  return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+/** A background run's state, for people. */
+export function backgroundStatusText(importId: string, st: BackgroundStatus): string {
+  const p = st.progress;
+  const state: Record<BackgroundStatus["state"], string> = {
+    idle: "not started in the background",
+    running: "RUNNING in the background",
+    complete: "COMPLETE",
+    failed: "STOPPED with a problem",
+    cancelled: "CANCELLED (a batch already running when it was cancelled still finishes, within about a minute; nothing starts after it)",
+    waiting_for_confirm: "WAITING: it would publish, and confirm was not given",
+  };
+  const lines = [
+    `Import ${importId}: ${state[st.state]}.`,
+    `Articles ${p.articles_done} of ${p.articles_total} done${p.articles_failed ? `, ${p.articles_failed} failed` : ""}${p.articles_skipped ? `, ${p.articles_skipped} skipped` : ""}. Images copied ${p.images_copied}${p.images_failed ? `, ${p.images_failed} not copied` : ""}. Created: ${p.categories_created} categories, ${p.tags_created} tags, ${p.authors_created} authors.`,
+    ...(st.started_at ? [`Started ${st.started_at}; ${st.batches} batch${st.batches === 1 ? "" : "es"} so far; last update ${st.updated_at}${st.finished_at ? `; finished ${st.finished_at}` : ""}.`] : []),
+    ...(st.error ? ["", `Why it stopped: ${st.error}`] : []),
+    ...(st.last_report ? ["", "Last batch:", batchReportForStatus(st.last_report)] : []),
+    "",
+    st.state === "running"
+      ? `Check again in a minute or two with import_content ${JSON.stringify({ import_id: importId, status: true })}. Do not start it again; it carries on by itself.`
+      : st.state === "complete"
+        ? "Next: verify with list_articles that the counts, slugs and dates match the source."
+        : st.state === "idle"
+          ? `Start it with import_content ${JSON.stringify({ import_id: importId, dry_run: false })} (add confirm: true only if the user agreed to publish).`
+          : `Fix the cause, then start it again with import_content ${JSON.stringify({ import_id: importId, dry_run: false })}: it carries on where it stopped.`,
+  ];
+  return lines.join("\n");
+}
+
+type ApplyArgs = { dry_run?: boolean; background?: boolean; publish?: boolean; confirm?: boolean; rehost_images?: boolean; retry_failed?: boolean };
+
+/**
+ * An apply of a stored import: in the background when the host can run one, which is the default.
+ * Null when this call should run a foreground batch instead (background: false and not running).
+ */
+async function applyInBackground(runner: ImportJobStore, importId: string, args: ApplyArgs, ctx: ToolContext): Promise<ToolResult | null> {
+  const current = await runner.status!(importId);
+  if (current?.state === "running") return text(backgroundStatusText(importId, current));
+  if (args.background === false) return null;
+  const publish = args.publish !== false;
+  if (publish && args.confirm !== true) {
+    return text(
+      [
+        "Nothing has been done. A background import may publish articles on the customer's live site with their original dates, so it needs confirm: true, which you pass only after the user has agreed.",
+        `If they agree, call import_content ${JSON.stringify({ import_id: importId, dry_run: false, confirm: true })}.`,
+        `To import everything as drafts instead, with nothing made public: import_content ${JSON.stringify({ import_id: importId, dry_run: false, publish: false })}.`,
+      ].join("\n"),
+    );
+  }
+  const st = await runner.startBackground!(importId, {
+    apiKey: ctx.apiKey(),
+    publish,
+    confirm: args.confirm === true,
+    rehost_images: args.rehost_images !== false,
+    retry_failed: args.retry_failed === true,
+  });
+  return text(
+    [
+      `Started import ${importId} in the background on Writavo's server. It runs until every article is done, at the fastest pace the API's rate limits allow, with nobody connected; this conversation can end.`,
+      "",
+      backgroundStatusText(importId, st),
+    ].join("\n"),
+  );
+}
+
+export async function handleImportContent(
+  ctx: ToolContext,
+  rawArgs: ToolArgs,
+  jobs: ImportJobStore | null = null,
+  budget?: ImportBudget,
+): Promise<ToolResult> {
   const args = (rawArgs ?? {}) as {
     data?: unknown;
-    path?: string;
+    url?: string;
+    upload?: boolean;
+    import_id?: string;
     dry_run?: boolean;
     confirm?: boolean;
     batch_size?: number;
     rehost_images?: boolean;
     publish?: boolean;
     retry_failed?: boolean;
+    background?: boolean;
+    status?: boolean;
+    cancel?: boolean;
   };
 
+  const startedAt = Date.now();
   const hasData = args.data !== undefined && args.data !== null && args.data !== "";
-  const hasPath = files !== null && typeof args.path === "string" && args.path.length > 0;
-  if (!hasData && !hasPath) return text(importFormatDocument());
-  if (hasData && hasPath) return toolError("import_content takes data or path, not both.");
+  const hasUrl = jobs !== null && typeof args.url === "string" && args.url.length > 0;
+  const wantsUpload = jobs !== null && args.upload === true;
+  const hasId = jobs !== null && typeof args.import_id === "string" && args.import_id.length > 0;
+  const given = [hasData, hasUrl, wantsUpload].filter(Boolean).length;
+  if (given === 0 && !hasId) return text(importFormatDocument());
+  if (given > 1) return toolError("import_content takes one of data, url or upload per call, not several.");
 
   if (!hasKey(ctx)) return toolError(ctx.notSignedIn());
   if (keyKindOf(ctx) === "publishable") return publishableKeyRefusal(NAME, "articles:write");
 
-  const source = hasPath ? await files!.open(args.path as string) : inlineSource(args.data);
+  // Status and cancel read or stop a background run; they send no document and touch no article.
+  const runner = jobs && jobs.startBackground && jobs.status && jobs.cancel ? jobs : null;
+  if ((args.status === true || args.cancel === true) && hasId && given === 0 && runner) {
+    const id = args.import_id!.trim();
+    if (!IMPORT_ID_RE.test(id)) return toolError(NO_SUCH_IMPORT(id.slice(0, 40)));
+    try {
+      const st = args.cancel === true ? await runner.cancel!(id) : await runner.status!(id);
+      return st ? text(backgroundStatusText(id, st)) : toolError(NO_SUCH_IMPORT(id));
+    } catch (err) {
+      return toolError(`import_content could not reach its import storage: ${err instanceof Error ? err.message : String(err)}. Try again in a moment.`);
+    }
+  }
+
+  // THE HOSTED PATH. When the store can do the document work itself (the Durable Object), the
+  // Worker never parses a stored document: it relays the part or the URL, starts the background
+  // run or asks the store for one call's worth, and passes the reply on. On the free Workers plan
+  // a request gets 10 ms of CPU, and checking a 4 MB import takes far more (Cloudflare 1102).
+  const remote = jobs && jobs.runStored && jobs.addPart && jobs.addFromUrl ? jobs : null;
+  if (remote && !wantsUpload) {
+    try {
+      let id = hasId ? args.import_id!.trim() : "";
+      if (id && !IMPORT_ID_RE.test(id)) {
+        return toolError(`import_id "${id.slice(0, 40)}" is not an import id. They look like imp_ followed by 22 characters, exactly as a previous call returned.`);
+      }
+      if (id) {
+        const info = await remote.info(id);
+        if (!info) return toolError(NO_SUCH_IMPORT(id));
+        if (info.status !== "ready" && !hasData && !hasUrl) {
+          return toolError(
+            `Nothing has been uploaded to the import ${id} yet. Run the upload command that call returned (it PUTs the file to the server), or call import_content with upload: true and this import_id for a new link.`,
+          );
+        }
+      }
+      if (hasData || hasUrl) {
+        if (!id) id = await remote.create();
+        const added = hasData ? await remote.addPart!(id, args.data) : await remote.addFromUrl!(id, args.url!);
+        if (!added.ok) return toolError(added.error);
+      }
+      if (args.dry_run === false && runner) {
+        const started = await applyInBackground(runner, id, args, ctx);
+        if (started) return started;
+      }
+      const out = await remote.runStored!(id, {
+        apiKey: ctx.apiKey(),
+        dryRun: args.dry_run !== false,
+        confirm: args.confirm === true,
+        publish: args.publish !== false,
+        rehostImages: args.rehost_images !== false,
+        retryFailed: args.retry_failed === true,
+        ...(Number.isInteger(args.batch_size) ? { batchSize: Math.min(100, Math.max(1, args.batch_size as number)) } : {}),
+      });
+      return out.isError ? toolError(out.text) : text(out.text);
+    } catch (err) {
+      return toolError(`import_content could not reach its import storage: ${err instanceof Error ? err.message : String(err)}. Try again in a moment.`);
+    }
+  }
+
+  let source: ImportSource | ToolResult;
+  try {
+    if (wantsUpload) return await uploadLink(jobs!, args.import_id);
+    source = jobs ? await jobSourceFor(jobs, args, hasData) : inlineSource(args.data);
+  } catch (err) {
+    return toolError(`import_content could not reach its import storage: ${err instanceof Error ? err.message : String(err)}. Nothing was written. Try again in a moment.`);
+  }
   if ("content" in source) return source;
 
-  const defaultBatch = source.store ? 20 : MAX_INLINE_ARTICLES;
-  const batch = Number.isInteger(args.batch_size) ? Math.min(100, Math.max(1, args.batch_size as number)) : defaultBatch;
+  // An apply of a stored import runs in the background by default, when the host can.
+  const importId = typeof source.reference?.import_id === "string" ? source.reference.import_id : null;
+  if (runner && importId && args.dry_run === false) {
+    try {
+      const started = await applyInBackground(runner, importId, args, ctx);
+      if (started) return started;
+    } catch (err) {
+      return toolError(`import_content could not start the background import: ${err instanceof Error ? err.message : String(err)}. Nothing was written. Try again in a moment, or pass background: false to run one batch in this call.`);
+    }
+  }
+
+  const batch = Number.isInteger(args.batch_size) ? Math.min(100, Math.max(1, args.batch_size as number)) : source.defaultBatchSize;
   try {
     return await runImport(forTool(ctx, NAME), source, {
+      startedAt,
+      ...(budget ? { budget } : {}),
       dryRun: args.dry_run !== false,
       confirm: args.confirm === true,
       batchSize: batch,

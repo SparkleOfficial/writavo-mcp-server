@@ -12,11 +12,10 @@ only way Writavo is offered over MCP.
 Its tools are **generated** from the OpenAPI specification, so the server cannot expose an
 operation the API does not have.
 
-The tools live once, in `src/core/` (exported as `@writavo/mcp-server/core`), and are mounted by
-the hosted server at `https://mcp.writavo.com/mcp` (the monorepo's `workers/mcp`, a Cloudflare
-Worker with OAuth 2.1). The stdio entry in this package (`src/index.ts`, plus
-`login`/`login_status`/`logout` and the `path` arguments of `import_content` and `upload_media`)
-is kept only as the offline smoke test's harness; it is not distributed or documented for users.
+The tools live once, in `src/core/` (exported as `@writavo/mcp-server/core`, the package's only
+export), and are mounted by the hosted server at `https://mcp.writavo.com/mcp` (the monorepo's
+`workers/mcp`, a Cloudflare Worker with OAuth 2.1). There is no local or stdio server: no `bin`,
+no sign-in tools, no `path` arguments (owner ruling 2026-09-28). Do not add one back.
 
 It also ships as an Agent Plugin (`plugin.json`, `mcp.json`) and a Claude Code plugin
 (`.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`, `.mcp.json`) with one skill,
@@ -48,11 +47,10 @@ It also ships as an Agent Plugin (`plugin.json`, `mcp.json`) and a Claude Code p
   are vendored from the main Writavo repository, which owns the contract, and a sync overwrites
   local edits. Changes go there first.
 - Build: `npm run build` (checks the generated tools are current, then `tsc`). Test: `npm test`.
-- **`src/core/` and everything it imports must stay runtime-agnostic**: no `node:fs`/`node:os`,
-  no `process.*`, no import of `config.ts`, `credentials.ts`, `auth/`, `tools/login.ts` or
-  `stdio/`, and no key in module state (the Worker serves many people from one isolate). Pass
-  what a tool needs through `ToolContext`. The smoke test walks the import graph and fails on a
-  violation. Node-only code goes in `src/stdio/` (or the existing stdio modules above).
+- **Every module under `src/` must stay runtime-agnostic**: no `node:fs`/`node:os`/`node:path`,
+  no `process.*`, no stdio transport, and no key in module state (the Worker serves many people
+  from one isolate). Pass what a tool needs through `ToolContext`. The smoke test scans every
+  module, checks each is reachable from `src/core/index.ts`, and fails on a violation.
 - The version is `src/core/version.ts`; keep it equal to `package.json`, `server.json` and both
   plugin manifests (the smoke test checks).
 - **Never publish this package.** `package.json` is `"private": true` on purpose (owner decision
@@ -70,6 +68,5 @@ It also ships as an Agent Plugin (`plugin.json`, `mcp.json`) and a Claude Code p
 - A 428 (`APPROVAL_REQUIRED` / `APPROVAL_PENDING`) is a result, not an error: hand the person the
   link, then repeat the call with `approval_id`. Operations marked `x-writavo-approval` take it.
 - Every tool carries annotations; every API request sends `Writavo-Mcp-Tool: <tool>`.
-- Never log, print or persist a secret key (the stdio harness's owner-only credentials file is the
-  one exception).
+- Never log, print or persist a secret key.
 - Errors are branched on `error.code`, never on the message.

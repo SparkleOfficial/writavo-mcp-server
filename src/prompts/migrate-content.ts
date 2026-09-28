@@ -2,45 +2,33 @@ export interface MigrateContentArgs {
   source?: string;
 }
 
-/** Which server is asking: the stdio one signs in with login and can read files; the hosted one cannot. */
-export type PromptHost = "stdio" | "remote";
-
 /**
  * Move an existing blog into Writavo, faithfully. The prompt is the workflow; import_content is
  * the machinery. What a model is trusted with here is reading the source system and mapping it,
  * which is the part that differs for every customer. Everything that has to be exactly right on
  * the Writavo side (matching, idempotency, dates, images, pacing) is done by the tool.
  */
-export function migrateContentPrompt(args: MigrateContentArgs, host: PromptHost = "stdio") {
+export function migrateContentPrompt(args: MigrateContentArgs) {
   const source = args.source?.trim();
-  const signIn =
-    host === "stdio"
-      ? `1. Connect. Call login_status. If this assistant is not signed in to Writavo, call login and show
-   me the link and code it returns; call login_status every few seconds until it says approved. I
-   may need to create an account and finish onboarding first; if onboarding asks, I should choose
-   "Bring my existing articles" (the AI pipeline then stays off).`
-      : `1. Connect. Call get_site_info. If it says this assistant is not signed in, ask me to reconnect
+  const signIn = `1. Connect. Call get_site_info. If it says this assistant is not signed in, ask me to reconnect
    the Writavo connector in this assistant (it signs in through the browser; I may need to create
    an account and finish onboarding first, choosing "Bring my existing articles"). This server
-   does not read files from my machine: you read the export and send it to import_content inline,
-   at most 50 articles and 2 MB per call, so split a bigger import into several documents. Images
-   are copied from https URLs only.`;
-  const dryRun =
-    host === "stdio"
-      ? `7. Dry run. Write the JSON document to the export folder and call import_content with its
-   absolute path (any size; progress is saved next to the file). That is a dry run: it checks
-   everything against the Site and writes nothing.`
-      : `7. Dry run. Call import_content with the document inline as data, at most 50 articles and 2 MB
-   per call. Split a bigger blog into several documents, each carrying the authors, categories and
-   tags its own articles use, and dry-run each one. A dry run checks everything and writes nothing.`;
-  const apply =
-    host === "stdio"
-      ? `   Only after I agree, call import_content with the same path, dry_run false and confirm true. It
-   imports one batch per call: call it again with the same arguments until it says the import is
-   complete, and show me the progress as it goes. Use retry_failed true once for anything skipped.`
-      : `   Only after I agree, call import_content with dry_run false and confirm true, one document at a
-   time. If a call stops before the end it lists the articles still to do: send only those next.
-   Show me the progress as it goes.`;
+   does not read files from my machine, but it keeps the import document and its progress on the
+   server as an import, so you send it once and continue by its import_id. Images are copied from
+   https URLs only.`;
+  const dryRun = `7. Dry run. Write the JSON document to the export folder and get it to the server, best first:
+   if you can run shell commands, call import_content with upload: true and run the curl command
+   it returns (up to 10 MB; the file never passes through our conversation); if it is at an https
+   URL, pass url; otherwise send it as data in parts of at most 50 articles and 2 MB, passing the
+   import_id the first part returned with every further part. Then call import_content with just
+   that import_id. A dry run checks everything, reports every problem in one pass, and writes
+   nothing. To fix entries, send them again as data with the import_id: same ref, slug or
+   external_id replaces the stored one.`;
+  const apply = `   Only after I agree, call import_content with the import_id, dry_run false and confirm true
+   (or publish false to import everything as drafts). It runs in the background on Writavo's
+   server until every article is done and returns at once; check it every minute or two with the
+   import_id and status: true, show me the progress, and do not start it again while it runs. If
+   it stops with a problem, fix the cause and start it again: it carries on where it stopped.`;
   return {
     messages: [
       {
@@ -89,7 +77,7 @@ ${signIn}
    - published_at: the ORIGINAL first publication date, with its timezone. Not the export date, not
      today, not the last modified date. content_updated_at is the last content change.
    - content: markdown, words unchanged. Images as ![alt](https://...) so they are copied; relative
-     image paths need their absolute https URL${host === "stdio" ? " or an upload_media call with the local path" : " (a local image file can be uploaded with upload_media as base64 and its returned URL used)"}.
+     image paths need their absolute https URL (a local image file can be uploaded with upload_media as base64 and its returned URL used).
    - authors (a ref each; is_ai_generated false for real people), categories and tags (slug,
      name and description; a tag also its group_label), and each post's author, ONE category and
      its tags.

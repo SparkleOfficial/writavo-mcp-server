@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { WritavoApiError } from "../api/client.js";
 import { MediaError, fetchImage, uploadImage } from "../api/media.js";
-import type { ToolContext } from "../core/context.js";
+import { newApiStats, type ApiStats, type ToolContext } from "../core/context.js";
 import { formatApiError, text, toolError, type ToolResult } from "../errors.js";
 import { howtoSteps, type ImportArticle, type ImportAuthor, type ImportEnvelope, type ImportTerm } from "./format.js";
 import { articleImages, htmlImageCount, isHttps, rewriteMarkdownImages } from "./images.js";
@@ -34,19 +34,19 @@ import { checkDocument, itemLabel, type ItemCheck } from "./validate.js";
  *   - original dates go through the publish verb, which honours them on a first publish only
  *     and accepts the identical value again, so a retried publish is a no-op;
  *   - what is done is recorded in the host's progress store after every article, when the host
- *     has one (a file next to the import file, on stdio).
+ *     has one (the stored import job, on the hosted server).
  *
  * Nothing is ever deleted or unpublished, and nothing in the customer's prose is rewritten except
  * the URLs of images that were copied into the media library.
  *
  * The engine never touches a filesystem. Where the document came from and where progress is kept
- * are the host's business, passed in as an ImportSource, because the same engine runs in a Worker
- * that has neither a file to read nor anywhere to write one.
+ * are the host's business, passed in as an ImportSource, because the engine runs in a Worker that
+ * has neither a file to read nor anywhere to write one.
  */
 
 /** The document being imported, and what the host can do for it. */
 export interface ImportSource {
-  /** How replies name the document: its file path, or "the inline document". */
+  /** How replies name the document: "the import imp_...", or "the inline document". */
   label: string;
   /** The parsed JSON, not yet validated. */
   document: unknown;
@@ -54,11 +54,48 @@ export interface ImportSource {
   store: ProgressStore | null;
   /** The argument that names this document again in a follow-up call; null for inline data. */
   reference: Record<string, unknown> | null;
-  /** Serialises two applies of the same document in one process. Null when there is nothing to share. */
-  lockKey: string | null;
+  /**
+   * Serialises two applies of the same document across Worker isolates: the hosted import job,
+   * which any isolate may be asked to continue. Null for inline data, which has nothing to share.
+   */
+  lease: ImportLease | null;
+  /** batch_size when the call gives none. */
+  defaultBatchSize: number;
+  /** How long the host took to produce the document this call (a stored import's read), for the timing line. */
+  openMs?: number;
 }
 
+/** A short exclusive hold on one import, released when the call ends and expiring by itself. */
+export interface ImportLease {
+  /** ok: this call now holds it. Otherwise another call does, until `until` (epoch ms) at the latest. */
+  acquire(): Promise<{ ok: true } | { ok: false; until: number | null }>;
+  release(): Promise<void>;
+}
+
+export interface ImportBudget {
+  workMs: number;
+  graceMs: number;
+  /**
+   * Outbound requests one call may make, when its host caps them (Cloudflare Workers: 50 per
+   * invocation on the free plan, 1000 on paid). The engine stops starting new work before it would
+   * pass the cap, so a call ends cleanly instead of failing on its 51st request. Unset: no cap.
+   */
+  maxRequests?: number;
+}
+
+/**
+ * A tool call's time: new work starts only within workMs of the call starting, and everything in
+ * flight is cut off graceMs after that. 18 + 7 keeps a whole call, document read included, under
+ * the ~30 s an MCP client waits for a tool: a call that outlives its client is not lost (the work
+ * is recorded), but the client reports a timeout and the next call finds the import still held.
+ */
+export const FOREGROUND_BUDGET: ImportBudget = { workMs: 18_000, graceMs: 7_000 };
+
 export interface ImportOptions {
+  /** When the tool call started (epoch ms): the budget counts from here, document reads included. */
+  startedAt?: number;
+  /** How long a call starts new work, and how long past that it may finish what is in flight. */
+  budget?: ImportBudget;
   dryRun: boolean;
   confirm: boolean;
   batchSize: number;
@@ -69,8 +106,33 @@ export interface ImportOptions {
 
 /** Per key, per minute (contract section 2b). Used for the dry run's estimate only. */
 const RATE = { read: 600, write: 120, upload: 60 };
-/** Stop starting new work after this long, well inside the 60 second request timeout MCP clients default to. */
-const TIME_BUDGET_MS = 35_000;
+/** The dry run's estimate of one call's working time. */
+const TIME_BUDGET_MS = FOREGROUND_BUDGET.workMs;
+/**
+ * Typical wall time per request once functions run beside the database (2026-09-28), for the dry
+ * run's estimate only. An image is its source fetch, two upload calls and the storage PUT.
+ */
+const LATENCY_MS = { read: 400, write: 700, image: 2_000 };
+/**
+ * Articles whose dates carry more than millisecond precision (…:34.967476Z). Writavo stores dates
+ * to the millisecond, so the extra digits are dropped: harmless, but an exact-string comparison
+ * against the source would look like a mismatch, so the reports say so.
+ */
+function subMillisecondNote(valid: ValidItem[]): string | null {
+  const precise = /\.\d{4,}/;
+  const hits = valid.filter(({ article }) => precise.test(article.published_at ?? "") || precise.test(article.content_updated_at ?? ""));
+  if (hits.length === 0) return null;
+  return `${plural(hits.length, "article")} ${hits.length === 1 ? "has" : "have"} dates with more than millisecond precision (for example ${hits[0]!.article.published_at ?? hits[0]!.article.content_updated_at}). Writavo stores dates to the millisecond, so the extra digits are dropped; compare dates to the millisecond when checking against the source.`;
+}
+
+/** What the importer writes for an article; bumping it makes finished articles pending again (load). */
+const WRITE_VERSION = "v2";
+/** At most one mid-call progress write this often; every way a call ends writes regardless (save). */
+const SAVE_EVERY_MS = 3_000;
+/** Categories and tags created side by side, well inside the API's 120 writes a minute per key. */
+const TERM_CONCURRENCY = 4;
+/** An article's images copied side by side. Uploads are 60 a minute per key; three keep it busy. */
+const IMAGE_CONCURRENCY = 3;
 /** How many problems a reply lists before summarising the rest. */
 const MAX_LISTED = 40;
 
@@ -87,6 +149,23 @@ const isFatal = (err: unknown): err is WritavoApiError => err instanceof Writavo
 
 class ItemProblem extends Error {}
 
+/** The call's request budget is spent. Not a failure: the item stays pending for the next call. */
+class OutOfRequests extends Error {}
+
+/** API requests, image fetches and storage uploads this call has made. */
+function requestsUsed(state: ApplyState): number {
+  const s = state.ctx.api.stats;
+  return state.extraRequests + (s ? s.reads.count + s.writes.count + s.uploads.count : 0);
+}
+
+/** Room for `n` more requests in this call's budget, or OutOfRequests. */
+function need(state: ApplyState, n: number): void {
+  const max = state.opts.budget?.maxRequests;
+  if (max !== undefined && requestsUsed(state) + n > max) throw new OutOfRequests();
+}
+
+const REQUEST_BUDGET_SPENT = "this call's request budget ran out";
+
 interface ValidItem {
   check: ItemCheck;
   article: ImportArticle;
@@ -97,6 +176,10 @@ interface Loaded {
   api: ToolContext;
   source: ImportSource;
   envelope: ImportEnvelope;
+  /** Problems in the document's top level. The dry run lists them; an apply refuses while any remain. */
+  envelopeErrors: string[];
+  /** Where this call's time went, for the reply (timingLine). */
+  timing: CallTiming;
   items: ItemCheck[];
   valid: ValidItem[];
   site: SiteInfo;
@@ -187,9 +270,48 @@ function progressNote(ctx: Loaded): string {
     : "Nothing is saved between calls for an inline document; articles are matched by external_id, so sending one again updates it rather than duplicating it.";
 }
 
+/** Wall-clock milliseconds by phase, for the line every apply reply ends with. */
+interface CallTiming {
+  open: number;
+  validate: number;
+  site: number;
+  terms: number;
+  articles: number;
+  saves: { count: number; ms: number };
+}
+
+const seconds = (ms: number) => `${(ms / 1000).toFixed(1)} s`;
+
+/**
+ * Where one call's time went: the document, the checks, the Site reads, and then the writes by
+ * kind with their average, so a slow import says whether the API, the rate limits or the import
+ * itself is the bottleneck.
+ */
+function timingLine(timing: CallTiming, stats: ApiStats | undefined): string {
+  const parts = [
+    ...(timing.open ? [`document ${seconds(timing.open)}`] : []),
+    `checks ${seconds(timing.validate)}`,
+    `Site reads ${seconds(timing.site)}`,
+    ...(timing.terms ? [`categories, tags and authors ${seconds(timing.terms)}`] : []),
+    ...(timing.articles ? [`articles and images ${seconds(timing.articles)}`] : []),
+    ...(timing.saves.count ? [`saving progress ${seconds(timing.saves.ms)} (${timing.saves.count}x)`] : []),
+  ];
+  const api = stats
+    ? (["writes", "uploads", "reads"] as const)
+        .filter((k) => stats[k].count > 0)
+        .map((k) => `${stats[k].count} ${k} ${seconds(stats[k].ms)} (${(stats[k].ms / stats[k].count / 1000).toFixed(2)} s each)`)
+    : [];
+  const waits = stats && stats.waitMs ? [`waiting out rate limits ${seconds(stats.waitMs)}${stats.rateLimited ? ` (${stats.rateLimited} refusals)` : ""}`] : [];
+  return `Where this call's time went: ${parts.join(", ")}.${api.length ? ` API: ${[...api, ...waits].join(", ")}.` : ""}`;
+}
+
 async function load(api: ToolContext, source: ImportSource): Promise<Loaded | ToolResult> {
+  const timing: CallTiming = { open: source.openMs ?? 0, validate: 0, site: 0, terms: 0, articles: 0, saves: { count: 0, ms: 0 } };
+  let mark = Date.now();
   const checked = checkDocument(source.document);
-  if (!checked.envelope || checked.envelopeErrors.length > 0) {
+  timing.validate = Date.now() - mark;
+  mark = Date.now();
+  if (!checked.envelope) {
     return toolError(
       [
         `${source.label} is not a valid Writavo import document, so nothing was checked against the Site and nothing was written.`,
@@ -200,6 +322,9 @@ async function load(api: ToolContext, source: ImportSource): Promise<Loaded | To
       ].join("\n"),
     );
   }
+  // Problems in the document's top level (an author, category or tag entry, a duplicate slug)
+  // no longer stop the checks: the entries that parse are kept, every article is still checked,
+  // and the dry run reports everything in one pass. An apply refuses while any remain (apply()).
   const envelope = checked.envelope;
 
   let site: SiteInfo;
@@ -226,15 +351,16 @@ async function load(api: ToolContext, source: ImportSource): Promise<Loaded | To
   }
 
   const store = source.store;
-  const existing = store ? store.read() : null;
+  const existing = store ? await store.read() : null;
+  timing.site = Date.now() - mark;
   if (store && typeof existing === "string") {
     return toolError(
-      `The progress file ${store.location} cannot be used because ${existing}. Move it aside to start the import over; articles already imported are found again by external_id, so nothing is duplicated.`,
+      `The saved progress in ${store.location} cannot be used because ${existing}. ${store.resetHint}; articles already imported are found again by external_id, so nothing is duplicated.`,
     );
   }
   if (store && existing && typeof existing !== "string" && existing.website_id !== site.id) {
     return toolError(
-      `The progress file ${store.location} belongs to an import into a different Site ("${existing.website_name}"). This key is for "${site.name}". If importing into "${site.name}" is intended, move the progress file aside and run again; otherwise sign in to the right Site (login with force: true).`,
+      `The saved progress in ${store.location} belongs to an import into a different Site ("${existing.website_name}"). This connection is for "${site.name}". If importing into "${site.name}" is intended: ${store.resetHint}. Otherwise connect to the right Site.`,
     );
   }
   const saved = typeof existing === "string" ? null : existing;
@@ -258,13 +384,19 @@ async function load(api: ToolContext, source: ImportSource): Promise<Loaded | To
         `format: "${article.format}" is not a content type on this Site. Known keys: ${[...formats.keys()].join(", ") || "none"}. Leave format out if unsure.`,
       );
     }
-    if (item.errors.length === 0) valid.push({ check: item, article, hash: sha256(JSON.stringify(article)) });
+    // The hash says "this article is done as the file has it". It carries the version of what the
+    // importer WRITES, so an article done by an older importer is written again (in place, by
+    // external_id; images already copied are not copied again): v2 (2026-09-28) records the
+    // source's original dates on drafts, which v1 did not send.
+    if (item.errors.length === 0) valid.push({ check: item, article, hash: sha256(`${WRITE_VERSION}:${JSON.stringify(article)}`) });
   }
 
   return {
     api,
     source,
     envelope,
+    envelopeErrors: checked.envelopeErrors,
+    timing,
     items: checked.items,
     valid,
     site,
@@ -282,7 +414,7 @@ function nextCall(source: ImportSource, opts: ImportOptions, overrides: Record<s
   const args: Record<string, unknown> = { ...(source.reference ?? {}), dry_run: false };
   if (!opts.publish) args.publish = false;
   if (!opts.rehostImages) args.rehost_images = false;
-  if (source.reference && opts.batchSize !== 20) args.batch_size = opts.batchSize;
+  if (source.reference && opts.batchSize !== source.defaultBatchSize) args.batch_size = opts.batchSize;
   Object.assign(args, overrides);
   return source.reference
     ? `import_content ${JSON.stringify(args)}`
@@ -403,8 +535,17 @@ async function dryRun(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
   const reads = pending.length * 2 + 10;
   const writes = categoriesToCreate.length + tagsToCreate.length + authorsToCreate.length + authorsToFill.length + pending.length + counts.publish;
   const uploads = (opts.rehostImages ? toCopy.size : 0) * 2;
-  const minutes = Math.max(1, Math.ceil(Math.max(reads / RATE.read, writes / RATE.write, uploads / RATE.upload)));
-  const calls = Math.max(1, Math.ceil(pending.length / opts.batchSize));
+  const termWrites = categoriesToCreate.length + tagsToCreate.length;
+  // The slower of two limits: the API's per-minute budgets, and the time each request takes when
+  // they are made one after another (terms go TERM_CONCURRENCY at a time). One call works for
+  // TIME_BUDGET_MS, so the number of calls follows from the time, not from the batch size.
+  const byRate = Math.max(reads / RATE.read, writes / RATE.write, uploads / RATE.upload) * 60_000;
+  const imageCopies = opts.rehostImages ? toCopy.size : 0;
+  const bySpeed =
+    reads * LATENCY_MS.read + (writes - termWrites) * LATENCY_MS.write + (termWrites * LATENCY_MS.write) / TERM_CONCURRENCY + imageCopies * LATENCY_MS.image;
+  const totalMs = Math.max(byRate, bySpeed);
+  const minutes = Math.max(1, Math.ceil(totalMs / 60_000));
+  const calls = Math.max(1, Math.ceil(totalMs / TIME_BUDGET_MS), Math.ceil(pending.length / opts.batchSize));
 
   const invalid = ctx.items.filter((i) => i.errors.length > 0);
   counts.blocked = invalid.length;
@@ -431,10 +572,20 @@ async function dryRun(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
       ? [`${htmlImages} images are HTML <img> tags inside content. Only markdown images are copied, so those keep their original URLs; convert them to ![alt](url) in the file to have them copied.`]
       : []),
     documents,
-    `Estimate: about ${reads} reads, ${writes} writes and ${uploads} upload calls, so at least ${minutes} minute${minutes === 1 ? "" : "s"} at the API's rate limits (${RATE.read} reads, ${RATE.write} writes, ${RATE.upload} uploads per minute), over about ${calls} call${calls === 1 ? "" : "s"} of import_content at batch_size ${opts.batchSize}.`,
+    `Estimate: about ${reads} reads, ${writes} writes and ${uploads} upload calls. At the API's rate limits (${RATE.read} reads, ${RATE.write} writes, ${RATE.upload} uploads per minute) and typical request times, that is about ${minutes} minute${minutes === 1 ? "" : "s"}${byRate >= bySpeed ? ", set by the rate limits" : ""}, over about ${calls} call${calls === 1 ? "" : "s"} of import_content (each works for about ${TIME_BUDGET_MS / 1000} seconds). Every apply reply ends with where its time went, so the real pace is visible after the first call.`,
   ];
   if (ctx.progressExisted && ctx.source.store) lines.push(`Progress from an earlier run is in ${ctx.source.store.location}.`);
+  const precision = subMillisecondNote(valid);
+  if (precision) lines.push(precision);
 
+  const topLevel = ctx.envelopeErrors;
+  if (topLevel.length > 0) {
+    lines.push(
+      "",
+      `Problems in the document's top level (${topLevel.length}). Nothing can be imported until these are fixed; entries with a problem were left out of the checks above:`,
+      ...listed(topLevel.map((e) => `- ${e}`)),
+    );
+  }
   if (invalid.length > 0) {
     lines.push("", `Problems (${invalid.length} articles). These are not imported until fixed:`);
     lines.push(...listed(invalid.map((i) => `- ${itemLabel(i)}: ${i.errors.join("; ")}`)));
@@ -442,6 +593,15 @@ async function dryRun(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
   if (warnings.length > 0) lines.push("", `Warnings (${warnings.length}). These do not stop the import:`, ...listed(warnings));
 
   lines.push("");
+  if (topLevel.length > 0) {
+    lines.push(
+      "Every problem found is listed above, top level and articles together. Fix them all in the document, then run the dry run again.",
+      ...(ctx.source.reference
+        ? [`This import is stored as ${JSON.stringify(ctx.source.reference)}: send the corrected entries as data with that import_id (an entry with the same ref, slug or external_id replaces the stored one), or start a new import with the corrected document.`]
+        : []),
+    );
+    return text(lines.join("\n"));
+  }
   if (pending.length === 0) {
     lines.push(invalid.length > 0 ? "Nothing else to import. Fix the problems above and run the dry run again." : "Nothing to import: everything in the document is already on the Site.");
   } else {
@@ -468,16 +628,46 @@ async function dryRun(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
 interface ApplyState {
   opts: ImportOptions;
   ctx: Loaded;
+  /** No new work starts after this. */
   deadline: number;
+  /** Everything still in flight is cut off at this (the API client's own deadline). */
+  hardDeadline: number;
   mayTouchLive: boolean;
   counts: { created: number; updated: number; published: number; deferred: number; skipped: number; failed: number; imagesCopied: number; imagesFailed: number };
   problems: string[];
   warnings: string[];
+  /** When progress was last written (save). */
+  lastSave: number;
+  /** The progress write in flight, so writes land in order. */
+  saving: Promise<void>;
+  /** Requests the API client does not tally: image fetches and storage uploads. */
+  extraRequests: number;
 }
 
-function save(state: ApplyState): void {
-  state.ctx.progress.updated_at = new Date().toISOString();
-  state.ctx.source.store?.write(state.ctx.progress);
+/**
+ * Record progress. Mid-call saves are throttled to one every SAVE_EVERY_MS: a stored import's
+ * progress is a network write, and paying it after every term, image and article was a real part
+ * of a slow call. `force` (every way a call ends) always writes. What a call that dies between two
+ * saves loses is at most SAVE_EVERY_MS of work, all of it idempotent to redo (Idempotency-Key and
+ * external_id matching), except an image copied twice.
+ */
+async function save(state: ApplyState, force = false): Promise<void> {
+  const store = state.ctx.source.store;
+  if (!store) return;
+  const now = Date.now();
+  if (!force && now - state.lastSave < SAVE_EVERY_MS) return;
+  // Claimed before the await, and chained: terms are created side by side, and two writes in
+  // flight at once could land in the wrong order, an older snapshot over a newer one.
+  state.lastSave = now;
+  const write = state.saving.then(async () => {
+    const started = Date.now();
+    state.ctx.progress.updated_at = new Date(started).toISOString();
+    await store.write(state.ctx.progress);
+    state.ctx.timing.saves.count += 1;
+    state.ctx.timing.saves.ms += Date.now() - started;
+  });
+  state.saving = write.catch(() => undefined);
+  await write;
 }
 
 /** Copy one image, once per import. Undefined means keep the original URL. */
@@ -490,9 +680,11 @@ async function rehost(state: ApplyState, url: string, alt: string | undefined, b
   const known = progress.images[url];
   if (known?.url) return known.url;
   if (known?.error) return undefined;
+  need(state, 4); // the fetch, the reservation, the storage upload, the registration
   try {
+    state.extraRequests += 2;
     // Bounded by the call's budget, so one slow image host cannot hold a call open for minutes.
-    const fetched = await fetchImage(url, undefined, Math.max(5_000, Math.min(30_000, state.deadline + 20_000 - Date.now())));
+    const fetched = await fetchImage(url, undefined, Math.max(3_000, Math.min(30_000, state.hardDeadline - Date.now())));
     if (!fetched.contentType) throw new MediaError("it is not one of the accepted image types");
     const asset = await retrying(state, () =>
       uploadImage(state.ctx.api, { bytes: fetched.bytes, fileName: fetched.fileName, contentType: fetched.contentType!, altText: alt || undefined, bucket }),
@@ -503,7 +695,7 @@ async function rehost(state: ApplyState, url: string, alt: string | undefined, b
     state.counts.imagesCopied += 1;
     return hosted;
   } catch (err) {
-    if (isTransient(err) || isFatal(err)) throw err;
+    if (isTransient(err) || isFatal(err) || err instanceof OutOfRequests) throw err;
     const reason = err instanceof MediaError ? err.message : apiProblem(err);
     progress.images[url] = { error: reason };
     state.counts.imagesFailed += 1;
@@ -521,10 +713,33 @@ async function retrying<T>(state: ApplyState, run: () => Promise<T>): Promise<T>
       if (!isTransient(err) || attempt >= 3) throw err;
       const retryAfter = err instanceof WritavoApiError && err.retryAfter ? Number.parseInt(err.retryAfter, 10) * 1000 : NaN;
       const wait = Math.min(Number.isFinite(retryAfter) ? retryAfter : 2_000 * 2 ** attempt, 30_000);
-      if (Date.now() + wait > state.deadline + 20_000) throw err;
+      if (Date.now() + wait > state.hardDeadline) throw err;
+      if (state.ctx.api.stats) state.ctx.api.stats.waitMs += wait;
       await new Promise((resolve) => setTimeout(resolve, wait));
     }
   }
+}
+
+/**
+ * Run `task` over `items` with at most `limit` in flight. The first error stops new tasks from
+ * starting and is thrown once the ones already running have settled, so nothing is left writing
+ * behind a reply.
+ */
+async function inPool<T>(items: T[], limit: number, task: (item: T) => Promise<void>): Promise<void> {
+  let next = 0;
+  let failure: unknown = null;
+  const worker = async () => {
+    while (failure === null && next < items.length) {
+      const item = items[next++]!;
+      try {
+        await task(item);
+      } catch (err) {
+        failure ??= err;
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  if (failure !== null) throw failure;
 }
 
 /** A term's optional descriptive fields, only those the file actually sets. group_label is a tag's
@@ -548,6 +763,7 @@ async function ensureTaxonomy(state: ApplyState): Promise<boolean> {
     // The descriptive fields of terms already on the Site, read once and only when the file has
     // something to fill: an existing term keeps what it has, and only empty fields are filled.
     let existing: Map<string, SiteTerm> | null = null;
+    const missing: ImportTerm[] = [];
     for (const term of list) {
       const known = site.get(term.slug);
       const extras = termExtras(term);
@@ -561,20 +777,30 @@ async function ensureTaxonomy(state: ApplyState): Promise<boolean> {
           const have = existing.get(term.slug);
           const fill = Object.fromEntries(Object.entries(extras).filter(([k]) => !have?.[k as keyof typeof extras]));
           if (Object.keys(fill).length) {
-            await call(ctx.api, { method: "PATCH", path: `/${kind}/${known}`, body: fill }, state.deadline + 20_000);
+            await call(ctx.api, { method: "PATCH", path: `/${kind}/${known}`, body: fill }, state.hardDeadline);
           }
         }
         progress[kind][term.slug] = known;
         continue;
       }
-      if (Date.now() > state.deadline) return false;
-      const body = { name: term.name, slug: term.slug, ...extras, ...(term.is_active === false ? { is_active: false } : {}) };
+      missing.push(term);
+    }
+
+    // Missing terms are created a few at a time: each is one write, independent of the others.
+    let ranOut = false;
+    await inPool(missing, TERM_CONCURRENCY, async (term) => {
+      const max = state.opts.budget?.maxRequests;
+      if (ranOut || Date.now() > state.deadline || (max !== undefined && requestsUsed(state) + TERM_CONCURRENCY > max)) {
+        ranOut = true;
+        return;
+      }
+      const body = { name: term.name, slug: term.slug, ...termExtras(term), ...(term.is_active === false ? { is_active: false } : {}) };
       let id: string | undefined;
       try {
         const created = await call<{ id: string }>(
           ctx.api,
           { method: "POST", path: `/${kind}`, body, headers: { "Idempotency-Key": `import-${kind}-${sha256(JSON.stringify(body))}` } },
-          state.deadline + 20_000,
+          state.hardDeadline,
         );
         id = created.data?.id;
         progress.created[kind] += 1;
@@ -587,8 +813,9 @@ async function ensureTaxonomy(state: ApplyState): Promise<boolean> {
       if (!id) throw new ItemProblem(`the ${kind === "categories" ? "category" : "tag"} "${term.slug}" could not be created`);
       site.set(term.slug, id);
       progress[kind][term.slug] = id;
-      save(state);
-    }
+      await save(state);
+    });
+    if (ranOut) return false;
   }
 
   for (const author of envelope.authors ?? []) {
@@ -600,6 +827,8 @@ async function ensureTaxonomy(state: ApplyState): Promise<boolean> {
       continue;
     }
     if (Date.now() > state.deadline) return false;
+    const maxRequests = state.opts.budget?.maxRequests;
+    if (maxRequests !== undefined && requestsUsed(state) + 6 > maxRequests) return false;
     const warnings: string[] = [];
     let avatar = wantsAvatar ? author.avatar_url ?? null : null;
     if (avatar && opts.rehostImages) avatar = (await rehost(state, avatar, author.name, "author-avatars", warnings)) ?? avatar;
@@ -610,12 +839,12 @@ async function ensureTaxonomy(state: ApplyState): Promise<boolean> {
       const updated = await call<SiteAuthor>(
         ctx.api,
         { method: "PATCH", path: `/authors/${known.id}`, body, headers: { "Idempotency-Key": `import-author-fill-${sha256(known.id + JSON.stringify(body))}` } },
-        state.deadline + 20_000,
+        state.hardDeadline,
       );
       Object.assign(known, updated.data ?? body);
       progress.authors[author.ref] = known.id;
       progress.filled_authors += 1;
-      save(state);
+      await save(state);
       continue;
     }
 
@@ -636,7 +865,7 @@ async function ensureTaxonomy(state: ApplyState): Promise<boolean> {
         await call<SiteAuthor>(
           ctx.api,
           { method: "POST", path: "/authors", body, headers: { "Idempotency-Key": `import-author-${sha256(JSON.stringify(body))}` } },
-          state.deadline + 20_000,
+          state.hardDeadline,
         )
       ).data ?? undefined;
       if (created?.id) progress.created.authors += 1;
@@ -651,7 +880,7 @@ async function ensureTaxonomy(state: ApplyState): Promise<boolean> {
     if (!created?.id) throw new ItemProblem(`the author "${author.name}" could not be created`);
     addSiteAuthor(ctx.siteAuthors, { ...body, ...created });
     progress.authors[author.ref] = created.id;
-    save(state);
+    await save(state);
   }
   return true;
 }
@@ -659,6 +888,17 @@ async function ensureTaxonomy(state: ApplyState): Promise<boolean> {
 function buildBody(article: ImportArticle, ctx: Loaded, imageUrl: (url: string) => string | undefined): Record<string, unknown> {
   const { progress, envelope } = ctx;
   const body: Record<string, unknown> = { external_id: article.external_id };
+  // The source's own dates, recorded on the article (0123) whether or not this run publishes it:
+  // a draft imported now keeps them, and its first publish from ANY path (the dashboard, the API,
+  // a schedule) uses them instead of today. Only for posts live at the source, whose dates are
+  // checked to be in the past; an updated date before the published one is dropped (the API
+  // refuses that pair). No effect on an article that is already published.
+  if (article.status === "published" && article.published_at) {
+    body.original_published_at = article.published_at;
+    if (article.content_updated_at && Date.parse(article.content_updated_at) >= Date.parse(article.published_at)) {
+      body.original_content_updated_at = article.content_updated_at;
+    }
+  }
   if (article.title !== undefined) body.title = article.title;
   if (article.slug !== undefined) body.slug = article.slug;
   if (article.content !== undefined) {
@@ -667,6 +907,9 @@ function buildBody(article: ImportArticle, ctx: Loaded, imageUrl: (url: string) 
   if (article.excerpt !== undefined) body.excerpt = article.excerpt;
   if (article.featured_image !== undefined) {
     body.featured_image_url = article.featured_image === null ? null : (imageUrl(article.featured_image.url) ?? article.featured_image.url);
+    // The article's own alt (0122), which the blog renders on the hero. The copy on the media
+    // asset (rehost) is the library's; nothing on the page reads that one.
+    body.featured_image_alt = article.featured_image === null ? null : (article.featured_image.alt ?? null);
   }
   if (article.seo_title !== undefined) body.seo_title = article.seo_title;
   if (article.seo_description !== undefined) body.seo_description = article.seo_description;
@@ -739,12 +982,15 @@ async function processArticle(state: ApplyState, item: ValidItem): Promise<void>
 
   if (!articleId) {
     if (opts.rehostImages) {
-      for (const image of articleImages(article)) await rehost(state, image.url, image.alt, "blog-images", warnings);
-      save(state);
+      await inPool(articleImages(article), IMAGE_CONCURRENCY, async (image) => {
+        await rehost(state, image.url, image.alt, "blog-images", warnings);
+      });
+      await save(state);
     }
     const body = buildBody(article, ctx, (url) => (opts.rehostImages ? ctx.progress.images[url]?.url : undefined));
 
-    current = await findByExternalId(ctx.api, article.external_id, state.deadline + 20_000);
+    need(state, needsPublish ? 5 : 3); // find, write, read back (+ publish, re-read)
+    current = await findByExternalId(ctx.api, article.external_id, state.hardDeadline);
     let action: "created" | "updated";
     if (current) {
       if (current.status === "published" && !state.mayTouchLive) {
@@ -761,7 +1007,7 @@ async function processArticle(state: ApplyState, item: ValidItem): Promise<void>
       if (current.status === "published" && article.slug && current.slug && current.slug !== article.slug) {
         warnings.push(`its live URL changed from /${current.slug} to /${article.slug}; nothing redirects the old one`);
       }
-      await call(ctx.api, { method: "PATCH", path: `/articles/${encodeURIComponent(current.id)}`, body }, state.deadline + 20_000);
+      await call(ctx.api, { method: "PATCH", path: `/articles/${encodeURIComponent(current.id)}`, body }, state.hardDeadline);
       articleId = current.id;
       action = "updated";
       state.counts.updated += 1;
@@ -777,13 +1023,13 @@ async function processArticle(state: ApplyState, item: ValidItem): Promise<void>
             // so a create that timed out and is sent again is replayed by the API, not repeated.
             headers: { "Idempotency-Key": `import-${sha256(`${article.external_id}\n${JSON.stringify(body)}`)}` },
           },
-          state.deadline + 20_000,
+          state.hardDeadline,
         );
         articleId = created.data.id;
         current = { id: created.data.id, slug: created.data.slug ?? null, status: "draft", published_at: null };
       } catch (err) {
         if (err instanceof WritavoApiError && err.code === "SLUG_CONFLICT") {
-          const owner = article.slug ? await findBySlug(ctx.api, article.slug, state.deadline + 20_000).catch(() => null) : null;
+          const owner = article.slug ? await findBySlug(ctx.api, article.slug, state.hardDeadline).catch(() => null) : null;
           const reason = `slug "${article.slug}" is already used on the Site by article ${owner?.id ?? "(unknown)"}${owner?.external_id ? ` (external_id ${owner.external_id})` : owner ? ", which has no external_id" : ""}. Change the slug in the document, or change that article, then run again${ctx.source.store ? " with retry_failed: true" : ""}.`;
           record(state, item, { outcome: "skipped", error: reason });
           state.counts.skipped += 1;
@@ -805,11 +1051,11 @@ async function processArticle(state: ApplyState, item: ValidItem): Promise<void>
       error: undefined,
       warnings,
     });
-    save(state);
+    await save(state);
   }
 
   if (needsPublish && !(previous && previous.hash === item.hash && previous.published)) {
-    current ??= await getArticleState(ctx.api, articleId!, state.deadline + 20_000);
+    current ??= await getArticleState(ctx.api, articleId!, state.hardDeadline);
     if (current.status !== "published") {
       const firstPublish = !current.published_at;
       if (!firstPublish && article.published_at && Date.parse(current.published_at!) !== Date.parse(article.published_at)) {
@@ -826,7 +1072,7 @@ async function processArticle(state: ApplyState, item: ValidItem): Promise<void>
             ? { body: { published_at: article.published_at, ...(article.content_updated_at ? { content_updated_at: article.content_updated_at } : {}) } }
             : {}),
         },
-        state.deadline + 20_000,
+        state.hardDeadline,
       );
       state.counts.published += 1;
     }
@@ -835,17 +1081,35 @@ async function processArticle(state: ApplyState, item: ValidItem): Promise<void>
     record(state, item, { outcome: "done", article_id: articleId, error: undefined, warnings });
   }
   for (const w of warnings) state.warnings.push(`- ${label}: ${w}`);
-  save(state);
+  // Always, not throttled: a finished article (and the images it copied) must be on record before
+  // the next starts. A call killed after this (a client timeout, a runtime limit) loses nothing, so
+  // the next call neither re-copies its images nor reports the Site ahead of its own progress.
+  await save(state, true);
 }
 
 async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
+  if (ctx.envelopeErrors.length > 0) {
+    const invalidItems = ctx.items.filter((i) => i.errors.length > 0);
+    return tagged("invalid", toolError(
+      [
+        `Nothing was written. ${ctx.source.label} has problems in its top level, and an import does not start until they are fixed:`,
+        "",
+        ...listed(ctx.envelopeErrors.map((e) => `- ${e}`)),
+        ...(invalidItems.length
+          ? ["", `Articles with problems (${invalidItems.length}):`, ...listed(invalidItems.map((i) => `- ${itemLabel(i)}: ${i.errors.join("; ")}`))]
+          : []),
+        "",
+        "Fix them, run the dry run again, then apply.",
+      ].join("\n"),
+    ));
+  }
   const mayTouchLive = opts.publish && opts.confirm;
   const pending = ctx.valid.filter((v) => !isSettled(ctx.progress.items[v.article.external_id], v, opts, mayTouchLive));
   const invalid = ctx.items.filter((i) => i.errors.length > 0);
 
   const toPublish = pending.filter((v) => v.article.status === "published").length;
   if (opts.publish && toPublish > 0 && !opts.confirm) {
-    return text(
+    return tagged("needs_confirm", text(
       [
         "Nothing has been done. This import needs the user to confirm first.",
         "",
@@ -855,30 +1119,41 @@ async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
         nextCall(ctx.source, opts, { confirm: true }),
         "To import everything as drafts instead, with nothing made public, pass publish: false.",
       ].join("\n"),
-    );
+    ));
   }
 
   const state: ApplyState = {
     opts,
     ctx,
-    deadline: Date.now() + TIME_BUDGET_MS,
+    deadline: (opts.startedAt ?? Date.now()) + (opts.budget ?? FOREGROUND_BUDGET).workMs,
+    hardDeadline: (opts.startedAt ?? Date.now()) + (opts.budget ?? FOREGROUND_BUDGET).workMs + (opts.budget ?? FOREGROUND_BUDGET).graceMs,
     mayTouchLive,
     counts: { created: 0, updated: 0, published: 0, deferred: 0, skipped: 0, failed: 0, imagesCopied: 0, imagesFailed: 0 },
     problems: [],
     warnings: [],
+    lastSave: Date.now(),
+    saving: Promise.resolve(),
+    extraRequests: 0,
   };
 
   let stopped: string | null = null;
+  const termsStarted = Date.now();
   try {
-    if (!(await ensureTaxonomy(state))) stopped = "the time for this call ran out while creating categories, tags and authors";
+    if (!(await ensureTaxonomy(state))) stopped = "this call's time or request budget ran out while creating categories, tags and authors";
   } catch (err) {
-    save(state);
-    if (err instanceof ItemProblem) return toolError(`import_content stopped: ${err.message}. Nothing after it was imported. ${progressNote(ctx)}`);
-    if (isTransient(err)) stopped = `the API was busy (${apiProblem(err)})`;
-    else return stopReport(state, err);
+    if (err instanceof OutOfRequests) stopped = `${REQUEST_BUDGET_SPENT} while creating categories, tags and authors`;
+    ctx.timing.terms = Date.now() - termsStarted;
+    await save(state, true);
+    if (err instanceof ItemProblem) return tagged("stopped", toolError(`import_content stopped: ${err.message}. Nothing after it was imported. ${progressNote(ctx)}`));
+    if (err instanceof OutOfRequests) {
+      // stopped is set above; nothing failed
+    } else if (isTransient(err)) stopped = `the API was busy (${apiProblem(err)})`;
+    else return tagged("stopped", stopReport(state, err));
   }
+  ctx.timing.terms ||= Date.now() - termsStarted;
 
   let processed = 0;
+  const articlesStarted = Date.now();
   if (!stopped) {
     for (const item of pending) {
       if (processed >= opts.batchSize) break;
@@ -886,14 +1161,33 @@ async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
         stopped = "the time for this call ran out";
         break;
       }
+      // Stop before an article that cannot finish in this call's request budget, rather than
+      // part-way through it. The first article of a call always starts: its images are recorded
+      // one by one, so a big one completes over several calls.
+      const max = opts.budget?.maxRequests;
+      if (max !== undefined && processed > 0) {
+        const uncopied = opts.rehostImages
+          ? articleImages(item.article).filter((i) => isHttps(i.url) && !ctx.progress.images[i.url]).length
+          : 0;
+        if (requestsUsed(state) + 5 + 4 * uncopied > max) {
+          stopped = REQUEST_BUDGET_SPENT;
+          break;
+        }
+      }
       processed += 1;
       const label = itemLabel(item.check);
       try {
         await processArticle(state, item);
       } catch (err) {
+        if (err instanceof OutOfRequests) {
+          stopped = REQUEST_BUDGET_SPENT;
+          await save(state, true);
+          break;
+        }
         if (isFatal(err)) {
-          save(state);
-          return stopReport(state, err);
+          ctx.timing.articles = Date.now() - articlesStarted;
+          await save(state, true);
+          return tagged("stopped", stopReport(state, err));
         }
         if (isTransient(err)) {
           const attempts = (ctx.progress.items[item.article.external_id]?.hash === item.hash ? (ctx.progress.items[item.article.external_id]?.attempts ?? 0) : 0) + 1;
@@ -904,7 +1198,7 @@ async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
           } else {
             record(state, item, { outcome: "retry", error: apiProblem(err), attempts });
             stopped = `the API was busy (${apiProblem(err)}); ${label} is tried again on the next call`;
-            save(state);
+            await save(state, true);
             break;
           }
         } else {
@@ -913,11 +1207,12 @@ async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
           state.counts.failed += 1;
           state.problems.push(`- ${label}: failed, ${reason}`);
         }
-        save(state);
+        await save(state);
       }
     }
   }
-  save(state);
+  if (processed > 0 || !stopped) ctx.timing.articles = Date.now() - articlesStarted;
+  await save(state, true);
 
   // Counted as the NEXT call will see it, which does not pass retry_failed again.
   const nextOpts = { ...opts, retryFailed: false };
@@ -949,7 +1244,8 @@ async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
       ctx.source.store
         ? `Progress is saved in ${ctx.source.store.location}. Running the same import again is safe: it changes nothing unless the file changed.`
         : "Sending the same document again is safe: articles are matched by external_id and updated, never duplicated.",
-      "Next: verify with list_articles (for example status published, order published_at.desc, fields id,title,slug,published_at) that the counts, slugs and dates match the source.",
+      "Next: verify with list_articles (for example status published, order published_at.desc, fields id,title,slug,published_at) that the counts, slugs and dates match the source. A draft's source dates are in original_published_at and original_content_updated_at, and its first publish from any path uses them.",
+      ...(subMillisecondNote(ctx.valid) ? [subMillisecondNote(ctx.valid)!] : []),
     );
   } else {
     lines.push(
@@ -982,7 +1278,8 @@ async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
       );
     }
   }
-  return text(lines.join("\n"));
+  lines.push("", timingLine(ctx.timing, ctx.api.stats));
+  return tagged(remaining === 0 ? "complete" : "partial", text(lines.join("\n")));
 }
 
 /** A failure no other article can get past: the API's own guidance, then where the import stands. */
@@ -994,34 +1291,90 @@ function stopReport(state: ApplyState, err: unknown): ToolResult {
       guidance,
       "",
       `Before it stopped, this call created ${c.created}, updated ${c.updated} and published ${c.published} articles. ${progressNote(state.ctx)} Fix the cause and call import_content again to carry on from there.`,
+      "",
+      timingLine(state.ctx.timing, state.ctx.api.stats),
     ].join("\n"),
   );
 }
 
 /**
- * Imports running in this process, by file. A client that gave up waiting on a call can send the
- * next one while the first is still working; two batches racing over one progress file would
- * each record half of what happened. Nothing would be duplicated (every write is idempotent), but
- * the second call is refused anyway, because there is nothing useful for it to do yet.
+ * What an apply call came to, for a caller that acts on it (the background runner): the reply
+ * text is for people, this is for code.
+ *   complete       every valid article is settled
+ *   partial        work remains; call again
+ *   busy           another call holds the import; nothing was done
+ *   needs_confirm  it would publish, and confirm was not given; nothing was done
+ *   invalid        the document or the Site refused it before any write
+ *   stopped        a failure no retry gets past (a revoked key, no payment method)
  */
-const running = new Set<string>();
+export type ImportRunStatus = "complete" | "partial" | "busy" | "needs_confirm" | "invalid" | "stopped";
 
-export async function runImport(api: ToolContext, source: ImportSource, opts: ImportOptions): Promise<ToolResult> {
+export type ImportResult = ToolResult & { importStatus?: ImportRunStatus };
+
+function tagged(status: ImportRunStatus, result: ToolResult): ImportResult {
+  return Object.assign(result, { importStatus: status });
+}
+
+/** Where an import stands, from its progress: for status replies. */
+export interface ImportProgressSummary {
+  articles_total: number;
+  articles_done: number;
+  articles_failed: number;
+  articles_skipped: number;
+  images_copied: number;
+  images_failed: number;
+  categories_created: number;
+  tags_created: number;
+  authors_created: number;
+}
+
+export function summariseProgress(progress: ImportProgress | null, articlesTotal: number): ImportProgressSummary {
+  const items = Object.values(progress?.items ?? {});
+  const images = Object.values(progress?.images ?? {});
+  return {
+    articles_total: articlesTotal,
+    articles_done: items.filter((i) => i.outcome === "done" || i.outcome === "deferred").length,
+    articles_failed: items.filter((i) => i.outcome === "failed").length,
+    articles_skipped: items.filter((i) => i.outcome === "skipped").length,
+    images_copied: images.filter((i) => i.url).length,
+    images_failed: images.filter((i) => i.error).length,
+    categories_created: progress?.created.categories ?? 0,
+    tags_created: progress?.created.tags ?? 0,
+    authors_created: progress?.created.authors ?? 0,
+  };
+}
+
+export async function runImport(apiContext: ToolContext, source: ImportSource, opts: ImportOptions): Promise<ImportResult> {
+  // This call's own tally of API requests (timingLine) and its hard end, never shared.
+  const budget = opts.budget ?? FOREGROUND_BUDGET;
+  const startedAt = opts.startedAt ?? Date.now();
+  opts = { ...opts, startedAt, budget };
+  const api: ToolContext = { ...apiContext, stats: newApiStats(), deadline: startedAt + budget.workMs + budget.graceMs };
   if (opts.dryRun) {
     const loaded = await load(api, source);
     return "content" in loaded ? loaded : dryRun(opts, loaded);
   }
-  const lock = source.lockKey;
-  if (lock && running.has(lock)) {
+  const busy = (until: number | null) => {
+    const wait = until === null ? null : Math.max(1, Math.ceil((until - Date.now()) / 1000));
     return text(
-      `An import of ${source.label} from an earlier call is still running. Nothing new was started. Wait a few seconds and call import_content again with the same arguments.`,
+      `An import of ${source.label} from an earlier call is still running. Nothing new was started. ` +
+        (wait === null
+          ? "Wait a few seconds and call import_content again with the same arguments."
+          : `Its hold ends by ${new Date(until!).toISOString()} at the latest, in about ${wait} seconds (sooner if that call finishes first). Call import_content again with the same arguments after that.`),
     );
+  };
+  // A client that gave up waiting on a call can send the next one while the first is still
+  // working; two batches racing over one stored progress would each record half of what happened.
+  // Nothing would be duplicated (every write is idempotent), but the second call is refused
+  // anyway, because there is nothing useful for it to do yet.
+  if (source.lease) {
+    const held = await source.lease.acquire();
+    if (!held.ok) return tagged("busy", busy(held.until));
   }
-  if (lock) running.add(lock);
   try {
     const loaded = await load(api, source);
-    return "content" in loaded ? loaded : await apply(opts, loaded);
+    return "content" in loaded ? tagged("invalid", loaded) : await apply(opts, loaded);
   } finally {
-    if (lock) running.delete(lock);
+    await source.lease?.release().catch(() => undefined);
   }
 }

@@ -20,25 +20,15 @@ import type { ToolArgs } from "./call.js";
  * one tool. Both endpoints it uses are recorded as refusals in the generated table, with this tool
  * named as the reason, so nothing has silently gone missing from the surface.
  *
- * The bytes come from a public `url` or from `base64` in the call, which works on every host. The
- * stdio host also injects `path`, a file on this machine; the tool itself never reads a disk.
+ * The bytes come from a public `url` or from `base64` in the call. The tool never reads a disk:
+ * the hosted server has none, so a local image is read by the assistant and sent as base64.
  */
-
-/** What a host with a filesystem adds: read a local image. */
-export interface LocalFileReader {
-  read(path: string): Promise<{ bytes: Uint8Array; fileName: string } | { error: string }>;
-}
 
 const NAME = "upload_media";
 
-function inputSchema(withFiles: boolean): Record<string, z.ZodTypeAny> {
-  const sources = withFiles ? "Give exactly one of path, url or base64." : "Give exactly one of url or base64.";
+function inputSchema(): Record<string, z.ZodTypeAny> {
+  const sources = "Give exactly one of url or base64.";
   return {
-    ...(withFiles
-      ? {
-          path: z.string().optional().describe(`Absolute path to an image on this machine. ${sources}`),
-        }
-      : {}),
     url: z.string().optional().describe(`Public https URL to fetch the image from. ${sources}`),
     base64: z
       .string()
@@ -47,7 +37,7 @@ function inputSchema(withFiles: boolean): Record<string, z.ZodTypeAny> {
     filename: z
       .string()
       .optional()
-      .describe("The filename to store it under, for example hero.png. Required with base64; taken from the path or URL otherwise."),
+      .describe("The filename to store it under, for example hero.png. Required with base64; taken from the URL otherwise."),
     content_type: z
       .enum(["image/webp", "image/png", "image/jpeg", "image/gif", "image/avif"])
       .optional()
@@ -67,19 +57,14 @@ function inputSchema(withFiles: boolean): Record<string, z.ZodTypeAny> {
   };
 }
 
-/** The tool as a host registers it. A file reader is what makes `path` appear. */
-export function uploadMediaTool(files: LocalFileReader | null) {
-  return {
-    name: NAME,
-    description: `Upload an image to the Site's media library and return the asset with a usable url, which you can then set as an article's featured_image_url. Give it ${files ? "a local file path, a public https url, or the bytes as base64 with a filename" : "a public https url, or the bytes as base64 with a filename"}. It drives the whole three step upload for you: reserve, transfer the bytes, register the asset. Changes content on the customer's Site. Nothing becomes public: an asset is only visible where you attach it. Needs a secret key (wv_sk_) carrying the media:write scope.`,
-    scope: "media:write",
-    entitlement: "none",
-    inputSchema: inputSchema(files !== null),
-  };
-}
-
-/** The remote-safe definition. */
-export const UPLOAD_MEDIA = uploadMediaTool(null);
+/** The tool as the server registers it. */
+export const UPLOAD_MEDIA = {
+  name: NAME,
+  description: `Upload an image to the Site's media library and return the asset with a usable url, which you can then set as an article's featured_image_url. Give it a public https url, or the bytes as base64 with a filename. It drives the whole three step upload for you: reserve, transfer the bytes, register the asset. Changes content on the customer's Site. Nothing becomes public: an asset is only visible where you attach it. Needs a secret key (wv_sk_) carrying the media:write scope.`,
+  scope: "media:write",
+  entitlement: "none",
+  inputSchema: inputSchema(),
+};
 
 /** Standard or URL-safe base64, whitespace tolerated, a data: URL prefix stripped. Null when it is not base64. */
 export function decodeBase64(input: string): Uint8Array | null {
@@ -97,9 +82,8 @@ export function decodeBase64(input: string): Uint8Array | null {
   return bytes;
 }
 
-export async function handleUploadMedia(ctx: ToolContext, rawArgs: ToolArgs, files: LocalFileReader | null = null): Promise<ToolResult> {
+export async function handleUploadMedia(ctx: ToolContext, rawArgs: ToolArgs): Promise<ToolResult> {
   const args = (rawArgs ?? {}) as {
-    path?: string;
     url?: string;
     base64?: string;
     filename?: string;
@@ -111,9 +95,8 @@ export async function handleUploadMedia(ctx: ToolContext, rawArgs: ToolArgs, fil
   if (!hasKey(ctx)) return toolError(ctx.notSignedIn());
   if (keyKindOf(ctx) === "publishable") return publishableKeyRefusal(NAME, "media:write");
 
-  const path = files && args.path ? args.path : undefined;
-  const given = [path, args.url, args.base64].filter((v) => typeof v === "string" && v.length > 0).length;
-  const choices = files ? "path (a local file), url (a public https URL) or base64 with filename" : "url (a public https URL) or base64 with filename";
+  const given = [args.url, args.base64].filter((v) => typeof v === "string" && v.length > 0).length;
+  const choices = "url (a public https URL) or base64 with filename";
   if (given === 0) return toolError(`upload_media needs one of ${choices}.`);
   if (given > 1) return toolError(`upload_media takes one of ${choices}, not several.`);
 
@@ -121,12 +104,7 @@ export async function handleUploadMedia(ctx: ToolContext, rawArgs: ToolArgs, fil
   let derivedName: string;
   let fetchedType: string | undefined;
 
-  if (path) {
-    const read = await files!.read(path);
-    if ("error" in read) return toolError(read.error);
-    bytes = read.bytes;
-    derivedName = read.fileName;
-  } else if (args.base64) {
+  if (args.base64) {
     if (!args.filename) return toolError("upload_media needs filename with base64, for example hero.png, so the image is stored under a sensible name.");
     const decoded = decodeBase64(args.base64);
     if (!decoded || decoded.byteLength === 0) return toolError("base64 is not valid base64 image data.");

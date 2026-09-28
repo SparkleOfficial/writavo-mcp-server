@@ -64,6 +64,12 @@ export interface ApiResponse<T> {
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+/** The request timeout, clamped to the tool call's deadline when it has one (never under 2 s). */
+export function timeoutFor(ctx: Pick<ToolContext, "deadline">, ceiling = REQUEST_TIMEOUT_MS): number {
+  if (ctx.deadline === undefined) return ceiling;
+  return Math.max(2_000, Math.min(ceiling, ctx.deadline - Date.now()));
+}
+
 /** Headers a host may never set through extraHeaders, whether or not the core set them this time. */
 const PROTECTED_HEADERS = new Set(["authorization", "writavo-mcp-tool"]);
 
@@ -94,6 +100,18 @@ const TOOL_NAME = /^[a-z][a-z0-9_]{0,63}$/;
  * the hosted server runs many people's requests side by side in one process.
  */
 export async function apiRequest<T>(ctx: ToolContext, request: ApiRequest): Promise<ApiResponse<T>> {
+  if (!ctx.stats) return sendApiRequest<T>(ctx, request);
+  const started = Date.now();
+  try {
+    return await sendApiRequest<T>(ctx, request);
+  } finally {
+    const kind = request.method === "GET" ? "reads" : request.path.startsWith("/media") ? "uploads" : "writes";
+    ctx.stats[kind].count += 1;
+    ctx.stats[kind].ms += Date.now() - started;
+  }
+}
+
+async function sendApiRequest<T>(ctx: ToolContext, request: ApiRequest): Promise<ApiResponse<T>> {
   if (request.path.includes("..") || request.path.includes("//")) {
     throw new WritavoApiError("INVALID_REQUEST", "The request path is not valid.", 400);
   }
@@ -115,7 +133,7 @@ export async function apiRequest<T>(ctx: ToolContext, request: ApiRequest): Prom
 
   const send = async (): Promise<Response> => {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    const timer = setTimeout(() => controller.abort(), timeoutFor(ctx));
     try {
       return await fetch(url, {
         method: request.method,
@@ -153,7 +171,16 @@ export async function apiRequest<T>(ctx: ToolContext, request: ApiRequest): Prom
   if (response.status === 429) {
     const retryAfter = response.headers.get("Retry-After");
     const waitMs = retryAfter ? Number.parseInt(retryAfter, 10) * 1000 : 5000;
-    await sleep(Math.min(Number.isFinite(waitMs) ? waitMs : 5000, MAX_RETRY_WAIT_MS));
+    const wait = Math.min(Number.isFinite(waitMs) ? waitMs : 5000, MAX_RETRY_WAIT_MS);
+    // A wait that would outlast the tool call is not started: the caller gets the 429 and decides.
+    if (ctx.deadline !== undefined && Date.now() + wait > ctx.deadline) {
+      throw new WritavoApiError("RATE_LIMIT_EXCEEDED", "The API's rate limit was reached; try again shortly.", 429, undefined, undefined, retryAfter ?? undefined);
+    }
+    if (ctx.stats) {
+      ctx.stats.rateLimited += 1;
+      ctx.stats.waitMs += wait;
+    }
+    await sleep(wait);
     try {
       response = await send();
     } catch (err) {
@@ -239,25 +266,31 @@ export async function putPresigned(
   uploadUrl: string,
   bytes: Uint8Array,
   headers: Record<string, string>,
+  timeoutMs = REQUEST_TIMEOUT_MS,
 ): Promise<void> {
   const parsed = new URL(uploadUrl);
   if (parsed.protocol !== "https:") {
     throw new WritavoApiError("INVALID_REQUEST", "The upload URL is not https.", 400);
   }
   let response: Response;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     response = await fetch(uploadUrl, {
       method: "PUT",
       headers,
       body: bytes,
+      signal: controller.signal,
     });
   } catch (err) {
+    clearTimeout(timer);
     throw new WritavoApiError(
       "NETWORK_ERROR",
       `Could not upload the file to storage: ${err instanceof Error ? err.message : String(err)}`,
       0,
     );
   }
+  clearTimeout(timer);
   if (!response.ok) {
     // The signature in the URL is the credential, so the body of a failure can echo it back.
     throw new WritavoApiError(

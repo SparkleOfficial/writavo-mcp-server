@@ -50,10 +50,7 @@ export async function handleStartPlanPurchase(ctx: ToolContext, rawArgs: ToolArg
 
   let current: string;
   if (!hasKey(ctx)) {
-    current =
-      ctx.host === "stdio"
-        ? "Not signed in, so the current plan is unknown. Call login first if you want it checked."
-        : "Not signed in, so the current plan is unknown.";
+    current = "Not signed in, so the current plan is unknown.";
   } else if (keyKindOf(ctx) === "publishable") {
     current = "The configured key is publishable, which cannot read the plan, so the current plan is unknown.";
   } else {

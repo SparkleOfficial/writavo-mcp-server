@@ -1,9 +1,9 @@
 /**
  * Everything a tool needs to reach the API, carried per server instead of read from globals.
  *
- * The stdio server has one of these for its whole life. The hosted Worker builds a server per
- * request, many at once in one isolate and each for a different person's key, so nothing a tool
- * uses may live in module state: a key read from a global there would be somebody else's.
+ * The hosted Worker builds a server per request, many at once in one isolate and each for a
+ * different person's key, so nothing a tool uses may live in module state: a key read from a
+ * global there would be somebody else's.
  */
 export interface ToolContext {
   /** The key to send, or "" when there is none. Asked at the moment it is needed, never copied. */
@@ -11,7 +11,6 @@ export interface ToolContext {
   /** No trailing slash. */
   apiBase: string;
   userAgent: string;
-  host: "stdio" | "remote";
   /** The reply a key-requiring tool gives when there is no key, with the host's own way to fix it. */
   notSignedIn(): string;
   /** The MCP tool making the request, sent as Writavo-Mcp-Tool. Set by forTool. */
@@ -22,6 +21,34 @@ export interface ToolContext {
    * never Authorization or Writavo-Mcp-Tool.
    */
   extraHeaders?: () => Record<string, string>;
+  /**
+   * Where the API client tallies its requests, when a caller wants to know where its time went
+   * (import_content reports it). Made fresh per tool call, never shared.
+   */
+  stats?: ApiStats;
+  /**
+   * Epoch ms by which every request of this tool call must be finished: the client clamps its
+   * timeout and its rate-limit waits to it, so a call ends when its budget says, not 60 s later.
+   */
+  deadline?: number;
+}
+
+export interface ApiTally {
+  count: number;
+  ms: number;
+}
+
+/** Requests by kind, their total time (retries included), and time spent waiting out limits. */
+export interface ApiStats {
+  reads: ApiTally;
+  writes: ApiTally;
+  uploads: ApiTally;
+  waitMs: number;
+  rateLimited: number;
+}
+
+export function newApiStats(): ApiStats {
+  return { reads: { count: 0, ms: 0 }, writes: { count: 0, ms: 0 }, uploads: { count: 0, ms: 0 }, waitMs: 0, rateLimited: 0 };
 }
 
 /** The same context, labelled with the tool that is about to use it. */

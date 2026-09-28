@@ -96,10 +96,14 @@ info:
     Content you bring from another system keeps its identity. Send your old system's id for each
     article as `external_id` and look it up with `GET /articles?external_id=` before writing, so
     a second run updates instead of duplicating. Keep the old `slug` so the URL does not change.
-    When you publish, pass the article's original `published_at` (and optionally
-    `content_updated_at`) in the body of `POST /articles/{id}/publish`: an article's first
-    publish may carry its real history, so your feed order, structured data and sitemap dates
-    stay what they were. The migration guide walks through the whole import.
+    Record each article's original dates when you create or update it, as
+    `original_published_at` (and optionally `original_content_updated_at`): whenever the article
+    is first published, from the dashboard, the API, an MCP client, a schedule or the pipeline, it
+    goes live with that date instead of today's, so you can import everything as drafts and
+    publish later without losing its history. You can also pass `published_at` (and optionally
+    `content_updated_at`) in the body of `POST /articles/{id}/publish`, which wins over the
+    recorded dates. Either way your feed order, structured data and sitemap dates stay what they
+    were. The migration guide walks through the whole import.
 
     ## Signing in from a terminal
 
@@ -213,6 +217,14 @@ tags:
     description: The byline roster for a Site.
   - name: Media
     description: The media library. Two step upload, then registration.
+  - name: Imports
+    description: |
+      Bring a whole blog in, or keep pushing articles from another system, in the Writavo Import
+      Format (https://writavo.com/schemas/import-v1.json). Send the document once, check the dry
+      run, then start it: Writavo runs the import on its own servers until every article is done,
+      at the pace the rate limits allow, with nobody connected. Articles are matched by
+      `external_id`, so pushing the same article again updates it rather than duplicating it.
+      The same imports back the MCP server's `import_content` tool.
   - name: Pipeline
     description: |
       The AI generation engine: runs, the content plan, the pipeline's configuration and sending
@@ -523,8 +535,8 @@ paths:
           description: |
             Comma separated field allow list. Any field of the Article schema may be named.
             Omit for the default projection, which is:
-            `id, status, title, slug, excerpt, featured_image_url, category_id, author_id,
-            format_id, published_at, scheduled_publish_at, created_at, updated_at`.
+            `id, status, title, slug, excerpt, featured_image_url, featured_image_alt, category_id,
+            author_id, format_id, published_at, scheduled_publish_at, created_at, updated_at`.
             `id` is always returned whether or not you name it.
           required: false
           schema:
@@ -869,7 +881,9 @@ paths:
 
         `published_at` is set to now only if it was not already set. It records when the article
         was **first** made public and is the ordering key for your blog, so republishing after an
-        unpublish does not move the post to the top of the feed.
+        unpublish does not move the post to the top of the feed. If the article carries a recorded
+        `original_published_at` (set on create or update, typically by an import), its first
+        publish uses that date instead of now, and this is true of every way an article goes live.
 
         **Importing an article that was already public somewhere else?** Send its original
         `published_at` in the body, and optionally `content_updated_at`. Both must be in the past
@@ -877,7 +891,8 @@ paths:
         `published_at`. They are honoured on the article's **first** publish only: once an article
         has a `published_at`, sending a different one is `422 VALIDATION_FAILED`, and sending the
         same one is accepted so a retried import stays a no-op. A future date is refused; use
-        `/schedule` to go live later.
+        `/schedule` to go live later. Dates sent here win over the recorded
+        `original_published_at` / `original_content_updated_at` and replace them.
 
         Publishing clears any pending schedule.
 
@@ -1939,6 +1954,254 @@ paths:
         "422": { $ref: "#/components/responses/ValidationFailed" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /imports:
+    post:
+      operationId: createImport
+      tags: [Imports]
+      summary: Send an import document
+      description: |
+        Stores the document as a new import and answers with its `import_id` and a dry run: what
+        would be created, updated and published, every problem in the document, the images to copy
+        and an estimate. Nothing is written to the Site. Start it with `POST /imports/{import_id}/start`.
+
+        The dry run's `report` is plain text written for people (and AI assistants); its next steps
+        name the MCP tool, whose calls map one to one onto these endpoints.
+
+        An import is kept 7 days after its last use and belongs to the key that made it.
+      x-scope: articles:write
+      x-also-scopes: ['taxonomy:write', 'authors:write', 'media:write']
+      x-permission: articles.write
+      x-entitlement: none
+      x-spends-credits: false
+      x-publishable: false
+      x-rate-limit-class: upload
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              description: |
+                The import document (format "writavo-import", version 1: see
+                https://writavo.com/schemas/import-v1.json), or `{ "url": "https://..." }` naming
+                where to fetch it (a signed storage URL; fetched anonymously). At most 10 MB.
+              type: object
+      responses:
+        "201":
+          description: The import was stored and dry-run.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/ImportDryRun" }
+        "413": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /imports/{import_id}:
+    parameters:
+      - $ref: "#/components/parameters/ImportId"
+    get:
+      operationId: getImport
+      tags: [Imports]
+      summary: Check an import
+      description: |
+        Where the import stands: `state` (idle, running, complete, failed, cancelled,
+        waiting_for_confirm), counts of articles done and images copied, and the last batch's
+        report, including where its time went. Poll it every minute or so while it runs.
+      x-scope: articles:read
+      x-permission: none
+      x-entitlement: none
+      x-spends-credits: false
+      x-publishable: false
+      x-rate-limit-class: read
+      responses:
+        "200":
+          description: The import's state.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/ImportStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /imports/{import_id}/documents:
+    parameters:
+      - $ref: "#/components/parameters/ImportId"
+    post:
+      operationId: addImportDocument
+      tags: [Imports]
+      summary: Add to an import
+      description: |
+        Adds a part to a stored import, and dry-runs the result. Authors merge on `ref`, categories
+        and tags on `slug`, articles on `external_id`; an entry with the same key replaces the stored
+        one, so a corrected entry is simply sent again. The whole import stays under 10 MB.
+      x-scope: articles:write
+      x-also-scopes: ['taxonomy:write', 'authors:write', 'media:write']
+      x-permission: articles.write
+      x-entitlement: none
+      x-spends-credits: false
+      x-publishable: false
+      x-rate-limit-class: upload
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              description: |
+                The import document (format "writavo-import", version 1: see
+                https://writavo.com/schemas/import-v1.json), or `{ "url": "https://..." }` naming
+                where to fetch it (a signed storage URL; fetched anonymously). At most 10 MB.
+              type: object
+      responses:
+        "200":
+          description: The part was added and the import dry-run.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/ImportDryRun" }
+        "413": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /imports/{import_id}/dry-run:
+    parameters:
+      - $ref: "#/components/parameters/ImportId"
+    post:
+      operationId: dryRunImport
+      tags: [Imports]
+      summary: Dry-run an import again
+      description: Checks the stored document against the Site as it is now. Writes nothing.
+      x-scope: articles:write
+      x-also-scopes: ['taxonomy:write', 'authors:write', 'media:write']
+      x-permission: articles.write
+      x-entitlement: none
+      x-spends-credits: false
+      x-publishable: false
+      x-rate-limit-class: write
+      responses:
+        "200":
+          description: The dry run.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/ImportDryRun" }
+        "412": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /imports/{import_id}/start:
+    parameters:
+      - $ref: "#/components/parameters/ImportId"
+    post:
+      operationId: startImport
+      tags: [Imports]
+      summary: Start an import
+      description: |
+        Runs the import on Writavo's servers until every article is done, and answers at once with
+        202. Nothing needs to stay connected: check it with `GET /imports/{import_id}`. While it
+        runs, Writavo holds the key that started it (encrypted) to make its requests, and erases it
+        when the run ends; revoking the key stops the run.
+
+        Articles with status published are published with their ORIGINAL dates, on the live site,
+        so `publish` (the default) needs `confirm: true`. `publish: false` imports everything as a
+        draft. Starting an import that stopped carries on where it stopped.
+      x-scope: articles:write
+      x-also-scopes: ['taxonomy:write', 'authors:write', 'media:write']
+      x-permission: articles.write
+      x-entitlement: none
+      x-spends-credits: false
+      x-publishable: false
+      x-rate-limit-class: write
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ImportStartOptions" }
+      responses:
+        "202":
+          description: The import is running.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/ImportStatus" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "412": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /imports/{import_id}/cancel:
+    parameters:
+      - $ref: "#/components/parameters/ImportId"
+    post:
+      operationId: cancelImport
+      tags: [Imports]
+      summary: Cancel an import
+      description: |
+        Stops a running import after the batch in flight (within about a minute). What is already
+        imported stays; starting it again carries on from there.
+      x-scope: articles:write
+      x-permission: articles.write
+      x-entitlement: none
+      x-spends-credits: false
+      x-publishable: false
+      x-rate-limit-class: write
+      responses:
+        "200":
+          description: The import's state.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/ImportStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/InternalError" }
 
   /media/{id}:
@@ -9350,6 +9613,12 @@ components:
         Sent only by Writavo's hosted MCP server, and required with `flow: "oauth"`. You do not
         have one and do not need one: leave it out and leave `flow` out.
       schema: { type: string }
+    ImportId:
+      name: import_id
+      in: path
+      required: true
+      description: The import's id, as `POST /imports` returned it.
+      schema: { type: string, pattern: "^imp_[A-Za-z0-9_-]{22}$" }
     ArticleId:
       name: id
       in: path
@@ -9547,6 +9816,75 @@ components:
           type: string
           enum: [pending]
 
+    ImportStartOptions:
+      type: object
+      additionalProperties: false
+      properties:
+        publish:
+          type: boolean
+          default: true
+          description: Publish articles whose status is published, with their original dates. false imports everything as a draft.
+        confirm:
+          type: boolean
+          default: false
+          description: Required as true when publish is true. Set it only when the person responsible for the site has agreed.
+        rehost_images:
+          type: boolean
+          default: true
+          description: Copy https images into the media library and rewrite their URLs.
+        retry_failed:
+          type: boolean
+          default: false
+          description: Retry, once, the articles an earlier run skipped or failed.
+    ImportProgress:
+      type: object
+      properties:
+        articles_total: { type: integer }
+        articles_done: { type: integer }
+        articles_failed: { type: integer }
+        articles_skipped: { type: integer }
+        images_copied: { type: integer }
+        images_failed: { type: integer }
+        categories_created: { type: integer }
+        tags_created: { type: integer }
+        authors_created: { type: integer }
+    ImportStatus:
+      type: object
+      required: [import_id, state, progress]
+      properties:
+        import_id: { type: string }
+        state:
+          type: string
+          enum: [idle, running, complete, failed, cancelled, waiting_for_confirm]
+          description: idle means it has not been started.
+        progress: { $ref: "#/components/schemas/ImportProgress" }
+        started_at: { type: [string, "null"], format: date-time }
+        updated_at: { type: [string, "null"], format: date-time }
+        finished_at: { type: [string, "null"], format: date-time }
+        batches: { type: integer }
+        error: { type: [string, "null"], description: Why it stopped, when it did. }
+        last_report: { type: [string, "null"], description: The last batch's report, including where its time went. }
+        document:
+          type: object
+          properties:
+            bytes: { type: integer }
+            articles: { type: [integer, "null"] }
+    ImportDryRun:
+      type: object
+      required: [import_id, dry_run]
+      properties:
+        import_id: { type: string }
+        document:
+          type: object
+          properties:
+            bytes: { type: integer }
+            articles: { type: [integer, "null"] }
+        dry_run:
+          type: object
+          required: [report, ok]
+          properties:
+            report: { type: string, description: The dry run, as text. }
+            ok: { type: boolean, description: false when the document could not be checked at all. }
     ErrorCode:
       type: string
       description: |
@@ -9945,6 +10283,13 @@ components:
             name or fetch the article individually.
         excerpt: { type: [string, "null"], maxLength: 1000 }
         featured_image_url: { type: [string, "null"], format: uri }
+        featured_image_alt:
+          type: [string, "null"]
+          maxLength: 500
+          description: |
+            Alt text for `featured_image_url`: what the image shows, for screen readers and image
+            search. Rendered as the hero image's `alt` and as `og:image:alt` on your blog. Null
+            when none has been written, and your blog then uses the article title.
         seo_title: { type: [string, "null"], maxLength: 200 }
         seo_description: { type: [string, "null"], maxLength: 400 }
         seo_keywords:
@@ -10032,6 +10377,31 @@ components:
             When what a reader sees last changed: the title, slug, body, excerpt, images, SEO
             fields, structured blocks, category or author. Unlike `updated_at` it ignores internal
             bookkeeping, so it is the honest value for `dateModified` and a sitemap `lastmod`.
+        original_published_at:
+          type: [string, "null"]
+          format: date-time
+          description: |
+            When the article was ORIGINALLY published in the system it was imported from. Record it
+            on create or update and the article's **first** publish, from any path (the dashboard,
+            `POST /articles/{id}/publish`, an MCP client, a schedule or the pipeline), sets
+            `published_at` to this date instead of now. Has no effect once `published_at` is set.
+            Never shown on your blog on its own. Not in the list default (ask for it with `fields`),
+            and never returned to a publishable key.
+
+            **Setting or correcting it by hand:** `PATCH /articles/{id}` with a secret key that has
+            `articles:write`, at any time; only its value at the moment of the first publish counts.
+            Send `null` to clear it (the first publish then uses the time of publishing). There is no
+            field for it in the dashboard; the dashboard shows it next to the Publish button, and
+            publishing from there uses it. Stored to the millisecond: finer digits are dropped.
+        original_content_updated_at:
+          type: [string, "null"]
+          format: date-time
+          description: |
+            When the imported article's content last changed at its source. Needs
+            `original_published_at` and may not be earlier than it. While the article has never been
+            published, `content_updated_at` follows it (or `original_published_at` when it is null),
+            so the first publish keeps the source's `lastmod`; an edit made in Writavo before then
+            moves `content_updated_at` to the edit time as usual. Never returned to a publishable key.
         created_at: { type: string, format: date-time, readOnly: true }
         updated_at: { type: string, format: date-time, readOnly: true }
         source:
@@ -10133,6 +10503,10 @@ components:
         content: { type: [string, "null"], description: Markdown. }
         excerpt: { type: [string, "null"], maxLength: 1000 }
         featured_image_url: { type: [string, "null"], format: uri }
+        featured_image_alt:
+          type: [string, "null"]
+          maxLength: 500
+          description: Alt text for `featured_image_url`. Blank is stored as null, and your blog then uses the title.
         seo_title: { type: [string, "null"], maxLength: 200 }
         seo_description: { type: [string, "null"], maxLength: 400 }
         seo_keywords: { type: [array, "null"], items: { type: string } }
@@ -10153,6 +10527,22 @@ components:
         author_id: { type: [string, "null"], format: uuid }
         format_id: { type: [string, "null"], format: uuid }
         tag_ids: { type: array, items: { type: string, format: uuid } }
+        original_published_at:
+          type: [string, "null"]
+          format: date-time
+          description: |
+            The date this article was originally published in the system you are importing it
+            from. Must be in the past and on or after 1990-01-01. Used as `published_at` on the
+            article's first publish from any path (dashboard, API, MCP, schedule or pipeline), so
+            you can import as a draft and publish later without the post being dated today. No
+            effect on an article that has already been published.
+        original_content_updated_at:
+          type: [string, "null"]
+          format: date-time
+          description: |
+            When the imported article's content last changed at its source. Must be in the past,
+            needs `original_published_at`, and may not be earlier than it. Becomes the article's
+            `content_updated_at` (its sitemap `lastmod`) until it is edited in Writavo.
 
     ArticleUpdate:
       type: object
@@ -10178,7 +10568,14 @@ components:
           description: Your id for this article in the system it came from. `null` clears it.
         content: { type: [string, "null"], description: Markdown. }
         excerpt: { type: [string, "null"], maxLength: 1000 }
-        featured_image_url: { type: [string, "null"], format: uri }
+        featured_image_url:
+          type: [string, "null"]
+          format: uri
+          description: '`null` removes the featured image, and its `featured_image_alt` with it unless this request also sends one.'
+        featured_image_alt:
+          type: [string, "null"]
+          maxLength: 500
+          description: Alt text for `featured_image_url`. Blank or `null` clears it, and your blog then uses the title.
         seo_title: { type: [string, "null"], maxLength: 200 }
         seo_description: { type: [string, "null"], maxLength: 400 }
         seo_keywords: { type: [array, "null"], items: { type: string } }
@@ -10202,6 +10599,22 @@ components:
           type: array
           items: { type: string, format: uuid }
           description: Full replacement, not a merge. Send `[]` to clear.
+        original_published_at:
+          type: [string, "null"]
+          format: date-time
+          description: |
+            The date this article was originally published in the system you are importing it
+            from. Must be in the past and on or after 1990-01-01. Used as `published_at` on the
+            article's first publish from any path (dashboard, API, MCP, schedule or pipeline), so
+            you can import as a draft and publish later without the post being dated today. `null` clears
+            it. No effect on an article that has already been published.
+        original_content_updated_at:
+          type: [string, "null"]
+          format: date-time
+          description: |
+            When the imported article's content last changed at its source. Must be in the past,
+            needs `original_published_at`, and may not be earlier than it. Becomes the article's
+            `content_updated_at` (its sitemap `lastmod`) until it is edited in Writavo.
 
     ArticleLifecycleState:
       type: object

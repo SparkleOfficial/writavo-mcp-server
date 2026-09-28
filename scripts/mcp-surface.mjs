@@ -161,6 +161,8 @@ export const NOT_TOOL_TAGS = {
     "Credential management stays in the dashboard. A server that can mint a secret key is a server whose compromise mints secret keys, and the key it would use to do so is sitting in a config file on the same machine.",
   Webhooks:
     "Account configuration, not content. An assistant that can repoint delivery URLs can quietly redirect a Site's event stream, and that is a change a person should make deliberately.",
+  Imports:
+    "Use import_content instead: it is the same import (the stored document, the dry run, the background run, its status and cancel) with the confirmation step built in, so it is not offered twice.",
 };
 
 /**
@@ -188,17 +190,24 @@ export const NAME_OVERRIDES = {
 export const COMPOSED_INTO = {
   createMediaUploadUrl: "upload_media",
   registerMedia: "upload_media",
-  // The device sign-in is the same shape of problem: a start call, a person acting in a browser,
-  // and a poll loop that has to honour `interval` and `slow_down`. One tool owns all of it, and
-  // the key it signs in with is generated and kept on the user's machine by that tool alone.
-  startDeviceAuthorization: "login",
-  pollDeviceAuthorization: "login",
 };
 
 /** What each composing tool drives, for the refusal reason a composed operation carries. */
 const COMPOSED_WHAT = {
   upload_media: "upload handshake",
-  login: "device sign-in",
+};
+
+/**
+ * Operations the hosted server makes for itself and an assistant never does. The device sign-in
+ * is how the server's OAuth sign-in mints a connection's key (a person approves in the browser);
+ * the local stdio server's login tool, which also drove it, is gone with the npm package
+ * (owner ruling 2026-09-28: hosted only).
+ */
+const SERVER_OWNED = {
+  startDeviceAuthorization:
+    "Used by the hosted server's own browser sign-in, never by an assistant: an assistant connects by adding https://mcp.writavo.com/mcp in its client, which opens the sign-in for the person.",
+  pollDeviceAuthorization:
+    "Used by the hosted server's own browser sign-in, never by an assistant: an assistant connects by adding https://mcp.writavo.com/mcp in its client, which opens the sign-in for the person.",
 };
 
 /** Tools the package implements without a single endpoint behind them. */
@@ -213,24 +222,6 @@ export const LOCAL_TOOLS = [
     name: "get_api_docs",
     scope: "none",
     summary: "Read the API reference offline. One of the few tools that needs no key.",
-    confirm: false,
-  },
-  {
-    name: "login",
-    scope: "none",
-    summary: "Sign in through the browser: a person approves, and a key generated on this machine goes live.",
-    confirm: false,
-  },
-  {
-    name: "login_status",
-    scope: "none",
-    summary: "Check whether a sign-in started with login has been approved, and which Site it is for.",
-    confirm: false,
-  },
-  {
-    name: "logout",
-    scope: "none",
-    summary: "Sign out on this machine: revoke the signed-in key on the server, then forget it locally.",
     confirm: false,
   },
   {
@@ -521,6 +512,10 @@ export function buildMcpSurface(spec) {
           bail(`${upper} ${path}: x-mcp-surface on an operation under "${tag}", which assistants may not reach at all`);
         }
         refusals.push({ operationId, method: upper, path, tag, reason: NOT_TOOL_TAGS[tag] });
+        continue;
+      }
+      if (SERVER_OWNED[operationId]) {
+        refusals.push({ operationId, method: upper, path, tag, reason: SERVER_OWNED[operationId] });
         continue;
       }
       if (COMPOSED_INTO[operationId]) {

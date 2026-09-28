@@ -1,12 +1,12 @@
 /**
- * What an import has done so far. The stdio host keeps it next to the import file as
- * <file>.writavo-progress.json (src/stdio/files.ts); an import sent inline has nowhere to keep it,
+ * What an import has done so far. The hosted Worker keeps it in the import job
+ * (src/import/jobs.ts). An inline document on a host without job storage has nowhere to keep it,
  * so its progress lives for one call and a re-run is made safe by external_id matching instead.
  *
- * It is what makes a file import resumable across tool calls (each call does one batch) and across
- * restarts, and what makes a finished import a no-op when it is run again. It is bound to one
- * Site: article ids and re-hosted image URLs mean nothing on another, so a progress file written
- * for Site A is refused when the key belongs to Site B.
+ * It is what makes a stored import resumable across tool calls (each call does one batch) and
+ * across restarts, and what makes a finished import a no-op when it is run again. It is bound to
+ * one Site: article ids and re-hosted image URLs mean nothing on another, so progress written for
+ * Site A is refused when the key belongs to Site B.
  *
  * This module is the shape only, with no filesystem in it, because the core runs in a Worker.
  */
@@ -79,14 +79,19 @@ export function newProgress(filePath: string, website: { id: string; name: strin
   };
 }
 
-/** Where an import's progress persists between calls, when the host has somewhere to keep it. */
+/**
+ * Where an import's progress persists between calls, when the host has somewhere to keep it: the
+ * import job on the server (the hosted Worker). Async because the store is a network hop away.
+ */
 export interface ProgressStore {
-  /** Where it lives, as replies name it. */
+  /** Where it lives, as replies name it: "the progress file /x.json.writavo-progress.json". */
   location: string;
+  /** What the person does to start over when the saved progress cannot be used. */
+  resetHint: string;
   /** Null when there is none; a string when there is one that cannot be used. */
-  read(): ImportProgress | null | string;
+  read(): Promise<ImportProgress | null | string>;
   /** Replace it. Atomic, so an interrupted call leaves the previous progress intact. */
-  write(progress: ImportProgress): void;
+  write(progress: ImportProgress): Promise<void>;
 }
 
 /** Fill in what an older progress file may lack. Null when it is not one this version reads. */

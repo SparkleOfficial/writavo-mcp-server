@@ -304,7 +304,7 @@ export const OPERATIONS: McpOperation[] = [
         "name": "fields",
         "in": "query",
         "required": false,
-        "description": "Comma separated field allow list. Any field of the Article schema may be named. Omit for the default projection, which is: `id, status, title, slug, excerpt, featured_image_url, category_id, author_id, format_id, published_at, scheduled_publish_at, created_at, updated_at`.",
+        "description": "Comma separated field allow list. Any field of the Article schema may be named. Omit for the default projection, which is: `id, status, title, slug, excerpt, featured_image_url, featured_image_alt, category_id, author_id, format_id, published_at, scheduled_publish_at, created_at, updated_at`.",
         "explode": false,
         "kind": "string",
         "nullable": false
@@ -511,6 +511,15 @@ export const OPERATIONS: McpOperation[] = [
         "format": "uri"
       },
       {
+        "name": "featured_image_alt",
+        "in": "body",
+        "required": false,
+        "description": "Alt text for `featured_image_url`. Blank is stored as null, and your blog then uses the title.",
+        "explode": false,
+        "kind": "string",
+        "nullable": true
+      },
+      {
         "name": "seo_title",
         "in": "body",
         "required": false,
@@ -624,6 +633,26 @@ export const OPERATIONS: McpOperation[] = [
         "kind": "array",
         "nullable": false,
         "itemKind": "string"
+      },
+      {
+        "name": "original_published_at",
+        "in": "body",
+        "required": false,
+        "description": "The date this article was originally published in the system you are importing it from. Must be in the past and on or after 1990-01-01.",
+        "explode": false,
+        "kind": "string",
+        "nullable": true,
+        "format": "date-time"
+      },
+      {
+        "name": "original_content_updated_at",
+        "in": "body",
+        "required": false,
+        "description": "When the imported article's content last changed at its source. Must be in the past, needs `original_published_at`, and may not be earlier than it. Becomes the article's `content_updated_at` (its sitemap `lastmod`) until it is edited in Writavo.",
+        "explode": false,
+        "kind": "string",
+        "nullable": true,
+        "format": "date-time"
       }
     ],
     "approval": null,
@@ -779,11 +808,20 @@ export const OPERATIONS: McpOperation[] = [
         "name": "featured_image_url",
         "in": "body",
         "required": false,
-        "description": "",
+        "description": "`null` removes the featured image, and its `featured_image_alt` with it unless this request also sends one.",
         "explode": false,
         "kind": "string",
         "nullable": true,
         "format": "uri"
+      },
+      {
+        "name": "featured_image_alt",
+        "in": "body",
+        "required": false,
+        "description": "Alt text for `featured_image_url`. Blank or `null` clears it, and your blog then uses the title.",
+        "explode": false,
+        "kind": "string",
+        "nullable": true
       },
       {
         "name": "seo_title",
@@ -899,6 +937,26 @@ export const OPERATIONS: McpOperation[] = [
         "kind": "array",
         "nullable": false,
         "itemKind": "string"
+      },
+      {
+        "name": "original_published_at",
+        "in": "body",
+        "required": false,
+        "description": "The date this article was originally published in the system you are importing it from. Must be in the past and on or after 1990-01-01.",
+        "explode": false,
+        "kind": "string",
+        "nullable": true,
+        "format": "date-time"
+      },
+      {
+        "name": "original_content_updated_at",
+        "in": "body",
+        "required": false,
+        "description": "When the imported article's content last changed at its source. Must be in the past, needs `original_published_at`, and may not be earlier than it. Becomes the article's `content_updated_at` (its sitemap `lastmod`) until it is edited in Writavo.",
+        "explode": false,
+        "kind": "string",
+        "nullable": true,
+        "format": "date-time"
       }
     ],
     "approval": null,
@@ -2783,6 +2841,48 @@ export const REFUSALS: McpRefusal[] = [
     "reason": "Reached through the upload_media tool, which drives the whole upload handshake in one call."
   },
   {
+    "operationId": "createImport",
+    "method": "POST",
+    "path": "/imports",
+    "tag": "Imports",
+    "reason": "Use import_content instead: it is the same import (the stored document, the dry run, the background run, its status and cancel) with the confirmation step built in, so it is not offered twice."
+  },
+  {
+    "operationId": "getImport",
+    "method": "GET",
+    "path": "/imports/{import_id}",
+    "tag": "Imports",
+    "reason": "Use import_content instead: it is the same import (the stored document, the dry run, the background run, its status and cancel) with the confirmation step built in, so it is not offered twice."
+  },
+  {
+    "operationId": "addImportDocument",
+    "method": "POST",
+    "path": "/imports/{import_id}/documents",
+    "tag": "Imports",
+    "reason": "Use import_content instead: it is the same import (the stored document, the dry run, the background run, its status and cancel) with the confirmation step built in, so it is not offered twice."
+  },
+  {
+    "operationId": "dryRunImport",
+    "method": "POST",
+    "path": "/imports/{import_id}/dry-run",
+    "tag": "Imports",
+    "reason": "Use import_content instead: it is the same import (the stored document, the dry run, the background run, its status and cancel) with the confirmation step built in, so it is not offered twice."
+  },
+  {
+    "operationId": "startImport",
+    "method": "POST",
+    "path": "/imports/{import_id}/start",
+    "tag": "Imports",
+    "reason": "Use import_content instead: it is the same import (the stored document, the dry run, the background run, its status and cancel) with the confirmation step built in, so it is not offered twice."
+  },
+  {
+    "operationId": "cancelImport",
+    "method": "POST",
+    "path": "/imports/{import_id}/cancel",
+    "tag": "Imports",
+    "reason": "Use import_content instead: it is the same import (the stored document, the dry run, the background run, its status and cancel) with the confirmation step built in, so it is not offered twice."
+  },
+  {
     "operationId": "listApiKeys",
     "method": "GET",
     "path": "/keys",
@@ -2871,14 +2971,14 @@ export const REFUSALS: McpRefusal[] = [
     "method": "POST",
     "path": "/auth/device",
     "tag": "Device sign-in",
-    "reason": "Reached through the login tool, which drives the whole device sign-in in one call."
+    "reason": "Used by the hosted server's own browser sign-in, never by an assistant: an assistant connects by adding https://mcp.writavo.com/mcp in its client, which opens the sign-in for the person."
   },
   {
     "operationId": "pollDeviceAuthorization",
     "method": "POST",
     "path": "/auth/device/token",
     "tag": "Device sign-in",
-    "reason": "Reached through the login tool, which drives the whole device sign-in in one call."
+    "reason": "Used by the hosted server's own browser sign-in, never by an assistant: an assistant connects by adding https://mcp.writavo.com/mcp in its client, which opens the sign-in for the person."
   },
   {
     "operationId": "extendApiKey",

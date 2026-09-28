@@ -1,7 +1,12 @@
 import type { z } from "zod/v4";
 import {
+  AuthorSchema,
+  CategorySchema,
+  IMPORT_FORMAT_NAME,
+  IMPORT_FORMAT_VERSION,
   ImportArticleSchema,
   ImportEnvelopeSchema,
+  TagSchema,
   type ImportArticle,
   type ImportEnvelope,
 } from "./format.js";
@@ -51,20 +56,50 @@ export function itemLabel(item: Pick<ItemCheck, "index" | "externalId">): string
   return item.externalId ? `${item.externalId} (articles[${item.index}])` : `articles[${item.index}]`;
 }
 
+/**
+ * The top level with every entry that parses kept and every one that does not reported, so one
+ * bad author, category or tag no longer hides the articles' own problems: the dry run reports
+ * both in one pass. Null only when there is nothing to check the articles against (not an object,
+ * or no articles array).
+ */
+function salvageEnvelope(value: unknown): ImportEnvelope | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  if (!Array.isArray(raw.articles) || raw.articles.length === 0) return null;
+  const keep = <T>(entries: unknown, schema: z.ZodType<T>): T[] | undefined =>
+    Array.isArray(entries)
+      ? entries.flatMap((entry) => {
+          const parsed = schema.safeParse(entry);
+          return parsed.success ? [parsed.data] : [];
+        })
+      : undefined;
+  return {
+    format: IMPORT_FORMAT_NAME,
+    version: IMPORT_FORMAT_VERSION,
+    authors: keep(raw.authors, AuthorSchema),
+    categories: keep(raw.categories, CategorySchema),
+    tags: keep(raw.tags, TagSchema),
+    articles: raw.articles,
+  };
+}
+
 export function checkDocument(value: unknown, now = Date.now()): DocumentCheck {
   const envelopeResult = ImportEnvelopeSchema.safeParse(value);
-  if (!envelopeResult.success) {
-    // Article-level issues are not the envelope's; they are reported per item below. But an
-    // envelope that does not parse leaves nothing to check the items against.
-    const errors = envelopeResult.error.issues
-      .filter((issue) => issue.path[0] !== "articles" || issue.path.length === 1)
-      .map((issue) => describeIssue(issue));
-    if (errors.length > 0) return { envelope: null, envelopeErrors: errors, items: [] };
+  // Article-level issues are not the envelope's; they are reported per item below.
+  const envelopeErrors: string[] = envelopeResult.success
+    ? []
+    : envelopeResult.error.issues
+        .filter((issue) => issue.path[0] !== "articles" || issue.path.length === 1)
+        .map((issue) => describeIssue(issue));
+  const envelope = envelopeResult.success ? envelopeResult.data : salvageEnvelope(value);
+  if (!envelope) {
+    return {
+      envelope: null,
+      envelopeErrors: envelopeErrors.length > 0 ? envelopeErrors : ["The file is not a Writavo import document."],
+      items: [],
+    };
   }
-  const envelope = envelopeResult.success ? envelopeResult.data : null;
-  if (!envelope) return { envelope: null, envelopeErrors: ["The file is not a Writavo import document."], items: [] };
 
-  const envelopeErrors: string[] = [];
   const duplicates = (values: string[], what: string) => {
     const seen = new Set<string>();
     for (const v of values) {
@@ -76,7 +111,14 @@ export function checkDocument(value: unknown, now = Date.now()): DocumentCheck {
   duplicates((envelope.categories ?? []).map((c) => c.slug), "categories[].slug");
   duplicates((envelope.tags ?? []).map((t) => t.slug), "tags[].slug");
 
-  const authorRefs = new Set((envelope.authors ?? []).map((a) => a.ref));
+  // Every ref the document declares, parseable or not: an article naming an author whose entry has
+  // a problem is reported once, against the author, not a second time against the article.
+  const rawAuthors = (value as { authors?: unknown }).authors;
+  const authorRefs = new Set(
+    Array.isArray(rawAuthors)
+      ? rawAuthors.flatMap((a) => (a && typeof a === "object" && typeof (a as { ref?: unknown }).ref === "string" ? [(a as { ref: string }).ref] : []))
+      : [],
+  );
   const seenExternalIds = new Map<string, number>();
   const seenSlugs = new Map<string, number>();
 

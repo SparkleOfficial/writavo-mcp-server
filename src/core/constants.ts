@@ -10,8 +10,6 @@ export const MCP_DOCS_URL = `${DOCS_URL}/mcp`;
 export const KEYS_URL = `${DASHBOARD_URL}/settings/api-keys`;
 export const AGENTS_URL = `${DASHBOARD_URL}/settings/agents`;
 export const BILLING_URL = `${DASHBOARD_URL}/billing`;
-export const SIGNUP_URL = `${DASHBOARD_URL}/signup`;
-export const DEVICE_URL = `${DASHBOARD_URL}/device`;
 
 /** The hosted server. */
 export const REMOTE_MCP_URL = "https://mcp.writavo.com/mcp";

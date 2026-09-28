@@ -4,9 +4,11 @@ import { OPERATIONS } from "../generated/operations.js";
 import { callOperation, type ToolArgs } from "../tools/call.js";
 import { inputShapeFor } from "../tools/schema.js";
 import { GET_API_DOCS, handleGetApiDocs } from "../tools/api-docs.js";
-import { handleUploadMedia, uploadMediaTool, type LocalFileReader } from "../tools/upload-media.js";
+import { UPLOAD_MEDIA, handleUploadMedia } from "../tools/upload-media.js";
 import { START_PLAN_PURCHASE, handleStartPlanPurchase } from "../tools/plan-purchase.js";
-import { handleImportContent, importContentTool, type ImportFileSupport } from "../tools/import-content.js";
+import { handleImportContent, importContentTool } from "../tools/import-content.js";
+import type { ImportJobStore } from "../import/jobs.js";
+import type { ImportBudget } from "../import/engine.js";
 import {
   READ_WRITAVO_ACTION,
   RUN_WRITAVO_ACTION,
@@ -30,14 +32,15 @@ import { publishChecklistPrompt } from "../prompts/publish-checklist.js";
 import { migrateContentPrompt } from "../prompts/migrate-content.js";
 import { DEFAULT_API_BASE } from "./constants.js";
 import type { ToolContext } from "./context.js";
-import { NOT_SIGNED_IN_REMOTE, NO_API_KEY_MESSAGE } from "./messages.js";
+import { NOT_SIGNED_IN_REMOTE } from "./messages.js";
 import { VERSION } from "./version.js";
 
 /**
- * THE ONE SET OF TOOLS (MCP-2 item 5). Both hosts mount this: the npm stdio server (plus its
- * sign-in tools and file extras) and the hosted Worker at mcp.writavo.com. Nothing in here, or in
- * anything it imports, may read process.env, touch a filesystem or hold a key in module state:
- * the Worker builds one of these per request, for many people at once, in one isolate.
+ * THE ONE SET OF TOOLS (MCP-2 item 5), mounted by the hosted Worker at mcp.writavo.com, the only
+ * Writavo MCP server there is (owner ruling 2026-09-28: the npm stdio package is discontinued).
+ * Nothing in here, or in anything it imports, may read process.env, touch a filesystem or hold a
+ * key in module state: the Worker builds one of these per request, for many people at once, in
+ * one isolate.
  */
 export interface CoreOptions {
   /** The key for this connection, or null. Null makes every key-requiring tool say how to fix it. */
@@ -45,33 +48,29 @@ export interface CoreOptions {
   /** Default https://api.writavo.com/v1. */
   apiBase?: string;
   userAgent: string;
-  host: "stdio" | "remote";
+  /** Always "remote": the hosted server is the only host. Optional, and kept so callers that name it still compile. */
+  host?: "remote";
   /** Host-specific instructions, appended to the not-signed-in reply. */
   notSignedInHint?: string;
   /**
    * Called once per API request; its headers are merged into every request the core makes to the
    * Writavo API, after the core's own. It can never override Authorization or Writavo-Mcp-Tool
    * (nor any other header the core set). The Worker sends X-Writavo-Mcp-Worker and
-   * X-Writavo-Client-Ip here, so the gateway rate-limits each person separately. Stdio leaves it unset.
+   * X-Writavo-Client-Ip here, so the gateway rate-limits each person separately.
    */
   extraHeaders?: () => Record<string, string>;
-}
-
-/**
- * What only the stdio host adds. Deliberately not part of CoreOptions, which is the Worker's
- * contract: these are the local-machine features a hosted server must never grow.
- */
-export interface HostExtras {
-  /** The full not-signed-in reply, when it depends on host state (an expired saved sign-in, say). */
-  notSignedIn?: () => string;
-  /** Replaces the server instructions. */
-  instructions?: string;
-  /** Adds `path` to import_content. */
-  importFiles?: ImportFileSupport;
-  /** Adds `path` to upload_media. */
-  mediaFiles?: LocalFileReader;
-  /** Registers the host's own tools (login, login_status, logout) on the same server. */
-  registerTools?: (server: McpServer, ctx: ToolContext) => void;
+  /**
+   * Import jobs (src/import/jobs.ts): where import_content keeps a document and its progress on
+   * the server, scoped to this connection. Adds `url`, `upload` and `import_id` to import_content.
+   * The Worker passes one built for the caller's key; a host without storage leaves it unset.
+   */
+  importJobs?: ImportJobStore;
+  /**
+   * The time and request budget of one foreground import_content call. The Worker sets it from
+   * its plan (a free Workers plan allows 50 outbound requests per invocation); unset, the
+   * engine's default time budget and no request cap.
+   */
+  importBudget?: ImportBudget;
 }
 
 /**
@@ -81,13 +80,13 @@ export interface HostExtras {
  * means, and point at the docs for the rest. Clients show or truncate instructions, so each stays
  * well under ~6000 characters. No em-dashes or en-dashes: this is shipped copy.
  */
-const INSTRUCTIONS_COMMON_START = [
+const INSTRUCTIONS_START = [
   "Writavo is a CMS for one Site's blog: articles, categories, tags, authors and media, plus an optional AI article pipeline, delivery to the Site's own domain, SEO tools, the team and billing. The tools are generated from Writavo's published OpenAPI specification.",
   "START: call get_site_info (the Site's name, domain and timezone) and verify_api_key (the permissions this connection has; get_api_docs section tools lists what each tool and action needs). Tell the person which Site you are connected to and what you can and cannot do there. A connection reaches that one Site only; there is no site parameter.",
   "ACTIONS: articles, categories, tags, authors, media and pipeline runs have their own tools. Everything else is an action: Site settings and the knowledge profile, the organisation, formats and prompts, the pipeline's configuration and content plan, delivery and domains, SEO, outreach, the team and roles, billing, insights and logs. Call search_writavo_actions with a few words (and an area if you know it), then the runner each result names: read_writavo_action for reads, run_writavo_action for changes, with the operation_id and arguments it returned. For settings, SEO, delivery, team and billing questions, read first before you change anything. If a search returns a never_through_an_agent result, stop and give the person its next_step.",
 ];
 
-const INSTRUCTIONS_COMMON_END = [
+const INSTRUCTIONS_END = [
   "DOCS: get_api_docs, and the resources writavo://api-reference, writavo://error-codes and writavo://import-format. Online: https://writavo.com/docs/mcp.md (setup, permissions, approvals, troubleshooting), https://writavo.com/docs/migrate.md (moving a blog in), https://writavo.com/llms.txt.",
   "SAFETY: create_article always makes a private draft. Publishing, scheduling, unpublishing, deleting, importing and pipeline runs are separate explicit calls. When a tool answers \"Nothing has been done\" and asks for confirmation, ask the person and call again with confirm: true only if they agree. trigger_pipeline_run, and every action whose search result says it spends credits or money, costs the organisation money: run them only when the person asks.",
   "APPROVALS: some calls need a person's approval in the Writavo dashboard. Deleting and unpublishing content may, when the organisation requires it; team changes, paid scans, pipeline runs and turning the pipeline up, custom domains, publishing the hosted site, CMS connections and pushes, auto-refill, raising a credit cap and keeping the plan always do. The call then returns a link on https://app.writavo.com/approvals/ and an approval id, and nothing has happened yet. Give the person the link exactly as returned, wait until they say they approved it, then call again with the same arguments plus approval_id. An approval works once and lapses after 24 hours. APPROVAL_PENDING: not decided yet, ask them. APPROVAL_DENIED: stop, tell them, ask what they want instead; never rephrase the request to get around it. APPROVAL_INVALID: call again without approval_id for a new link.",
@@ -96,24 +95,17 @@ const INSTRUCTIONS_COMMON_END = [
   "NEVER through these tools (a person does them in the dashboard; give them the link, which get_api_docs section tools lists for each): AI agent settings, approving or widening your own access (including the access of the person you act for), deleting a Site or the organisation, card details, plan changes (use start_plan_purchase), ownership, the outreach policy and mailbox, CMS and Bing credentials, API keys and webhooks.",
 ];
 
-const INSTRUCTIONS_STDIO = [
-  ...INSTRUCTIONS_COMMON_START,
-  "SIGN-IN (this is the local server): if a tool says there is no key, call login, show the person the link and the code it returns, and call login_status every few seconds until it says approved. No restart is needed. logout revokes the key and deletes it from this machine.",
-  "FILES: import_content accepts the absolute path of an import file on this machine (any size, imported in batches, progress saved next to the file) or the document inline. upload_media accepts a local path, an https URL or base64.",
-  ...INSTRUCTIONS_COMMON_END,
-].join("\n\n");
-
-const INSTRUCTIONS_REMOTE = [
-  ...INSTRUCTIONS_COMMON_START,
+const INSTRUCTIONS = [
+  ...INSTRUCTIONS_START,
   "SIGN-IN (this is the hosted server at https://mcp.writavo.com/mcp): the person signed in through the browser when they connected, choosing the Site and the permissions. If a tool says this connection carries no credentials, ask them to reconnect or re-authenticate Writavo in this client's MCP or connector settings.",
-  "FILES: this hosted server cannot read the person's files, but you can. To import a file on disk, read it yourself and send it to import_content inline, at most 50 articles and 2 MB per call: split a bigger blog into documents that each carry the authors, categories and tags their own articles use, dry-run each, then apply each. Do not switch to or install another server for this. upload_media takes an https URL or base64; for an image that exists only as a local file, read it and send it as base64.",
-  ...INSTRUCTIONS_COMMON_END,
+  "FILES: this hosted server cannot read the person's files, but import_content keeps each document on the server as an import with its progress, sent once and then named by its import_id. Ways in, best first: upload: true and run the curl command it returns (up to 10 MB, never through this conversation); url for a file at an https URL; or data in parts of at most 50 articles and 2 MB, each part after the first with the import_id. Dry-run with the import_id and show the person the report. An apply (dry_run false) runs IN THE BACKGROUND until complete and returns at once: check it with import_id and status: true every minute or two; never apply again while it runs. Do not switch to another server for this. upload_media takes an https URL or base64 (a local image: read it, send base64).",
+  ...INSTRUCTIONS_END,
 ].join("\n\n");
 
 /** Annotations for the hand-written tools. Every tool here reaches one closed system: the Site. */
 const READ_ONLY = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false } as const;
 
-/** The hand-written tools every host has. The stdio host adds login, login_status and logout. */
+/** The hand-written tools: every tool that is not a row of the generated table. */
 export const CORE_LOCAL_TOOL_NAMES = [
   "upload_media",
   "get_api_docs",
@@ -124,34 +116,22 @@ export const CORE_LOCAL_TOOL_NAMES = [
   "run_writavo_action",
 ] as const;
 
-export function createWritavoMcpServer(opts: CoreOptions): McpServer {
-  return buildWritavoMcpServer(opts, {});
-}
-
 /** The per-server context every tool reads, built from the options and nothing else. */
-export function toolContext(opts: CoreOptions, notSignedIn?: () => string): ToolContext {
+export function toolContext(opts: CoreOptions): ToolContext {
   const hint = opts.notSignedInHint?.trim();
-  const fallback = opts.host === "remote" ? NOT_SIGNED_IN_REMOTE : NO_API_KEY_MESSAGE;
   return {
     apiKey: () => opts.apiKey() ?? "",
     apiBase: (opts.apiBase ?? DEFAULT_API_BASE).replace(/\/+$/, ""),
     userAgent: opts.userAgent,
-    host: opts.host,
     ...(opts.extraHeaders ? { extraHeaders: opts.extraHeaders } : {}),
-    notSignedIn: () => {
-      const base = notSignedIn ? notSignedIn() : fallback;
-      return hint ? `${base}\n\n${hint}` : base;
-    },
+    notSignedIn: () => (hint ? `${NOT_SIGNED_IN_REMOTE}\n\n${hint}` : NOT_SIGNED_IN_REMOTE),
   };
 }
 
-export function buildWritavoMcpServer(opts: CoreOptions, extras: HostExtras): McpServer {
-  const ctx = toolContext(opts, extras.notSignedIn);
+export function createWritavoMcpServer(opts: CoreOptions): McpServer {
+  const ctx = toolContext(opts);
 
-  const server = new McpServer(
-    { name: "writavo", version: VERSION },
-    { instructions: extras.instructions ?? (opts.host === "remote" ? INSTRUCTIONS_REMOTE : INSTRUCTIONS_STDIO) },
-  );
+  const server = new McpServer({ name: "writavo", version: VERSION }, { instructions: INSTRUCTIONS });
 
   // --- Tools -------------------------------------------------------------
   // One registration per row of the generated table. There is no per tool file and no per tool
@@ -170,16 +150,15 @@ export function buildWritavoMcpServer(opts: CoreOptions, extras: HostExtras): Mc
     );
   }
 
-  const upload = uploadMediaTool(extras.mediaFiles ?? null);
   server.registerTool(
-    upload.name,
+    UPLOAD_MEDIA.name,
     {
       title: "Upload an image",
-      description: upload.description,
-      inputSchema: upload.inputSchema,
+      description: UPLOAD_MEDIA.description,
+      inputSchema: UPLOAD_MEDIA.inputSchema,
       annotations: { title: "Upload an image", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     },
-    async (args: unknown) => handleUploadMedia(ctx, (args ?? {}) as ToolArgs, extras.mediaFiles ?? null),
+    async (args: unknown) => handleUploadMedia(ctx, (args ?? {}) as ToolArgs),
   );
 
   server.registerTool(
@@ -207,7 +186,7 @@ export function buildWritavoMcpServer(opts: CoreOptions, extras: HostExtras): Mc
     async (args: unknown) => handleStartPlanPurchase(ctx, (args ?? {}) as ToolArgs),
   );
 
-  const importTool = importContentTool(extras.importFiles ?? null);
+  const importTool = importContentTool(opts.importJobs ?? null);
   server.registerTool(
     importTool.name,
     {
@@ -217,7 +196,7 @@ export function buildWritavoMcpServer(opts: CoreOptions, extras: HostExtras): Mc
       // Idempotent by external_id; it never deletes or unpublishes, so not destructive.
       annotations: { title: "Import a blog", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
-    async (args: unknown) => handleImportContent(ctx, (args ?? {}) as ToolArgs, extras.importFiles ?? null),
+    async (args: unknown) => handleImportContent(ctx, (args ?? {}) as ToolArgs, opts.importJobs ?? null, opts.importBudget),
   );
 
   // --- Actions (MCP-3 decision 5) -----------------------------------------
@@ -260,8 +239,6 @@ export function buildWritavoMcpServer(opts: CoreOptions, extras: HostExtras): Mc
     },
     async (args: unknown) => handleRunAction(ctx, (args ?? {}) as ToolArgs),
   );
-
-  extras.registerTools?.(server, ctx);
 
   // --- Resources ---------------------------------------------------------
   server.registerResource(
@@ -333,7 +310,7 @@ export function buildWritavoMcpServer(opts: CoreOptions, extras: HostExtras): Mc
           .describe("Where the blog's content lives now, for example a database, an export file or a folder in the workspace."),
       },
     },
-    async (args) => migrateContentPrompt(args as { source?: string }, opts.host),
+    async (args) => migrateContentPrompt(args as { source?: string }),
   );
 
   return server;

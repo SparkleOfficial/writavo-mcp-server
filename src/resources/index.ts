@@ -79,9 +79,7 @@ export async function readContentTypes(ctx: ToolContext): Promise<ResourceConten
         {
           available: false,
           reason:
-            ctx.host === "stdio"
-              ? "No API key is configured, and content types are per Site. Call the login tool, or configure WRITAVO_API_KEY, to read the real list."
-              : "This connection has no Writavo credentials, and content types are per Site. Reconnect Writavo in the assistant to read the real list.",
+            "This connection has no Writavo credentials, and content types are per Site. Reconnect Writavo in the assistant to read the real list.",
           reference: "writavo://api-reference",
         },
         null,

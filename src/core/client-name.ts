@@ -5,8 +5,7 @@
  * Settings > API keys and Settings > AI agents show the friendly form, so a person can tell that
  * Claude Code or Codex already holds a key.
  *
- * Pure and runtime-agnostic: the stdio login uses it for the device sign-in, the hosted Worker for
- * dynamically registered clients. The name is the client's own CLAIM, never proof of identity.
+ * Pure and runtime-agnostic: the hosted Worker uses it for dynamically registered clients. The name is the client's own CLAIM, never proof of identity.
  */
 
 const KNOWN: [RegExp, string][] = [

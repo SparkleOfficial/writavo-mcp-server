@@ -1,5 +1,5 @@
 import type { ToolContext } from "../core/context.js";
-import { apiRequest, putPresigned } from "./client.js";
+import { apiRequest, putPresigned, timeoutFor } from "./client.js";
 
 /**
  * The three step upload, shared by upload_media and the importer so there is one implementation
@@ -180,10 +180,12 @@ export async function uploadImage(ctx: ToolContext, input: UploadInput): Promise
   }
 
   // Step 2: transfer. No authorization header: the signature in the URL is the credential.
-  await putPresigned(reservation.data.upload_url, input.bytes, {
-    "Content-Type": input.contentType,
-    ...(reservation.data.headers ?? {}),
-  });
+  await putPresigned(
+    reservation.data.upload_url,
+    input.bytes,
+    { "Content-Type": input.contentType, ...(reservation.data.headers ?? {}) },
+    timeoutFor(ctx),
+  );
 
   // Step 3: register. Until this lands the object is swept and is not part of the library.
   const asset = await apiRequest<Record<string, unknown>>(ctx, {
