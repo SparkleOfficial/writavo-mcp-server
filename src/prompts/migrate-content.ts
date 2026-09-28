@@ -19,7 +19,7 @@ export function migrateContentPrompt(args: MigrateContentArgs) {
   const dryRun = `7. Dry run. Write the JSON document to the export folder and get it to the server, best first:
    if you can run shell commands, call import_content with upload: true and run the curl command
    it returns (up to 10 MB; the file never passes through our conversation); if it is at an https
-   URL, pass url; otherwise send it as data in parts of at most 50 articles and 2 MB, passing the
+   URL, pass url; otherwise send it as data in parts of at most 50 articles and 512 KB, passing the
    import_id the first part returned with every further part. Then call import_content with just
    that import_id. A dry run checks everything, reports every problem in one pass, and writes
    nothing. To fix entries, send them again as data with the import_id: same ref, slug or

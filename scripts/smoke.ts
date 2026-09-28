@@ -1138,6 +1138,25 @@ async function main(): Promise<void> {
     check("the dry run says when source dates are more precise than a millisecond", preciseDry.includes("more than millisecond precision") && preciseDry.includes("34.967476"), preciseDry.slice(0, 900));
   }
 
+  // -- 14e. The inline limit a free-plan Worker can parse ------------------------
+  console.log("\n[ 14e. Inline parts are small; bigger documents go by upload or url ]");
+  {
+    const big = {
+      format: "writavo-import",
+      version: 1,
+      articles: [{ external_id: "big:1", status: "draft", title: "Big", content: "x".repeat(600 * 1024) }],
+    };
+    stub.reset();
+    const refused = await handleImportContent(CTX, { data: big }, memStore("g:key-big"));
+    check(
+      "an inline part over 512 KB is refused before anything is stored, pointing to upload or url",
+      refused.isError === true && bodyOf(refused).includes("512 KB") && bodyOf(refused).includes("upload: true") && writes().length === 0,
+      bodyOf(refused).slice(0, 300),
+    );
+    const described = importContentTool(memStore("g:key-big")).description;
+    check("the tool description puts upload first and keeps inline data for small documents", described.indexOf("upload: true") < described.indexOf("Inline data") && described.includes("512 KB"), described.slice(0, 400));
+  }
+
   // -- 14c. The store does the document work (the hosted Durable Object) --------
   console.log("\n[ 14c. The store does the document work: the tool never reads a stored document ]");
   {

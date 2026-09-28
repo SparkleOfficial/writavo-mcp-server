@@ -33,7 +33,13 @@ import type { ToolArgs } from "./call.js";
 
 /** Per call, for an inline document or part. Past this the document belongs in several parts, a URL or an upload. */
 export const MAX_INLINE_ARTICLES = 50;
-export const MAX_INLINE_BYTES = 2 * 1024 * 1024;
+/**
+ * 512 KB, not more: an inline part arrives INSIDE the MCP request, which the hosted Worker must
+ * parse before it can hand anything to the import's Durable Object, and a free-plan Worker request
+ * gets 10 ms of CPU. A bigger document goes by upload link or url, which never pass through it.
+ */
+export const MAX_INLINE_BYTES = 512 * 1024;
+const INLINE_LIMIT = "512 KB";
 
 interface Capabilities {
   jobs: boolean;
@@ -47,12 +53,12 @@ const MB = (bytes: number) => `${bytes / 1024 / 1024} MB`;
 function description(can: Capabilities): string {
   const ways = can.jobs
     ? [
-        `Give the document one of three ways, and it is kept on the server as an import job with its own progress: inline as data (at most ${MAX_INLINE_ARTICLES} articles and 2 MB per call; send a bigger document in parts, each with the import_id the first call returned); as an https url the server fetches (a signed storage URL, for example; up to ${MB(MAX_JOB_BYTES)}); or, if you can run a shell command, call with upload: true for a one-time link and curl the file to it (up to ${MB(MAX_JOB_BYTES)}).`,
+        `Give the document one of three ways, and it is kept on the server as an import job with its own progress. Best: if you can run a shell command, call with upload: true for a one-time link and curl the file to it (up to ${MB(MAX_JOB_BYTES)}, never through this conversation). Or an https url the server fetches (a signed storage URL, for example; up to ${MB(MAX_JOB_BYTES)}). Inline data only for a small document: at most ${MAX_INLINE_ARTICLES} articles and ${INLINE_LIMIT} per call (parts after the first carry the import_id the first call returned); anything bigger by upload or url.`,
         can.background
           ? "Every call after that is just import_id. An apply (dry_run false) runs IN THE BACKGROUND on the server until it is done, with nobody connected: it returns at once, and import_id with status: true says how far it has got. Check every minute or two; do not call apply again while it runs."
           : "Every call after that is just import_id (plus dry_run, confirm): nothing is sent again.",
       ]
-    : [`Give the document inline as data, at most ${MAX_INLINE_ARTICLES} articles and 2 MB per call; split a bigger blog across several calls, each carrying the authors, categories and tags its articles use.`];
+    : [`Give the document inline as data, at most ${MAX_INLINE_ARTICLES} articles and ${INLINE_LIMIT} per call; split a bigger blog across several calls, each carrying the authors, categories and tags its articles use.`];
   return [
     "Import a blog into the Site from a document in the Writavo Import Format: articles with their original slugs and original publish dates, drafts kept as drafts, authors, categories and tags, and images copied into the media library.",
     ...ways,
@@ -71,7 +77,7 @@ function inputSchema(can: Capabilities): Record<string, z.ZodTypeAny> {
       .union([z.record(z.unknown()), z.string()])
       .optional()
       .describe(
-        `The import document itself, as a JSON object (or its JSON text): { "format": "writavo-import", "version": 1, "articles": [...] }. At most ${MAX_INLINE_ARTICLES} articles and 2 MB per call.${can.jobs ? " With import_id, it is added to that import: authors merge on ref, categories and tags on slug, articles on external_id, and an entry with the same key replaces the stored one." : ""} ${oneOf} Omit every document argument to get the format description, JSON Schema and a sample instead.`.trim(),
+        `The import document itself, as a JSON object (or its JSON text): { "format": "writavo-import", "version": 1, "articles": [...] }. At most ${MAX_INLINE_ARTICLES} articles and ${INLINE_LIMIT} per call; anything bigger goes by upload: true or url.${can.jobs ? " With import_id, it is added to that import: authors merge on ref, categories and tags on slug, articles on external_id, and an entry with the same key replaces the stored one." : ""} ${oneOf} Omit every document argument to get the format description, JSON Schema and a sample instead.`.trim(),
       ),
     ...(can.jobs
       ? {
@@ -171,7 +177,7 @@ export function readInlinePart(data: unknown): { document: unknown; serialised: 
   const size = byteLength(serialised);
   if (size > MAX_INLINE_BYTES) {
     return {
-      error: `The inline document is ${size} bytes, and one call takes at most ${MAX_INLINE_BYTES} (2 MB). Nothing was checked or written. Split it into several documents of at most ${MAX_INLINE_ARTICLES} articles, each carrying the authors, categories and tags its articles use, and send them one call at a time.`,
+      error: `The inline document is ${size} bytes, and one call takes at most ${MAX_INLINE_BYTES} (${INLINE_LIMIT}). Nothing was checked or written. Send it by upload: true (a one-time curl command, up to 10 MB) or as an https url instead; or, without either, split it into parts of at most ${MAX_INLINE_ARTICLES} articles and ${INLINE_LIMIT}, each with the import_id the first part returned.`,
     };
   }
   const articles = (document as { articles?: unknown } | null)?.articles;

@@ -131,7 +131,7 @@ Three ways in, up to 10 MB:
   the server. Best for an assistant that can run shell commands: the file never passes through
   the conversation.
 - **`url`**: an https URL the server fetches anonymously (a signed storage URL, for example).
-- **`data`**: the document inline, up to 50 articles and 2 MB per call. Send a bigger one in parts,
+- **`data`**: the document inline, up to 50 articles and 512 KB per call (small documents only). Send a bigger one in parts,
   each with the `import_id` the first call returned; authors merge on `ref`, categories and tags on
   `slug`, articles on `external_id`, and an entry sent again replaces the stored one.
 
