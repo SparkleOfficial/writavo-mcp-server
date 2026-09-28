@@ -10,9 +10,11 @@ import {
   IMPORT_FORMAT_VERSION,
   ImportArticleSchema,
   ImportEnvelopeSchema,
+  RedirectEntrySchema,
   TagSchema,
   type ImportArticle,
   type ImportEnvelope,
+  type RedirectEntry,
 } from "./format.js";
 
 /**
@@ -39,14 +41,37 @@ export interface EngagementCheck {
   problems: string[];
 }
 
+export interface RedirectsCheck {
+  rows: RedirectEntry[];
+  /** One line per skipped row, "redirects[3]: ...". Never blocks the articles. */
+  problems: string[];
+}
+
 export interface DocumentCheck {
   envelope: ImportEnvelope | null;
   envelopeErrors: string[];
   items: ItemCheck[];
   engagement: EngagementCheck;
+  redirects: RedirectsCheck;
 }
 
 const NO_ENGAGEMENT: EngagementCheck = { daily: [], reactions: [], problems: [] };
+const NO_REDIRECTS: RedirectsCheck = { rows: [], problems: [] };
+
+/** The optional redirects section, row by row: a bad row is reported and skipped. */
+export function checkRedirects(raw: unknown[] | undefined): RedirectsCheck {
+  if (!raw) return NO_REDIRECTS;
+  const out: RedirectsCheck = { rows: [], problems: [] };
+  raw.forEach((row, i) => {
+    const parsed = RedirectEntrySchema.safeParse(row);
+    if (!parsed.success) {
+      out.problems.push(`redirects[${i}]: ${parsed.error.issues.map((x) => describeIssue(x)).join("; ")}`);
+      return;
+    }
+    out.rows.push(parsed.data);
+  });
+  return out;
+}
 
 /**
  * The optional engagement section, row by row: a bad row is reported and skipped, never a reason
@@ -137,6 +162,7 @@ function salvageEnvelope(value: unknown): ImportEnvelope | null {
     ...(raw.engagement && typeof raw.engagement === "object" && !Array.isArray(raw.engagement)
       ? { engagement: raw.engagement as { daily?: unknown[]; reactions?: unknown[] } }
       : {}),
+    ...(Array.isArray(raw.redirects) ? { redirects: raw.redirects as unknown[] } : {}),
     articles: raw.articles,
   };
 }
@@ -156,6 +182,7 @@ export function checkDocument(value: unknown, now = Date.now()): DocumentCheck {
       envelopeErrors: envelopeErrors.length > 0 ? envelopeErrors : ["The file is not a Writavo import document."],
       items: [],
       engagement: NO_ENGAGEMENT,
+      redirects: NO_REDIRECTS,
     };
   }
 
@@ -245,5 +272,11 @@ export function checkDocument(value: unknown, now = Date.now()): DocumentCheck {
     return check;
   });
 
-  return { envelope, envelopeErrors, items, engagement: checkEngagement(envelope.engagement, now) };
+  return {
+    envelope,
+    envelopeErrors,
+    items,
+    engagement: checkEngagement(envelope.engagement, now),
+    redirects: checkRedirects(envelope.redirects),
+  };
 }

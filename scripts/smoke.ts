@@ -501,6 +501,9 @@ async function main(): Promise<void> {
     engagementPicks: new Map<string, Row>(),
     engagementCalls: 0,
     engagementOff: false,
+    // POST /redirects/bulk (0127), SET on the old URL; to_external_id must name a Site article.
+    redirects: new Map<string, Row>(),
+    redirectCalls: 0,
   };
   const ok = (data: unknown, status = 200) => ({ status, body: { ok: true, data } });
   const fail = (status: number, code: string, message: string) => ({ status, body: { ok: false, error: { code, message } } });
@@ -597,6 +600,22 @@ async function main(): Promise<void> {
         picks += 1;
       });
       return ok({ dry_run: body.dry_run !== false, written: { daily, share_rows: daily, picks }, posts: [], problems });
+    }
+    if (path === "/redirects/bulk" && req.method === "POST") {
+      site.redirectCalls += 1;
+      const problems: Row[] = [];
+      let created = 0;
+      let unchanged = 0;
+      ((body.redirects ?? []) as Row[]).forEach((r, index) => {
+        if (r.to_external_id !== undefined && !site.articles.some((a) => a.external_id === r.to_external_id)) {
+          return void problems.push({ index, error: "no article with this external_id on this Site" });
+        }
+        const k = String(r.from);
+        if (site.redirects.has(k) && JSON.stringify(site.redirects.get(k)) === JSON.stringify(r)) unchanged += 1;
+        else created += 1;
+        if (body.dry_run === false) site.redirects.set(k, r);
+      });
+      return ok({ dry_run: body.dry_run !== false, written: { created, updated: 0, unchanged }, items: [], problems });
     }
     const costs = /^\/articles\/([^/]+)\/cost-history$/.exec(path);
     if (costs && req.method === "POST") {
@@ -1251,6 +1270,51 @@ async function main(): Promise<void> {
       off.slice(0, 800),
     );
     site.engagementOff = false;
+  }
+
+  // -- 14g. Redirects: articles' old_urls and the redirects section (0127) --------
+  console.log("\n[ 14g. Old URLs travel with the import as redirects ]");
+  {
+    currentKey = SECRET_KEY;
+    const doc = {
+      format: "writavo-import",
+      version: 1,
+      articles: [
+        {
+          external_id: "wp:1", status: "draft", title: "Moved one", slug: "moved-one", content: "x",
+          old_urls: ["https://example.com/2021/03/moved-one/", "https://example.com/?p=1"],
+        },
+      ],
+      redirects: [
+        { from: "https://example.com/category/news/", to: "/category/news" },
+        { from: "https://EXAMPLE.com/2021/03/moved-one", to: "/elsewhere" },
+        { from: "https://example.com/about/", to: "/about", to_external_id: "wp:1" },
+        { from: "https://example.com/gone/", to_external_id: "wp:missing" },
+      ],
+    };
+    const store = memStore("g:key-redirects");
+    stub.reset();
+    const dry = bodyOf(await handleImportContent(CTX, { data: doc }, store));
+    const redId = /imp_[A-Za-z0-9_-]{22}/.exec(dry)?.[0] ?? "";
+    check(
+      "the dry run counts the old URLs, flags a duplicate and a row with two targets, and sends nothing",
+      dry.includes("Redirects: 4 old URLs (3 from articles' old_urls, 1 from the redirects section)") &&
+        dry.includes("is already redirected earlier in the document") && dry.includes("give exactly one of to or to_external_id") &&
+        site.redirectCalls === 0,
+      dry.slice(dry.indexOf("Redirects"), dry.indexOf("Redirects") + 700),
+    );
+    stub.reset();
+    const applied = bodyOf(await handleImportContent(CTX, { import_id: redId, dry_run: false, background: false }, store));
+    check(
+      "an apply writes the article, then sends the redirects once; a target that is not on the Site is reported",
+      applied.includes("Import complete") && applied.includes("Redirects: delivered. Created 3") && site.redirectCalls === 1 &&
+        (site.redirects.get("https://example.com/?p=1") as Row | undefined)?.to_external_id === "wp:1" &&
+        applied.includes("https://example.com/gone/: no article with this external_id on this Site"),
+      applied.slice(0, 1400),
+    );
+    const callsBefore = site.redirectCalls;
+    const again = bodyOf(await handleImportContent(CTX, { import_id: redId, dry_run: false, background: false }, store));
+    check("running it again sends nothing new (the redirects are already delivered)", again.includes("Import complete") && site.redirectCalls === callsBefore, again.slice(0, 300));
   }
 
   // -- 14c. The store does the document work (the hosted Durable Object) --------

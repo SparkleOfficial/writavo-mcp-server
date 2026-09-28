@@ -21,7 +21,7 @@ import {
   type SiteInfo,
   type SiteTerm,
 } from "./site.js";
-import { checkDocument, itemLabel, type EngagementCheck, type ItemCheck } from "./validate.js";
+import { checkDocument, itemLabel, type EngagementCheck, type ItemCheck, type RedirectsCheck } from "./validate.js";
 
 /**
  * The importer. One tool call is either a dry run (reads only, writes nothing, not even the
@@ -180,6 +180,8 @@ interface Loaded {
   envelopeErrors: string[];
   /** The engagement section's valid rows and skipped-row problems (validate.ts). */
   engagement: EngagementCheck;
+  /** The redirects section's valid rows and skipped-row problems (validate.ts). */
+  redirects: RedirectsCheck;
   /** Where this call's time went, for the reply (timingLine). */
   timing: CallTiming;
   items: ItemCheck[];
@@ -399,6 +401,7 @@ async function load(api: ToolContext, source: ImportSource): Promise<Loaded | To
     envelope,
     envelopeErrors: checked.envelopeErrors,
     engagement: checked.engagement,
+    redirects: checked.redirects,
     timing,
     items: checked.items,
     valid,
@@ -580,6 +583,7 @@ async function dryRun(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
   if (ctx.progressExisted && ctx.source.store) lines.push(`Progress from an earlier run is in ${ctx.source.store.location}.`);
   const precision = subMillisecondNote(valid);
   if (precision) lines.push(precision);
+  lines.push(...redirectsDryRun(ctx));
   lines.push(...engagementDryRun(ctx, byExternalId, bySlug));
 
   const topLevel = ctx.envelopeErrors;
@@ -1220,6 +1224,148 @@ function engagementReport(ctx: Loaded): string[] {
   return lines;
 }
 
+// ---------------------------------------------------------------------------
+// Redirects: every article's old_urls plus the document's redirects section (0127)
+// ---------------------------------------------------------------------------
+/** Rows per call to POST /redirects/bulk (the API takes 5,000; 500 keeps a body well under 4 MB). */
+const REDIRECTS_CHUNK = 500;
+
+interface RedirectRow {
+  from: string;
+  to?: string;
+  to_external_id?: string;
+  status?: 301 | 302;
+  note?: string;
+}
+
+/**
+ * The list to send, in document order: each valid article's old_urls (to that article, by
+ * external_id), then the redirects section. An old URL named twice keeps its first target; the
+ * later ones are listed as problems (the API would refuse the pair in one call, and across calls
+ * the second would silently win).
+ */
+function redirectList(ctx: Loaded): { rows: RedirectRow[]; duplicates: string[] } {
+  const rows: RedirectRow[] = [];
+  const duplicates: string[] = [];
+  const seen = new Set<string>();
+  // Case, a trailing slash and "www." do not make a different old URL (the API's normalisation).
+  const key = (from: string) =>
+    from.trim().toLowerCase().replace(/^(https?:\/\/)www\./, "$1").replace(/^https?:\/\//, "").replace(/\/+(\?|#|$)/, "$1");
+  const add = (row: RedirectRow, label: string) => {
+    const k = key(row.from);
+    if (seen.has(k)) return void duplicates.push(`${label}: ${row.from} is already redirected earlier in the document; this one is skipped`);
+    seen.add(k);
+    rows.push(row);
+  };
+  for (const v of ctx.valid) {
+    (v.article.old_urls ?? []).forEach((from, i) =>
+      add({ from, to_external_id: v.article.external_id }, `${v.article.external_id} old_urls[${i}]`),
+    );
+  }
+  ctx.redirects.rows.forEach((r, i) => add(r, `redirects[${i}]`));
+  return { rows, duplicates };
+}
+
+function redirectsHash(rows: RedirectRow[]): string {
+  return sha256(JSON.stringify(rows));
+}
+
+/** There are redirects that have not all been delivered, as the document now has them. */
+function redirectsPending(ctx: Loaded): boolean {
+  const { rows } = redirectList(ctx);
+  if (rows.length === 0) return false;
+  const p = ctx.progress.redirects;
+  return !(p && p.hash === redirectsHash(rows) && p.done);
+}
+
+/**
+ * Send what is left, a chunk per request. SET semantics on the old URL, so a chunk sent twice
+ * changes nothing. A redirect to an article that failed to import comes back as a problem. A
+ * reason to stop, or null when this call finished (delivered, or refused for a reason recorded in
+ * progress.redirects.error, which the next apply retries).
+ */
+async function sendRedirects(state: ApplyState): Promise<string | null> {
+  const { ctx } = state;
+  const { rows } = redirectList(ctx);
+  const hash = redirectsHash(rows);
+  if (!ctx.progress.redirects || ctx.progress.redirects.hash !== hash) {
+    ctx.progress.redirects = { hash, sent: 0, done: false, written: { created: 0, updated: 0, unchanged: 0 }, problems: [] };
+  }
+  const p = ctx.progress.redirects;
+  delete p.error;
+  while (p.sent < rows.length) {
+    if (Date.now() > state.deadline) return "the time for this call ran out while sending the redirects";
+    const max = state.opts.budget?.maxRequests;
+    if (max !== undefined && requestsUsed(state) + 1 > max) return REQUEST_BUDGET_SPENT;
+    const chunk = rows.slice(p.sent, p.sent + REDIRECTS_CHUNK);
+    try {
+      const res = await call<{ written?: { created?: number; updated?: number; unchanged?: number }; problems?: { index: number; error: string }[] }>(
+        ctx.api,
+        {
+          method: "POST",
+          path: "/redirects/bulk",
+          body: { dry_run: false, redirects: chunk },
+          headers: { "Idempotency-Key": `import-redirects-${sha256(JSON.stringify(chunk))}` },
+        },
+        state.hardDeadline,
+      );
+      const w = res.data?.written ?? {};
+      p.written.created += w.created ?? 0;
+      p.written.updated += w.updated ?? 0;
+      p.written.unchanged += w.unchanged ?? 0;
+      for (const prob of res.data?.problems ?? []) {
+        if (p.problems.length < 40) p.problems.push(`${chunk[prob.index]?.from ?? `row ${p.sent + prob.index}`}: ${prob.error}`);
+      }
+      p.sent += chunk.length;
+      await save(state, true);
+    } catch (err) {
+      if (isFatal(err)) throw err;
+      if (isTransient(err)) return `the API was busy (${apiProblem(err)}) while sending the redirects`;
+      p.error =
+        err instanceof WritavoApiError && err.status === 404
+          ? "this Site's API does not accept redirects yet"
+          : apiProblem(err);
+      await save(state, true);
+      return null;
+    }
+  }
+  p.done = true;
+  await save(state, true);
+  return null;
+}
+
+/** The dry run's view of the redirects. Nothing is sent: the articles may not exist yet. */
+function redirectsDryRun(ctx: Loaded): string[] {
+  const { rows, duplicates } = redirectList(ctx);
+  const problems = [...ctx.redirects.problems, ...duplicates];
+  if (rows.length === 0 && problems.length === 0) return [];
+  const fromArticles = rows.filter((r) => r.to_external_id !== undefined && !r.to).length;
+  const lines = [
+    "",
+    `Redirects: ${rows.length} old URLs (${fromArticles} from articles' old_urls, ${rows.length - fromArticles} from the redirects section). Sent after every article is imported. Each answers with a 301 on the blog once its target is published; an old URL on a domain the blog is not served on is kept for the customer's own server (GET /redirects/export).`,
+  ];
+  if (problems.length) lines.push(`Redirects with problems, skipped (${problems.length}):`, ...listed(problems.map((x) => `- ${x}`), 20));
+  return lines;
+}
+
+/** The redirects' lines for an apply reply. */
+function redirectsReport(ctx: Loaded): string[] {
+  const { rows, duplicates } = redirectList(ctx);
+  const p = ctx.progress.redirects;
+  if (rows.length === 0 && ctx.redirects.problems.length === 0 && duplicates.length === 0) return [];
+  const lines = [""];
+  if (p?.done && p.hash === redirectsHash(rows)) {
+    lines.push(`Redirects: delivered. Created ${p.written.created}, updated ${p.written.updated}, unchanged ${p.written.unchanged}.`);
+  } else if (p?.error) {
+    lines.push(`Redirects: NOT imported, because ${p.error}. The articles are not affected; run the import again later to send them.`);
+  } else {
+    lines.push(`Redirects: ${p?.sent ?? 0} of ${rows.length} sent so far.`);
+  }
+  const skipped = [...ctx.redirects.problems, ...duplicates, ...(p?.problems ?? [])];
+  if (skipped.length) lines.push(`Redirects skipped (${skipped.length}):`, ...listed(skipped.map((x) => `- ${x}`), 20));
+  return lines;
+}
+
 /**
  * The article's production cost in the old system, SET (replacing what an earlier import sent).
  * Kept apart from Writavo's own cost ledger by the API: never billed, never against a spend cap.
@@ -1379,13 +1525,19 @@ async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
   // Counted as the NEXT call will see it, which does not pass retry_failed again.
   const nextOpts = { ...opts, retryFailed: false };
   const remaining = ctx.valid.filter((v) => !isSettled(ctx.progress.items[v.article.external_id], v, nextOpts, mayTouchLive)).length;
-  // Engagement history goes after every article (it is keyed by the posts), in chunks, SET not add.
+  // Redirects go after every article (they point at the articles by external_id), then the
+  // engagement history (keyed by the posts), both in chunks and both SET, never add.
+  if (remaining === 0 && !stopped && redirectsPending(ctx)) {
+    const why = await sendRedirects(state);
+    if (why) stopped = why;
+  }
   if (remaining === 0 && !stopped && engagementPending(ctx)) {
     const why = await sendEngagement(state);
     if (why) stopped = why;
   }
+  const redirectsUnfinished = redirectsPending(ctx) && !ctx.progress.redirects?.error;
   const engagementUnfinished = engagementPending(ctx) && !ctx.progress.engagement?.error;
-  const allDone = remaining === 0 && !engagementUnfinished;
+  const allDone = remaining === 0 && !engagementUnfinished && !redirectsUnfinished;
   const c = state.counts;
   const lines: string[] = [];
   const thisCall = `This call: created ${c.created}, updated ${c.updated}, published ${c.published}, left unchanged ${c.deferred}, skipped ${c.skipped}, failed ${c.failed}. Images copied ${c.imagesCopied}${c.imagesFailed ? `, not copied ${c.imagesFailed}` : ""}.`;
@@ -1408,6 +1560,7 @@ async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
       lines.push("", "Not imported because of problems in the document:", ...listed(invalid.map((i) => `- ${itemLabel(i)}: ${i.errors.join("; ")}`)));
     }
     if (state.warnings.length > 0) lines.push("", "Warnings from this call:", ...listed(state.warnings));
+    lines.push(...redirectsReport(ctx));
     lines.push(...engagementReport(ctx));
     lines.push(
       "",
@@ -1420,7 +1573,7 @@ async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
   } else {
     lines.push(
       remaining === 0
-        ? `Every article is imported into the Site "${ctx.site.name}"; the engagement history is still being sent.`
+        ? `Every article is imported into the Site "${ctx.site.name}"; the ${redirectsUnfinished ? "redirects" : "engagement history"} ${redirectsUnfinished && engagementUnfinished ? "and the engagement history are" : "is"} still being sent.`
         : `Imported a batch into the Site "${ctx.site.name}". ${ctx.valid.length - remaining} of ${ctx.valid.length} articles are done and ${remaining} remain.`,
       "",
       thisCall,
@@ -1429,6 +1582,7 @@ async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
     if (stopped) lines.push(`Stopped early: ${stopped}.`);
     if (state.problems.length > 0) lines.push("", "Problems this call:", ...listed(state.problems));
     if (state.warnings.length > 0) lines.push("", "Warnings this call:", ...listed(state.warnings));
+    lines.push(...redirectsReport(ctx));
     lines.push(...engagementReport(ctx));
     if (ctx.source.store) {
       lines.push(

@@ -95,7 +95,10 @@ info:
 
     Content you bring from another system keeps its identity. Send your old system's id for each
     article as `external_id` and look it up with `GET /articles?external_id=` before writing, so
-    a second run updates instead of duplicating. Keep the old `slug` so the URL does not change.
+    a second run updates instead of duplicating. Keep the old `slug` so the URL does not change,
+    and send the article's old URLs to `POST /redirects/bulk` (or as `old_urls` in the Writavo
+    Import Format): WordPress's `/2021/03/my-post/` and `/?p=123` then answer with a 301 to the
+    article instead of a 404.
     Record each article's original dates when you create or update it, as
     `original_published_at` (and optionally `original_content_updated_at`): whenever the article
     is first published, from the dashboard, the API, an MCP client, a schedule or the pipeline, it
@@ -265,6 +268,13 @@ tags:
       Bringing a migrated blog's engagement history with it: per post per day views, reactions and
       share clicks, and each reader's current reaction. Recording live engagement and reading an
       article's counters are under SEO.
+  - name: Redirects
+    x-mcp-surface: action
+    description: |
+      Old URLs and where they send readers now. Your blog answers each with a 301 wherever the
+      URL would otherwise be a 404, on the hosted site, a custom domain and the reverse proxy.
+      Changing a published article's slug, or a category's or tag's, adds one automatically.
+      Import a migrated blog's old URLs here, and export the ones your own server has to answer.
   - name: Outreach
     x-mcp-surface: action
     description: |
@@ -831,8 +841,9 @@ paths:
       tags: [Articles]
       summary: Delete an article
       description: |
-        Permanent. The row and its tag assignments are removed, and if the article was published
-        its URL starts returning 404 on your blog once the cache is purged.
+        Permanent. The row, its tag assignments and the redirects that point at it are removed,
+        and if the article was published its URL starts returning 404 on your blog once the cache
+        is purged.
 
         There is no trash and no undo in v1. If you only want to take a post off the web, use
         `POST /articles/{id}/unpublish`, which keeps everything and is reversible.
@@ -1339,8 +1350,9 @@ paths:
       tags: [Categories]
       summary: Update a category
       description: |
-        Renaming is safe. Changing `slug` changes the category archive URL on your blog, and
-        nothing is redirected for you, so change it only if you accept the broken link.
+        Renaming is safe. Changing `slug` changes the category archive URL on your blog, and the
+        old URL keeps working: a redirect to the category is added automatically (see
+        `GET /redirects`).
       x-scope: taxonomy:write
       x-permission: taxonomy.manage
       x-entitlement: none
@@ -6118,6 +6130,339 @@ paths:
         "503": { $ref: "#/components/responses/Maintenance" }
         "500": { $ref: "#/components/responses/InternalError" }
 
+  # ==========================================================================
+  # REDIRECTS (0127)
+  # ==========================================================================
+  /redirects:
+    get:
+      operationId: listRedirects
+      tags: [Redirects]
+      summary: List redirects
+      description: |
+        The Site's redirects, newest first. Each one says where it points now (`target_path`,
+        `null` while its target is not published) and whether Writavo answers its old URL itself
+        (`served_by_writavo`); the rest are in `GET /redirects/export`.
+
+        **Headless sites.** If you render the blog yourself, apply these in your own front end:
+        read them with your publishable key (`wv_pub_`), which sees only redirects whose target is
+        live and never the notes, cache the list, and answer a request that would 404 with a 301
+        (or 302) to `target_path` under your blog's base URL.
+      x-scope: articles:read
+      x-permission: articles.read
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: true
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - name: limit
+          in: query
+          required: false
+          description: Page size, 1 to 200. Default 50.
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - name: q
+          in: query
+          required: false
+          description: Search the old URL and a literal target (`to`). Up to 200 characters.
+          schema: { type: string, maxLength: 200 }
+        - name: origin
+          in: query
+          required: false
+          description: Only redirects made this way.
+          schema: { type: string, enum: [manual, import, slug_change] }
+        - name: article_id
+          in: query
+          required: false
+          description: Only the redirects that point at this article (its old URLs).
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: A page of redirects.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        allOf:
+                          - $ref: "#/components/schemas/Page"
+                          - type: object
+                            properties:
+                              items:
+                                type: array
+                                items: { $ref: "#/components/schemas/Redirect" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    post:
+      operationId: createRedirect
+      tags: [Redirects]
+      summary: Create a redirect
+      description: |
+        Send an old URL (`from`) and where it should go now. The old URL is a path under your
+        blog (`/2021/03/my-post/`) or a full URL (`https://example.com/?p=123`); a full URL is kept
+        with its host, so a redirect for a URL your blog is not served on yet starts working the
+        moment it is. It is normalised: case, a trailing slash and repeated slashes do not
+        matter, and a query string matches a request that carries at least those parameters.
+
+        Point it at an article, a category or a tag by id (`to_article_id`, `to_external_id`,
+        `to_category_id`, `to_tag_id`) whenever you can: the redirect then follows the content
+        through later slug changes and never becomes a chain. `to` takes a path under the blog
+        root or any `https://` URL.
+
+        If the old URL already has a redirect, it is replaced and the answer is `200` instead of
+        `201`. Your blog answers a redirect only where the URL would otherwise be a 404, so a
+        live page always wins.
+      x-scope: articles:write
+      x-permission: articles.write
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-agent-consequence: Makes the old URL redirect readers and search engines to the target on the live blog.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyRequired"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RedirectWrite" }
+            examples:
+              wordpress_permalink:
+                summary: A WordPress date permalink to the imported article
+                value: { from: "https://example.com/2021/03/how-to-test-soil/", to_external_id: "wp:1001" }
+              old_query_url:
+                summary: WordPress's ?p= link
+                value: { from: "https://example.com/?p=1001", to_external_id: "wp:1001" }
+      responses:
+        "201":
+          description: The redirect was created.
+          headers:
+            Location: { schema: { type: string }, description: The URL of the new redirect. }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Redirect" }
+        "200":
+          description: The old URL already had a redirect; it now points here.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Redirect" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /redirects/bulk:
+    post:
+      operationId: bulkRedirects
+      tags: [Redirects]
+      summary: Create or replace many redirects
+      description: |
+        Up to 5,000 redirects in one call, the same fields as `POST /redirects`: the door for a
+        migration's whole URL map. **Dry run by default**: every row is checked and nothing is
+        written until you send `dry_run: false`. A row with a problem is skipped and listed in
+        `problems`; the valid rows are written. SET semantics on the old URL, so sending the same
+        list twice changes nothing. A Site holds up to 50,000 redirects.
+      x-scope: articles:write
+      x-permission: articles.write
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-agent-consequence: Makes every old URL in the list redirect to its target on the live blog.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyRequired"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RedirectBulkInput" }
+            examples:
+              dry_run:
+                summary: Check a WordPress URL map, write nothing
+                value:
+                  redirects:
+                    - { from: "https://example.com/2021/03/how-to-test-soil/", to_external_id: "wp:1001" }
+                    - { from: "https://example.com/?p=1001", to_external_id: "wp:1001" }
+                    - { from: "https://example.com/category/guides/", to: "/category/guides" }
+      responses:
+        "200":
+          description: The report. With `dry_run` it describes what would be written.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/RedirectBulkResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /redirects/export:
+    get:
+      operationId: exportRedirects
+      tags: [Redirects]
+      summary: Export redirects for your own server
+      description: |
+        Some old URLs never reach Writavo: your blog moved from `example.com/` to
+        `example.com/blog/`, or from another host. Your own server has to redirect those. This
+        returns them as a file to install: `csv`, `nginx`, `apache` (.htaccess), `cloudflare`
+        (a Bulk Redirects list) or `vercel` (vercel.json, also valid in next.config.js). Use
+        `only=unserved` for just the ones Writavo cannot answer. Targets are full URLs on your
+        blog. A redirect a format cannot express, or whose target is not published, is listed in
+        `skipped` with the reason rather than dropped.
+      x-scope: articles:read
+      x-permission: articles.read
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: false
+      parameters:
+        - name: format
+          in: query
+          required: false
+          schema: { type: string, enum: [csv, nginx, apache, cloudflare, vercel], default: csv }
+        - name: only
+          in: query
+          required: false
+          description: "`unserved`: only the redirects Writavo does not answer itself."
+          schema: { type: string, enum: [all, unserved], default: all }
+      responses:
+        "200":
+          description: The file, in `content`.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/RedirectExport" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /redirects/{id}:
+    parameters:
+      - $ref: "#/components/parameters/RedirectId"
+    get:
+      operationId: getRedirect
+      tags: [Redirects]
+      summary: Read one redirect
+      x-scope: articles:read
+      x-permission: articles.read
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: false
+      x-cross-tenant: 404
+      responses:
+        "200":
+          description: The redirect.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Redirect" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    patch:
+      operationId: updateRedirect
+      tags: [Redirects]
+      summary: Update a redirect
+      description: |
+        Change where it points, its status or its note. The old URL cannot change: delete the
+        redirect and create a new one.
+      x-scope: articles:write
+      x-permission: articles.write
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-cross-tenant: 404
+      x-agent-consequence: Changes where the old URL sends readers and search engines on the live blog.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RedirectUpdate" }
+      responses:
+        "200":
+          description: The updated redirect.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Redirect" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    delete:
+      operationId: deleteRedirect
+      tags: [Redirects]
+      summary: Delete a redirect
+      description: The old URL answers 404 again (unless a page now lives there).
+      x-scope: articles:write
+      x-permission: articles.write
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-cross-tenant: 404
+      x-agent-consequence: Permanently deletes the redirect; its old URL returns 404 on the live blog.
+      responses:
+        "204":
+          description: Deleted. No body.
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
   /engagement/events:
     post:
       operationId: recordEngagement
@@ -9847,6 +10192,11 @@ components:
       in: path
       required: true
       schema: { type: string, format: uuid }
+    RedirectId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
     TagId:
       name: id
       in: path
@@ -10402,6 +10752,145 @@ components:
               index: {type: integer, description: The row's position in its array, from 0.}
               error: {type: string}
 
+    Redirect:
+      type: object
+      description: An old URL and where it sends readers now (0127).
+      required: [id, from, from_host, from_path, from_query, to, to_article_id, to_category_id, to_tag_id,
+                 target_path, status, origin, note, served_by_writavo, last_hit_at, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        from:
+          type: string
+          description: The old URL as stored (normalised), a path under the blog or a full URL.
+        from_host:
+          type: [string, "null"]
+          description: The old URL's host, without `www.`. `null` means a path under the blog root, on every host the blog is served on.
+        from_path: { type: string, description: The old path, lower case, no trailing slash. }
+        from_query:
+          type: [string, "null"]
+          description: The query parameters the old URL must carry (`p=123`), or `null`.
+        to: { type: [string, "null"], description: A literal target (path under the blog root or full URL). }
+        to_article_id: { type: [string, "null"], format: uuid }
+        to_category_id: { type: [string, "null"], format: uuid }
+        to_tag_id: { type: [string, "null"], format: uuid }
+        target_path:
+          type: [string, "null"]
+          description: |
+            Where it points now: a path under the blog root (`/my-post`) or a full URL. `null`
+            while the target is not published (or the term is archived): the old URL then gets
+            the ordinary 404 rather than a redirect to one.
+        status: { type: integer, enum: [301, 302], description: 301 permanent, 302 temporary. }
+        origin:
+          type: string
+          enum: [manual, import, slug_change]
+          description: "`slug_change`: made automatically when a published article, a category or a tag changed its slug."
+        note: { type: [string, "null"], maxLength: 500 }
+        served_by_writavo:
+          type: boolean
+          description: |
+            True when Writavo's blog answers this old URL itself. False: install it on your own
+            server (`GET /redirects/export`), or apply it in your own front end if you render the
+            blog yourself.
+        last_hit_at: { type: [string, "null"], format: date-time, description: Last used, to the hour. }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    RedirectWrite:
+      type: object
+      additionalProperties: false
+      required: [from]
+      description: The old URL and exactly one target.
+      properties:
+        from:
+          type: string
+          maxLength: 2048
+          description: A path starting with `/`, or an `http(s)://` URL. Not the blog's home page.
+        to:
+          type: string
+          maxLength: 2048
+          description: A path under the blog root (`/my-post`) or an `http(s)://` URL.
+        to_article_id: { type: string, format: uuid }
+        to_external_id: { type: string, maxLength: 255, description: The article's `external_id` on this Site. }
+        to_category_id: { type: string, format: uuid }
+        to_tag_id: { type: string, format: uuid }
+        status: { type: integer, enum: [301, 302], default: 301 }
+        note: { type: [string, "null"], maxLength: 500 }
+
+    RedirectUpdate:
+      type: object
+      additionalProperties: false
+      description: At most one target field; fields left out keep their value.
+      properties:
+        to: { type: string, maxLength: 2048 }
+        to_article_id: { type: string, format: uuid }
+        to_external_id: { type: string, maxLength: 255 }
+        to_category_id: { type: string, format: uuid }
+        to_tag_id: { type: string, format: uuid }
+        status: { type: integer, enum: [301, 302] }
+        note: { type: [string, "null"], maxLength: 500 }
+
+    RedirectBulkInput:
+      type: object
+      additionalProperties: false
+      required: [redirects]
+      properties:
+        dry_run: { type: boolean, default: true, description: Check and report, write nothing. }
+        redirects:
+          type: array
+          maxItems: 5000
+          items: { $ref: "#/components/schemas/RedirectWrite" }
+
+    RedirectBulkResult:
+      type: object
+      required: [dry_run, written, items, problems]
+      properties:
+        dry_run: { type: boolean }
+        written:
+          type: object
+          required: [created, updated, unchanged]
+          description: What this call wrote (or would write, on a dry run).
+          properties:
+            created: { type: integer }
+            updated: { type: integer }
+            unchanged: { type: integer }
+        items:
+          type: array
+          description: One per valid row. `id` is null for a redirect a dry run would create.
+          items:
+            type: object
+            required: [index, id, action]
+            properties:
+              index: { type: integer }
+              id: { type: [string, "null"], format: uuid }
+              action: { type: string, enum: [created, updated, unchanged] }
+        problems:
+          type: array
+          description: The rows that were skipped, and why.
+          items:
+            type: object
+            required: [index, error]
+            properties:
+              index: { type: integer, description: The row's position in `redirects`, from 0. }
+              error: { type: string }
+
+    RedirectExport:
+      type: object
+      required: [format, filename, count, skipped, content]
+      properties:
+        format: { type: string, enum: [csv, nginx, apache, cloudflare, vercel] }
+        filename: { type: string, description: A suggested file name. }
+        count: { type: integer, description: Redirects in the file. }
+        skipped:
+          type: array
+          items:
+            type: object
+            required: [id, from, reason]
+            properties:
+              id: { type: string, format: uuid }
+              from: { type: string }
+              reason: { type: string }
+        content: { type: string, description: The file's text. }
+
     PipelineStage:
       type: string
       description: The engine stage a run belongs to.
@@ -10895,8 +11384,9 @@ components:
           maxLength: 200
           pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$"
           description: |
-            Changing the slug of a published article changes its live URL and nothing is
-            redirected for you. The old URL starts returning 404.
+            Changing the slug of a published article changes its live URL. The old URL keeps
+            working: a 301 redirect to the article is added automatically (`origin:
+            slug_change` in `GET /redirects`), and it follows any later slug change too.
         external_id:
           type: [string, "null"]
           minLength: 1

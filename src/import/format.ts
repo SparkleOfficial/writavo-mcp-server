@@ -203,7 +203,34 @@ const articleFields = {
     .describe("What producing it cost in the old system, for the record: shown beside Writavo's own costs, never billed or counted against a spend cap. Replaces any cost history imported for it before."),
   published_at: dateTime.optional().describe("When the article was FIRST published at the source."),
   content_updated_at: dateTime.optional().describe("When its content last changed at the source. Not before published_at."),
+  old_urls: z
+    .array(z.string().min(1).max(LIMITS.url))
+    .max(20)
+    .optional()
+    .describe("Every URL the article was reachable at in the old system: its permalink (https://example.com/2021/03/my-post/), its ?p=123 link, older permalinks. Each answers with a 301 to the article on the Writavo blog once it is published."),
 };
+
+// ---------------------------------------------------------------------------
+// Redirects (optional): old URLs that are not an article's (archives, pages, feeds)
+// ---------------------------------------------------------------------------
+
+export const RedirectEntrySchema = z
+  .strictObject({
+    from: z.string().min(1).max(LIMITS.url).describe("The old URL: a full URL (https://example.com/category/guides/) or a path under the blog."),
+    to: z.string().min(1).max(LIMITS.url).optional().describe("Where it goes now: a path under the blog (/category/guides) or a full https URL."),
+    to_external_id: z
+      .string()
+      .regex(EXTERNAL_ID_PATTERN, "must be 1 to 255 printable ASCII characters with no spaces")
+      .optional()
+      .describe("Or the article it goes to, by external_id (in this document or already on the Site)."),
+    status: z.union([z.literal(301), z.literal(302)]).optional().describe("301 permanent (default) or 302 temporary."),
+    note: text(500).optional(),
+  })
+  .refine((r) => (r.to === undefined) !== (r.to_external_id === undefined), {
+    message: "give exactly one of to or to_external_id",
+    path: ["to"],
+  });
+export type RedirectEntry = z.infer<typeof RedirectEntrySchema>;
 
 // ---------------------------------------------------------------------------
 // Engagement history (optional): the old blog's per-post views, reactions and shares
@@ -293,6 +320,11 @@ const documentFields = {
   categories: z.array(CategorySchema).optional(),
   tags: z.array(TagSchema).optional(),
   engagement: EngagementSchema.optional(),
+  redirects: z
+    .array(RedirectEntrySchema)
+    .max(50_000)
+    .optional()
+    .describe("Old URLs that are not an article's own (category archives, pages, feeds) and where each goes now. An article's own old URLs go in its old_urls."),
 };
 
 export const ImportDocumentSchema = z
@@ -311,6 +343,7 @@ export const ImportEnvelopeSchema = z.strictObject({
   // Rows are checked one by one (validate.ts), so one bad row is reported and skipped rather than
   // failing the document or the articles.
   engagement: EngagementEnvelopeSchema.optional(),
+  redirects: z.array(z.unknown()).max(50_000).optional(),
   articles: z.array(z.unknown()).min(1),
 });
 
@@ -361,6 +394,7 @@ export const IMPORT_SAMPLE: ImportDocument = {
       tags: ["soil"],
       published_at: "2021-03-04T09:30:00Z",
       content_updated_at: "2022-01-10T12:00:00Z",
+      old_urls: ["https://example.com/2021/03/how-to-test-your-soil/", "https://example.com/?p=1001"],
     },
     {
       external_id: "blog:1002",
@@ -370,6 +404,7 @@ export const IMPORT_SAMPLE: ImportDocument = {
       author: "jane",
     },
   ],
+  redirects: [{ from: "https://example.com/category/guides/", to: "/category/guides" }],
 };
 
 /** The field guide, shared by the import-format resource, import_content and the migrate prompt. */
@@ -426,6 +461,11 @@ Top level:
   - published_at: required when published. When the article was FIRST published at the source,
     ISO 8601 with a timezone, in the past, not before 1990.
   - content_updated_at: optional. When its content last changed. Not before published_at.
+  - old_urls: optional, at most 20. Every URL the article was reachable at in the old system, in
+    full: its permalink (https://example.com/2021/03/my-post/), its ?p=123 link, any older
+    permalink. Each answers with a 301 to the article once it is published, so links and
+    rankings that point at the old URL keep working. Leave out a URL that is the same as the new
+    one.
 
 Engagement (optional, top level): the old blog's views, reactions and shares, so a migrated blog
 keeps its counts. { daily: [...], reactions: [...] }, every row keyed by external_id (an article
@@ -440,6 +480,14 @@ in this document or already on the Site) or slug:
   and when the new site sends the same id, the visitor still sees their pick.
 It is sent after every article is imported; a bad row is reported and skipped, never a reason to
 refuse the articles.
+
+Redirects (optional, top level): old URLs that belong to no article, such as category and tag
+archives, pages and feeds: [{ from, to | to_external_id, status?, note? }]. from is the old URL
+(best in full); to is a path under the new blog (/category/guides) or a full https URL, or
+to_external_id names an article. status is 301 (default) or 302. They and every article's old_urls
+are sent after the articles are imported. A URL on the blog's own domain is answered by Writavo;
+one it never receives (the old blog lived at the site root and the new one is under /blog) is kept
+and listed for the customer's own server (GET /redirects/export).
 
 Images: inline markdown images ![alt](https://...), featured images, how-to step images and
 author avatars are copied into the Site's media library and the URLs rewritten, unless

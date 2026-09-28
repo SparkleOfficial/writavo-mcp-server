@@ -60,6 +60,20 @@ export interface ImportProgress {
   items: Record<string, ProgressItem>;
   /** The engagement section's delivery, when the document has one (sent after every article). */
   engagement?: EngagementProgress;
+  /** The redirects (articles' old_urls + the redirects section), sent after every article. */
+  redirects?: RedirectsProgress;
+}
+
+export interface RedirectsProgress {
+  /** Hash of the list as sent: a changed list is sent again from the start (SET, so harmless). */
+  hash: string;
+  sent: number;
+  done: boolean;
+  written: { created: number; updated: number; unchanged: number };
+  /** What the API skipped, first ones only. */
+  problems: string[];
+  /** Why the last attempt could not deliver it (the next apply tries again). */
+  error?: string;
 }
 
 export interface EngagementProgress {
