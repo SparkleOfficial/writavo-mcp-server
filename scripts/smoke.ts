@@ -1155,6 +1155,13 @@ async function main(): Promise<void> {
     );
     const described = importContentTool(memStore("g:key-big")).description;
     check("the tool description puts upload first and keeps inline data for small documents", described.indexOf("upload: true") < described.indexOf("Inline data") && described.includes("512 KB"), described.slice(0, 400));
+    const withRunner = importContentTool({ ...memStore("g:key-desc"), startBackground: async () => { throw new Error("unused"); }, status: async () => null, cancel: async () => null });
+    const runnerText = `${withRunner.description} ${String((withRunner.inputSchema.batch_size as { description?: string }).description ?? "")}`;
+    check(
+      "with a background runner, nothing in the tool tells an agent to apply again to continue",
+      !/as much as fits in one call|says what is left|35 seconds/.test(runnerText) && runnerText.includes("call it once, then only check status"),
+      runnerText.slice(0, 600),
+    );
   }
 
   // -- 14c. The store does the document work (the hosted Durable Object) --------

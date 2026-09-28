@@ -62,7 +62,9 @@ function description(can: Capabilities): string {
   return [
     "Import a blog into the Site from a document in the Writavo Import Format: articles with their original slugs and original publish dates, drafts kept as drafts, authors, categories and tags, and images copied into the media library.",
     ...ways,
-    "Runs as a dry run by default, which checks the whole document against the Site, reports every problem in one pass, and writes nothing. An apply imports as much as fits in one call (about 35 seconds) and says what is left.",
+    can.background
+      ? "Runs as a dry run by default, which checks the whole document against the Site, reports every problem in one pass, and writes nothing. An apply (dry_run false) starts the background run and returns at once; call it once, then only check status."
+      : "Runs as a dry run by default, which checks the whole document against the Site, reports every problem in one pass, and writes nothing. An apply imports as much as fits in one call (about 20 seconds) and says what is left.",
     "Articles are matched by external_id, so running it again updates rather than duplicates. It never deletes or unpublishes anything.",
     "Applying with publish true makes articles publicly visible on the customer's own live site, so it needs confirm: true, which you pass only after the user has agreed.",
     "Call it with no document to get the format's JSON Schema and a sample.",
@@ -121,7 +123,11 @@ function inputSchema(can: Capabilities): Record<string, z.ZodTypeAny> {
       .min(1)
       .max(100)
       .optional()
-      .describe("How many articles one call imports at most. Defaults to as many as fit. A call also stops after about 35 seconds, whatever this is."),
+      .describe(
+        can.background
+          ? "Only with background: false (one foreground batch in this call): how many articles that call imports at most. Defaults to as many as fit in about 20 seconds. Ignored by a background run."
+          : "How many articles one call imports at most. Defaults to as many as fit. A call also stops after about 20 seconds, whatever this is.",
+      ),
     rehost_images: z
       .boolean()
       .optional()
