@@ -134,6 +134,22 @@ export async function findByExternalId(ctx: ToolContext, externalId: string, dea
   return (response.data?.items ?? []).find((a) => a.external_id === externalId) ?? null;
 }
 
+export interface SiteEntry {
+  id: string;
+  external_id: string | null;
+  status: "draft" | "scheduled" | "published";
+}
+
+/** The entry of this content type with this external_id (0136), or null. Checked here as well. */
+export async function findEntryByExternalId(ctx: ToolContext, type: string, externalId: string, deadline?: number): Promise<SiteEntry | null> {
+  const response = await call<Page<SiteEntry>>(
+    ctx,
+    { method: "GET", path: `/entries/${encodeURIComponent(type)}`, query: [["external_id", externalId], ["limit", "2"]] },
+    deadline,
+  );
+  return (response.data?.items ?? []).find((e) => e.external_id === externalId) ?? null;
+}
+
 export async function findBySlug(ctx: ToolContext, slug: string, deadline?: number): Promise<SiteArticle | null> {
   const response = await call<Page<SiteArticle>>(
     ctx,

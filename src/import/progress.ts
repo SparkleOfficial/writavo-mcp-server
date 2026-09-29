@@ -39,6 +39,8 @@ export interface ProgressItem {
 export interface ProgressImage {
   /** The re-hosted URL, when the copy worked. */
   url?: string;
+  /** Its media library id (recorded since 0136, for media fields; older copies have none). */
+  id?: string;
   /** Why it did not, when it did not. The original URL is kept in the content. */
   error?: string;
 }
@@ -62,6 +64,36 @@ export interface ImportProgress {
   engagement?: EngagementProgress;
   /** The redirects (articles' old_urls + the redirects section), sent after every article. */
   redirects?: RedirectsProgress;
+  /** The content_types section (0136), applied before anything else. */
+  content_types?: ContentTypesProgress;
+  /** Entries by external_id (0136): written, then their references and media resolved. */
+  entries?: Record<string, EntryProgress>;
+  /** Articles' custom_fields by article external_id (0136), applied after every entry exists. */
+  custom_fields?: Record<string, { hash: string; done: boolean; error?: string }>;
+}
+
+export interface ContentTypesProgress {
+  hash: string;
+  done: boolean;
+  /** The API's plan, as one line ("created product; updated faq"). */
+  plan?: string;
+  /** Why the Site refused the types (the next apply tries again). */
+  error?: string;
+}
+
+export interface EntryProgress {
+  /** Hash of the file's version of this entry. A change makes it pending again. */
+  hash: string;
+  id?: string;
+  action?: "created" | "updated";
+  /** written: the entry exists (references not yet resolved); done: resolved and its status set. */
+  stage: "written" | "done";
+  outcome: ItemOutcome;
+  published?: boolean;
+  error?: string;
+  warnings?: string[];
+  attempts?: number;
+  updated_at: string;
 }
 
 export interface RedirectsProgress {

@@ -3,7 +3,7 @@ import { WritavoApiError } from "../api/client.js";
 import { MediaError, fetchImage, uploadImage } from "../api/media.js";
 import { newApiStats, type ApiStats, type ToolContext } from "../core/context.js";
 import { formatApiError, text, toolError, type ToolResult } from "../errors.js";
-import { howtoSteps, type CostEntry, type ImportArticle, type ImportAuthor, type ImportEnvelope, type ImportTerm } from "./format.js";
+import { howtoSteps, type CostEntry, type ImportArticle, type ImportAuthor, type ImportEntry, type ImportEnvelope, type ImportTerm } from "./format.js";
 import { articleImages, htmlImageCount, isHttps, rewriteMarkdownImages } from "./images.js";
 import { newProgress, type ImportProgress, type ProgressItem, type ProgressStore } from "./progress.js";
 import {
@@ -11,6 +11,7 @@ import {
   call,
   findByExternalId,
   findBySlug,
+  findEntryByExternalId,
   getArticleState,
   getSite,
   isTransient,
@@ -21,7 +22,7 @@ import {
   type SiteInfo,
   type SiteTerm,
 } from "./site.js";
-import { checkDocument, itemLabel, type EngagementCheck, type ItemCheck, type RedirectsCheck } from "./validate.js";
+import { checkDocument, itemLabel, type ContentTypesCheck, type EngagementCheck, type EntriesCheck, type ItemCheck, type RedirectsCheck } from "./validate.js";
 
 /**
  * The importer. One tool call is either a dry run (reads only, writes nothing, not even the
@@ -182,6 +183,9 @@ interface Loaded {
   engagement: EngagementCheck;
   /** The redirects section's valid rows and skipped-row problems (validate.ts). */
   redirects: RedirectsCheck;
+  /** The content_types and entries sections (0136). */
+  contentTypes: ContentTypesCheck;
+  entries: EntriesCheck;
   /** Where this call's time went, for the reply (timingLine). */
   timing: CallTiming;
   items: ItemCheck[];
@@ -357,6 +361,7 @@ async function load(api: ToolContext, source: ImportSource): Promise<Loaded | To
   let siteTags: Map<string, string>;
   let siteAuthors: SiteAuthors;
   let formats: Map<string, string>;
+  let siteTypes: Set<string> | null = null;
   try {
     site = await getSite(api);
     const [categories, tags, authors, types] = await Promise.all([
@@ -373,6 +378,16 @@ async function load(api: ToolContext, source: ImportSource): Promise<Loaded | To
     for (const t of types.data?.items ?? []) if (t.is_active !== false || !formats.has(t.key)) formats.set(t.key, t.id);
   } catch (err) {
     return formatApiError(err, { tool: "import_content" });
+  }
+  // The Site's content types, only when the document has entries (0136). A Site or key that cannot
+  // read them leaves the check to the API (each entry of an unknown type then fails on its own).
+  if ((checked.entries.rows.length ?? 0) > 0) {
+    try {
+      const types = await call<{ items: Array<{ api_id: string; kind: string }> }>(api, { method: "GET", path: "/content-types" });
+      siteTypes = new Set((types.data?.items ?? []).filter((t) => t.kind === "collection" || t.kind === "singleton").map((t) => t.api_id));
+    } catch {
+      siteTypes = null;
+    }
   }
 
   const store = source.store;
@@ -416,6 +431,16 @@ async function load(api: ToolContext, source: ImportSource): Promise<Loaded | To
     if (item.errors.length === 0) valid.push({ check: item, article, hash: sha256(`${WRITE_VERSION}:${JSON.stringify(article)}`) });
   }
 
+  // An entry must be of a type the document creates or the Site already has.
+  if (siteTypes) {
+    const fileTypes = new Set(checked.contentTypes.types.filter((t) => (t.kind ?? "collection") === "collection" || t.kind === "singleton").map((t) => t.api_id));
+    const kept = checked.entries.rows.filter((e) => fileTypes.has(e.type) || siteTypes!.has(e.type));
+    for (const e of checked.entries.rows) {
+      if (!kept.includes(e)) checked.entries.problems.push(`entry ${e.external_id}: "${e.type}" is not a content type with entries in content_types[] or on the Site`);
+    }
+    checked.entries.rows = kept;
+  }
+
   return {
     api,
     source,
@@ -423,6 +448,8 @@ async function load(api: ToolContext, source: ImportSource): Promise<Loaded | To
     envelopeErrors: checked.envelopeErrors,
     engagement: checked.engagement,
     redirects: checked.redirects,
+    contentTypes: checked.contentTypes,
+    entries: checked.entries,
     timing,
     items: checked.items,
     valid,
@@ -613,6 +640,10 @@ async function dryRun(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
   if (ctx.progressExisted && ctx.source.store) lines.push(`Progress from an earlier run is in ${ctx.source.store.location}.`);
   const precision = subMillisecondNote(valid);
   if (precision) lines.push(precision);
+  lines.push(...(await contentTypesDryRun(ctx)));
+  lines.push(...entriesDryRun(ctx, opts));
+  const withCustomFields = customFieldItems(ctx).length;
+  if (withCustomFields) lines.push("", `Articles' custom fields: ${withCustomFields} articles carry them; set after every entry exists, with their references and media resolved.`);
   lines.push(...redirectsDryRun(ctx));
   lines.push(...engagementDryRun(ctx, byExternalId, bySlug));
 
@@ -710,13 +741,26 @@ async function save(state: ApplyState, force = false): Promise<void> {
 
 /** Copy one image, once per import. Undefined means keep the original URL. */
 async function rehost(state: ApplyState, url: string, alt: string | undefined, bucket: "blog-images" | "author-avatars", warnings: string[]): Promise<string | undefined> {
+  return (await rehostAsset(state, url, alt, bucket, warnings, false))?.url;
+}
+
+/** Copy one image and return its media library entry. `needId`: a copy recorded before ids were
+ *  kept (0136) is made again, because a media field needs the id. */
+async function rehostAsset(
+  state: ApplyState,
+  url: string,
+  alt: string | undefined,
+  bucket: "blog-images" | "author-avatars",
+  warnings: string[],
+  needId: boolean,
+): Promise<{ url: string; id?: string } | undefined> {
   const { progress } = state.ctx;
   if (!isHttps(url)) {
     warnings.push(`image ${url} is not https, so it keeps its original URL`);
     return undefined;
   }
   const known = progress.images[url];
-  if (known?.url) return known.url;
+  if (known?.url && (known.id || !needId)) return { url: known.url, id: known.id };
   if (known?.error) return undefined;
   need(state, 4); // the fetch, the reservation, the storage upload, the registration
   try {
@@ -729,9 +773,10 @@ async function rehost(state: ApplyState, url: string, alt: string | undefined, b
     );
     const hosted = typeof asset.url === "string" ? asset.url : "";
     if (!hosted) throw new MediaError("the media library returned no URL");
-    progress.images[url] = { url: hosted };
+    const id = typeof asset.id === "string" ? asset.id : undefined;
+    progress.images[url] = { url: hosted, ...(id ? { id } : {}) };
     state.counts.imagesCopied += 1;
-    return hosted;
+    return { url: hosted, id };
   } catch (err) {
     if (isTransient(err) || isFatal(err) || err instanceof OutOfRequests) throw err;
     const reason = err instanceof MediaError ? err.message : apiProblem(err);
@@ -1509,7 +1554,10 @@ async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
   const pending = ctx.valid.filter((v) => !isSettled(ctx.progress.items[v.article.external_id], v, opts, mayTouchLive));
   const invalid = ctx.items.filter((i) => i.errors.length > 0);
 
-  const toPublish = pending.filter((v) => lifecycleOf(v.article, opts) === "publish").length;
+  const entriesToPublish = entriesPending(ctx)
+    ? ctx.entries.rows.filter((e) => entryLifecycle(e, opts) !== "none" && ctx.progress.entries?.[e.external_id]?.stage !== "done").length
+    : 0;
+  const toPublish = pending.filter((v) => lifecycleOf(v.article, opts) === "publish").length + entriesToPublish;
   const toSchedule = pending.filter((v) => lifecycleOf(v.article, opts) === "schedule").length;
   if (opts.publish && toPublish + toSchedule > 0 && !opts.confirm) {
     return tagged("needs_confirm", text(
@@ -1540,9 +1588,20 @@ async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
   };
 
   let stopped: string | null = null;
+  if (contentTypesPending(ctx)) {
+    try {
+      stopped = await applyContentTypes(state);
+    } catch (err) {
+      await save(state, true);
+      if (isFatal(err)) return tagged("stopped", stopReport(state, err));
+      stopped = err instanceof OutOfRequests ? REQUEST_BUDGET_SPENT : `the content types could not be applied (${apiProblem(err)})`;
+    }
+  }
   const termsStarted = Date.now();
   try {
-    if (!(await ensureTaxonomy(state))) stopped = "this call's time or request budget ran out while creating categories, tags and authors";
+    if (stopped) {
+      // nothing more this call
+    } else if (!(await ensureTaxonomy(state))) stopped = "this call's time or request budget ran out while creating categories, tags and authors";
   } catch (err) {
     if (err instanceof OutOfRequests) stopped = `${REQUEST_BUDGET_SPENT} while creating categories, tags and authors`;
     ctx.timing.terms = Date.now() - termsStarted;
@@ -1620,6 +1679,21 @@ async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
   // Counted as the NEXT call will see it, which does not pass retry_failed again.
   const nextOpts = { ...opts, retryFailed: false };
   const remaining = ctx.valid.filter((v) => !isSettled(ctx.progress.items[v.article.external_id], v, nextOpts, mayTouchLive)).length;
+  // Entries go after every article (they may reference articles), then the articles' custom
+  // fields (which may reference entries). Both resumable; see sendEntries.
+  for (const [pending_, send] of [[entriesPending, sendEntries], [customFieldsPending, sendCustomFields]] as const) {
+    if (remaining === 0 && !stopped && pending_(ctx)) {
+      try {
+        const why = await send(state);
+        if (why) stopped = why;
+      } catch (err) {
+        await save(state, true);
+        if (err instanceof OutOfRequests) stopped = REQUEST_BUDGET_SPENT;
+        else if (isFatal(err)) return tagged("stopped", stopReport(state, err));
+        else throw err;
+      }
+    }
+  }
   // Redirects go after every article (they point at the articles by external_id), then the
   // engagement history (keyed by the posts), both in chunks and both SET, never add.
   if (remaining === 0 && !stopped && redirectsPending(ctx)) {
@@ -1632,7 +1706,9 @@ async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
   }
   const redirectsUnfinished = redirectsPending(ctx) && !ctx.progress.redirects?.error;
   const engagementUnfinished = engagementPending(ctx) && !ctx.progress.engagement?.error;
-  const allDone = remaining === 0 && !engagementUnfinished && !redirectsUnfinished;
+  const sectionsUnfinished =
+    (contentTypesPending(ctx) && !ctx.progress.content_types?.error) || entriesPending(ctx) || customFieldsPending(ctx);
+  const allDone = remaining === 0 && !engagementUnfinished && !redirectsUnfinished && !sectionsUnfinished;
   const c = state.counts;
   const lines: string[] = [];
   const thisCall = `This call: created ${c.created}, updated ${c.updated}, published ${c.published}${c.scheduled ? `, scheduled ${c.scheduled}` : ""}, left unchanged ${c.deferred}, skipped ${c.skipped}, failed ${c.failed}. Images copied ${c.imagesCopied}${c.imagesFailed ? `, not copied ${c.imagesFailed}` : ""}.`;
@@ -1655,6 +1731,7 @@ async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
       lines.push("", "Not imported because of problems in the document:", ...listed(invalid.map((i) => `- ${itemLabel(i)}: ${i.errors.join("; ")}`)));
     }
     if (state.warnings.length > 0) lines.push("", "Warnings from this call:", ...listed(state.warnings));
+    lines.push(...contentTypesReport(ctx), ...entriesReport(ctx), ...customFieldsReport(ctx));
     lines.push(...redirectsReport(ctx));
     lines.push(...engagementReport(ctx));
     lines.push(
@@ -1668,7 +1745,9 @@ async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
   } else {
     lines.push(
       remaining === 0
-        ? `Every article is imported into the Site "${ctx.site.name}"; the ${redirectsUnfinished ? "redirects" : "engagement history"} ${redirectsUnfinished && engagementUnfinished ? "and the engagement history are" : "is"} still being sent.`
+        ? sectionsUnfinished
+          ? `Every article is imported into the Site "${ctx.site.name}"; the content types, entries or custom fields are still being written.`
+          : `Every article is imported into the Site "${ctx.site.name}"; the ${redirectsUnfinished ? "redirects" : "engagement history"} ${redirectsUnfinished && engagementUnfinished ? "and the engagement history are" : "is"} still being sent.`
         : `Imported a batch into the Site "${ctx.site.name}". ${ctx.valid.length - remaining} of ${ctx.valid.length} articles are done and ${remaining} remain.`,
       "",
       thisCall,
@@ -1677,6 +1756,7 @@ async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
     if (stopped) lines.push(`Stopped early: ${stopped}.`);
     if (state.problems.length > 0) lines.push("", "Problems this call:", ...listed(state.problems));
     if (state.warnings.length > 0) lines.push("", "Warnings this call:", ...listed(state.warnings));
+    lines.push(...contentTypesReport(ctx), ...entriesReport(ctx), ...customFieldsReport(ctx));
     lines.push(...redirectsReport(ctx));
     lines.push(...engagementReport(ctx));
     if (ctx.source.store) {
@@ -1748,6 +1828,9 @@ export interface ImportProgressSummary {
   categories_created: number;
   tags_created: number;
   authors_created: number;
+  /** Section work the counters above do not show (0136): content types, entries, custom fields,
+   *  redirects and engagement sent. The job runner counts it as progress. */
+  work_units: number;
 }
 
 export function summariseProgress(progress: ImportProgress | null, articlesTotal: number): ImportProgressSummary {
@@ -1763,6 +1846,7 @@ export function summariseProgress(progress: ImportProgress | null, articlesTotal
     categories_created: progress?.created.categories ?? 0,
     tags_created: progress?.created.tags ?? 0,
     authors_created: progress?.created.authors ?? 0,
+    work_units: sectionWorkUnits(progress),
   };
 }
 
@@ -1799,4 +1883,441 @@ export async function runImport(apiContext: ToolContext, source: ImportSource, o
   } finally {
     await source.lease?.release().catch(() => undefined);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Content types, entries and articles' custom fields (API 1.5.0, 0136)
+// ---------------------------------------------------------------------------
+// ORDER. The content types go first (before the taxonomy): entries and custom fields need them.
+// Entries go after every article, in two passes: WRITE (create a draft without its references,
+// or find the existing one by external_id) and RESOLVE (every entry and article of the document
+// now exists, so each portable $ref / $media becomes an id; then the entry's status is set).
+// Articles' custom_fields go last, once the entries they may reference exist. A reference to
+// something that is in neither this document nor the Site (a later volume of an export) is left
+// out with a warning; running the import again after the rest arrives fills it in.
+
+const ENTRY_WRITE_VERSION = "e1";
+
+function contentTypesHash(ctx: Loaded): string {
+  return sha256(JSON.stringify(ctx.contentTypes.types));
+}
+
+function contentTypesPending(ctx: Loaded): boolean {
+  if (ctx.contentTypes.types.length === 0) return false;
+  const p = ctx.progress.content_types;
+  return !(p && p.hash === contentTypesHash(ctx) && p.done);
+}
+
+interface SchemaPlan {
+  create?: string[];
+  update?: Array<{ api_id: string; added?: string[]; removed?: string[]; renamed?: Array<{ from: string; to: string }>; retyped?: string[]; entries?: number }>;
+  delete?: string[];
+  unchanged?: string[];
+}
+interface SchemaApply {
+  ok: boolean;
+  plan?: SchemaPlan;
+  errors?: Array<{ path: string; code: string; message: string }>;
+}
+
+function planLine(plan: SchemaPlan | undefined): string {
+  if (!plan) return "no plan";
+  const parts: string[] = [];
+  if (plan.create?.length) parts.push(`create ${plan.create.join(", ")}`);
+  if (plan.update?.length) {
+    parts.push(`change ${plan.update.map((u) => {
+      const bits = [
+        u.added?.length ? `+${u.added.join(", +")}` : "",
+        u.removed?.length ? `-${u.removed.join(", -")} (values kept, no longer shown)` : "",
+        u.renamed?.length ? u.renamed.map((r) => `${r.from}->${r.to}`).join(", ") : "",
+        u.retyped?.length ? `retyped ${u.retyped.join(", ")}` : "",
+      ].filter(Boolean);
+      return `${u.api_id}${bits.length ? ` (${bits.join("; ")})` : ""}`;
+    }).join("; ")}`);
+  }
+  if (plan.unchanged?.length) parts.push(`unchanged ${plan.unchanged.length}`);
+  return parts.join(". ") || "nothing to change";
+}
+
+/** Apply the document's content types (never deleting the Site's others). Null, or why to stop. */
+async function applyContentTypes(state: ApplyState): Promise<string | null> {
+  const { ctx } = state;
+  const hash = contentTypesHash(ctx);
+  ctx.progress.content_types = { hash, done: false };
+  const p = ctx.progress.content_types;
+  need(state, 1);
+  try {
+    const res = await call<SchemaApply>(
+      ctx.api,
+      { method: "POST", path: "/content-types/apply", body: { types: ctx.contentTypes.types, dry_run: false, delete_missing: false } },
+      state.hardDeadline,
+    );
+    p.done = true;
+    p.plan = planLine(res.data?.plan);
+  } catch (err) {
+    if (isFatal(err)) throw err;
+    if (isTransient(err)) return `the API was busy (${apiProblem(err)}) while applying the content types`;
+    p.error = err instanceof WritavoApiError && err.status === 404 ? "this Site's API has no content types yet" : apiProblem(err);
+  }
+  await save(state, true);
+  return null;
+}
+
+async function contentTypesDryRun(ctx: Loaded): Promise<string[]> {
+  const t = ctx.contentTypes;
+  if (t.types.length === 0 && t.problems.length === 0) return [];
+  const lines = ["", `Content types: ${t.types.length} in the file, applied before everything else (types on the Site that the file does not name are left alone).`];
+  if (t.types.length) {
+    try {
+      const res = await call<SchemaApply>(ctx.api, { method: "POST", path: "/content-types/apply", body: { types: t.types, dry_run: true } });
+      lines.push(`- plan: ${planLine(res.data?.plan)}.`);
+      const errs = res.data?.errors ?? [];
+      if (errs.length) lines.push(`The Site refuses these content types as written (${errs.length}); nothing is applied until they are fixed:`, ...listed(errs.map((e) => `- ${e.path}: ${e.message}`), 20));
+    } catch (err) {
+      lines.push(`- the Site could not check them: ${apiProblem(err)}.`);
+    }
+  }
+  if (t.problems.length) lines.push(`Content types with problems, skipped (${t.problems.length}):`, ...listed(t.problems.map((x) => `- ${x}`), 20));
+  return lines;
+}
+
+function contentTypesReport(ctx: Loaded): string[] {
+  const p = ctx.progress.content_types;
+  if (ctx.contentTypes.types.length === 0) return [];
+  if (p?.done) return ["", `Content types: applied (${p.plan ?? "done"}).`];
+  if (p?.error) return ["", `Content types: NOT applied, because ${p.error}. Entries of types the Site does not have fail until this is fixed; run the import again afterwards.`];
+  return ["", "Content types: not applied yet."];
+}
+
+// ---- portable values -------------------------------------------------------
+function isPortableRef(v: unknown): v is { $ref: { type: string; external_id?: string; slug?: string } } {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return false;
+  const keys = Object.keys(v);
+  const r = (v as { $ref?: unknown }).$ref;
+  return keys.length === 1 && keys[0] === "$ref" && !!r && typeof r === "object" && typeof (r as { type?: unknown }).type === "string";
+}
+
+function isPortableMedia(v: unknown): v is { $media: { url: string; alt?: string } } {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return false;
+  const keys = Object.keys(v);
+  const m = (v as { $media?: unknown }).$media;
+  return keys.length === 1 && keys[0] === "$media" && !!m && typeof m === "object" && typeof (m as { url?: unknown }).url === "string";
+}
+
+/** The value tree with every portable value taken out (the write pass: an entry exists first). */
+function withoutPortable(v: unknown): unknown {
+  if (isPortableRef(v) || isPortableMedia(v)) return undefined;
+  if (Array.isArray(v)) return v.map(withoutPortable).filter((x) => x !== undefined);
+  if (v && typeof v === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, x] of Object.entries(v)) {
+      const y = withoutPortable(x);
+      if (y !== undefined) out[k] = y;
+    }
+    return out;
+  }
+  return v;
+}
+
+function hasPortable(v: unknown): boolean {
+  if (isPortableRef(v) || isPortableMedia(v)) return true;
+  if (Array.isArray(v)) return v.some(hasPortable);
+  if (v && typeof v === "object") return Object.values(v).some(hasPortable);
+  return false;
+}
+
+interface Resolver {
+  cache: Map<string, string | null>;
+}
+
+/** One reference as an id on the target Site, or null when it is not there (yet). */
+async function resolveRef(state: ApplyState, r: Resolver, ref: { type: string; external_id?: string; slug?: string }): Promise<string | null> {
+  const { ctx } = state;
+  const key = `${ref.type}:${ref.external_id ?? ""}:${ref.slug ?? ""}`;
+  if (r.cache.has(key)) return r.cache.get(key)!;
+  let id: string | null = null;
+  if (ref.type === "category" || ref.type === "tag") {
+    if (ref.slug) id = (ref.type === "category" ? ctx.progress.categories[ref.slug] ?? ctx.siteCategories.get(ref.slug) : ctx.progress.tags[ref.slug] ?? ctx.siteTags.get(ref.slug)) ?? null;
+  } else if (ref.type === "author") {
+    if (ref.slug) id = ctx.progress.authors[ref.slug] ?? ctx.siteAuthors.bySlug.get(ref.slug)?.id ?? null;
+  } else if (ref.type === "article" || ref.type === "page") {
+    if (ref.external_id) {
+      id = ctx.progress.items[ref.external_id]?.article_id ?? null;
+      if (!id) {
+        need(state, 1);
+        id = (await findByExternalId(ctx.api, ref.external_id, state.hardDeadline))?.id ?? null;
+      }
+    }
+  } else if (ref.external_id) {
+    id = ctx.progress.entries?.[ref.external_id]?.id ?? null;
+    if (!id) {
+      need(state, 1);
+      try {
+        id = (await findEntryByExternalId(ctx.api, ref.type, ref.external_id, state.hardDeadline))?.id ?? null;
+      } catch (err) {
+        if (!(err instanceof WritavoApiError && err.status === 404)) throw err;
+      }
+    }
+  }
+  r.cache.set(key, id);
+  return id;
+}
+
+/** The value tree with every portable value turned into an id; one that cannot be is left out. */
+async function resolvePortable(state: ApplyState, r: Resolver, v: unknown, where: string, warnings: string[]): Promise<unknown> {
+  if (isPortableRef(v)) {
+    const id = await resolveRef(state, r, v.$ref);
+    if (!id) warnings.push(`${where}: ${v.$ref.type} ${v.$ref.external_id ?? v.$ref.slug} is not in this document or on the Site, so the reference is left out (import again once it is there)`);
+    return id ?? undefined;
+  }
+  if (isPortableMedia(v)) {
+    if (!state.opts.rehostImages) {
+      warnings.push(`${where}: media ${v.$media.url} is left out, because rehost_images is false and a media field needs a copy in the library`);
+      return undefined;
+    }
+    const asset = await rehostAsset(state, v.$media.url, v.$media.alt, "blog-images", warnings, true);
+    if (!asset?.id) warnings.push(`${where}: media ${v.$media.url} could not be copied into the library, so it is left out`);
+    return asset?.id;
+  }
+  if (Array.isArray(v)) {
+    const out: unknown[] = [];
+    for (let i = 0; i < v.length; i += 1) {
+      const x = await resolvePortable(state, r, v[i], `${where}[${i}]`, warnings);
+      if (x !== undefined) out.push(x);
+    }
+    return out;
+  }
+  if (v && typeof v === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, x] of Object.entries(v)) {
+      const y = await resolvePortable(state, r, x, `${where}.${k}`, warnings);
+      if (y !== undefined) out[k] = y;
+    }
+    return out;
+  }
+  return v;
+}
+
+// ---- entries ---------------------------------------------------------------
+function entryHash(e: ImportEntry): string {
+  return sha256(`${ENTRY_WRITE_VERSION}:${JSON.stringify(e)}`);
+}
+
+function entriesPending(ctx: Loaded): boolean {
+  return ctx.entries.rows.some((e) => {
+    const p = ctx.progress.entries?.[e.external_id];
+    return !p || p.hash !== entryHash(e) || (p.stage !== "done" && p.outcome !== "failed" && p.outcome !== "skipped");
+  });
+}
+
+function entryLifecycle(e: ImportEntry, opts: ImportOptions): "publish" | "schedule" | "none" {
+  if (!opts.publish) return "none";
+  if (e.status === "published") return "publish";
+  if (e.status === "scheduled" && e.scheduled_at && Date.parse(e.scheduled_at) > Date.now()) return "schedule";
+  return "none";
+}
+
+/**
+ * The entries, in two passes, each resumable. A reason to stop (time, requests, a busy API), or
+ * null when every entry has been dealt with (done, deferred, or failed with a recorded reason).
+ */
+async function sendEntries(state: ApplyState): Promise<string | null> {
+  const { ctx, opts } = state;
+  ctx.progress.entries ??= {};
+  const progress = ctx.progress.entries;
+  const now = () => new Date().toISOString();
+  const budgetLeft = (n: number) => {
+    const max = opts.budget?.maxRequests;
+    return max === undefined || requestsUsed(state) + n <= max;
+  };
+
+  // Pass 1: every entry exists (a new one as a draft, without its references).
+  for (const e of ctx.entries.rows) {
+    const hash = entryHash(e);
+    const p = progress[e.external_id];
+    if (p && p.hash === hash && (p.id || p.outcome === "failed" || p.outcome === "skipped")) continue;
+    if (Date.now() > state.deadline) return "the time for this call ran out while writing the entries";
+    if (!budgetLeft(3)) return REQUEST_BUDGET_SPENT;
+    const label = `entry ${e.external_id} (${e.type})`;
+    try {
+      need(state, 1);
+      const existing = await findEntryByExternalId(ctx.api, e.type, e.external_id, state.hardDeadline);
+      if (existing) {
+        if (existing.status !== "draft" && !state.mayTouchLive) {
+          progress[e.external_id] = { hash, id: existing.id, action: "updated", stage: "done", outcome: "deferred", error: "it is live and this import may not change live content (publish is false or not confirmed)", updated_at: now() };
+          state.counts.deferred += 1;
+        } else {
+          progress[e.external_id] = { hash, id: existing.id, action: "updated", stage: "written", outcome: "retry", updated_at: now() };
+        }
+      } else {
+        need(state, 1);
+        const body = { external_id: e.external_id, ...(e.slug ? { slug: e.slug } : {}), data: withoutPortable(e.data) };
+        const res = await call<{ id: string }>(
+          ctx.api,
+          { method: "POST", path: `/entries/${encodeURIComponent(e.type)}`, body, headers: { "Idempotency-Key": `import-entry-${sha256(`${e.external_id}\n${JSON.stringify(body)}`)}` } },
+          state.hardDeadline,
+        );
+        progress[e.external_id] = { hash, id: res.data.id, action: "created", stage: "written", outcome: "retry", updated_at: now() };
+        state.counts.created += 1;
+      }
+    } catch (err) {
+      if (isFatal(err) || err instanceof OutOfRequests) throw err;
+      if (isTransient(err)) return `the API was busy (${apiProblem(err)}) while writing ${label}`;
+      progress[e.external_id] = { hash, stage: "written", outcome: "failed", error: apiProblem(err), updated_at: now() };
+      state.counts.failed += 1;
+      state.problems.push(`- ${label}: failed, ${apiProblem(err)}`);
+    }
+    await save(state);
+  }
+
+  // Pass 2: references and media become ids, the values are written whole, the status is set.
+  const resolver: Resolver = { cache: new Map() };
+  for (const e of ctx.entries.rows) {
+    const p = progress[e.external_id];
+    if (!p || p.hash !== entryHash(e) || p.stage === "done" || !p.id || p.outcome === "failed" || p.outcome === "skipped") continue;
+    if (Date.now() > state.deadline) return "the time for this call ran out while resolving the entries";
+    if (!budgetLeft(4)) return REQUEST_BUDGET_SPENT;
+    const label = `entry ${e.external_id} (${e.type})`;
+    const warnings: string[] = [];
+    try {
+      const data = hasPortable(e.data) ? await resolvePortable(state, resolver, e.data, `${e.external_id} data`, warnings) : e.data;
+      need(state, 1);
+      await call(ctx.api, { method: "PATCH", path: `/entries/${encodeURIComponent(e.type)}/${p.id}`, body: { data, replace: true, ...(e.slug !== undefined ? { slug: e.slug } : {}) } }, state.hardDeadline);
+      const step = entryLifecycle(e, opts);
+      if (step === "publish") {
+        need(state, 1);
+        await call(ctx.api, { method: "POST", path: `/entries/${encodeURIComponent(e.type)}/${p.id}/publish`, body: {} }, state.hardDeadline);
+        p.published = true;
+        state.counts.published += 1;
+        if (e.unpublish_at && Date.parse(e.unpublish_at) > Date.now()) {
+          need(state, 1);
+          await call(ctx.api, { method: "POST", path: `/entries/${encodeURIComponent(e.type)}/${p.id}/schedule-unpublish`, body: { at: e.unpublish_at } }, state.hardDeadline);
+        }
+      } else if (step === "schedule") {
+        need(state, 1);
+        await call(ctx.api, { method: "POST", path: `/entries/${encodeURIComponent(e.type)}/${p.id}/schedule`, body: { at: e.scheduled_at } }, state.hardDeadline);
+        state.counts.scheduled += 1;
+      }
+      Object.assign(p, { stage: "done", outcome: "done", warnings: warnings.length ? warnings.slice(0, 10) : undefined, updated_at: now() });
+      delete p.error;
+      if (p.action === "updated") state.counts.updated += 1;
+      state.warnings.push(...warnings.map((w) => `- ${w}`));
+    } catch (err) {
+      if (isFatal(err) || err instanceof OutOfRequests) throw err;
+      if (isTransient(err)) return `the API was busy (${apiProblem(err)}) while resolving ${label}`;
+      // Written but not finished: it stays a draft (or as it was), and says why.
+      Object.assign(p, { stage: "done", outcome: "failed", error: apiProblem(err), updated_at: now() });
+      state.counts.failed += 1;
+      state.problems.push(`- ${label}: its values or status could not be set, ${apiProblem(err)}${warnings.length ? ` (${warnings.join("; ")})` : ""}`);
+    }
+    await save(state);
+  }
+  await save(state, true);
+  return null;
+}
+
+function entriesDryRun(ctx: Loaded, opts: ImportOptions): string[] {
+  const e = ctx.entries;
+  if (e.rows.length === 0 && e.problems.length === 0) return [];
+  const byType = new Map<string, number>();
+  for (const row of e.rows) byType.set(row.type, (byType.get(row.type) ?? 0) + 1);
+  const publish = e.rows.filter((r) => entryLifecycle(r, opts) === "publish").length;
+  const schedule = e.rows.filter((r) => entryLifecycle(r, opts) === "schedule").length;
+  const withRefs = e.rows.filter((r) => hasPortable(r.data)).length;
+  const lines = [
+    "",
+    `Entries: ${e.rows.length} (${[...byType].map(([t, n]) => `${n} ${t}`).join(", ")}), written after every article: matched by external_id, created as drafts, then their references and media resolved (${withRefs} have some) and their status set${opts.publish ? ` (${publish} to publish${schedule ? `, ${schedule} to schedule` : ""})` : " (none published: publish is false)"}. Each new entry is a document on the CMS meter.`,
+  ];
+  if (e.problems.length) lines.push(`Entries with problems, skipped (${e.problems.length}):`, ...listed(e.problems.map((x) => `- ${x}`), 20));
+  return lines;
+}
+
+function entriesReport(ctx: Loaded): string[] {
+  const rows = ctx.entries.rows;
+  if (rows.length === 0 && ctx.entries.problems.length === 0) return [];
+  const all = Object.values(ctx.progress.entries ?? {});
+  const tally = (pred: (x: (typeof all)[number]) => boolean) => all.filter(pred).length;
+  const lines = [
+    "",
+    `Entries: ${tally((x) => x.stage === "done" && x.outcome === "done")} of ${rows.length} done (created ${tally((x) => x.action === "created")}, updated ${tally((x) => x.action === "updated" && x.outcome === "done")}, published ${tally((x) => x.published === true)}, left unchanged ${tally((x) => x.outcome === "deferred")}, failed ${tally((x) => x.outcome === "failed")}).`,
+  ];
+  const attention = Object.entries(ctx.progress.entries ?? {})
+    .filter(([, x]) => x.outcome === "failed" || x.outcome === "deferred")
+    .map(([id, x]) => `- ${id}: ${x.outcome}, ${x.error ?? "no reason recorded"}`);
+  if (attention.length) lines.push("Entries needing attention:", ...listed(attention, 20));
+  if (ctx.entries.problems.length) lines.push(`Entries with problems, skipped (${ctx.entries.problems.length}):`, ...listed(ctx.entries.problems.map((x) => `- ${x}`), 20));
+  return lines;
+}
+
+// ---- articles' custom fields ------------------------------------------------
+function customFieldItems(ctx: Loaded): ValidItem[] {
+  return ctx.valid.filter((v) => v.article.custom_fields && Object.keys(v.article.custom_fields).length > 0);
+}
+
+function customFieldsHash(v: ValidItem): string {
+  return sha256(JSON.stringify(v.article.custom_fields));
+}
+
+function customFieldsPending(ctx: Loaded): boolean {
+  return customFieldItems(ctx).some((v) => {
+    const item = ctx.progress.items[v.article.external_id];
+    if (!item?.article_id || item.outcome === "deferred" || item.outcome === "failed" || item.outcome === "skipped") return false;
+    const p = ctx.progress.custom_fields?.[v.article.external_id];
+    return !(p && p.hash === customFieldsHash(v) && (p.done || p.error));
+  });
+}
+
+async function sendCustomFields(state: ApplyState): Promise<string | null> {
+  const { ctx } = state;
+  ctx.progress.custom_fields ??= {};
+  const resolver: Resolver = { cache: new Map() };
+  for (const v of customFieldItems(ctx)) {
+    const item = ctx.progress.items[v.article.external_id];
+    if (!item?.article_id || item.outcome === "deferred" || item.outcome === "failed" || item.outcome === "skipped") continue;
+    const hash = customFieldsHash(v);
+    const p = ctx.progress.custom_fields[v.article.external_id];
+    if (p && p.hash === hash && (p.done || p.error)) continue;
+    if (Date.now() > state.deadline) return "the time for this call ran out while setting the articles' custom fields";
+    const max = state.opts.budget?.maxRequests;
+    if (max !== undefined && requestsUsed(state) + 2 > max) return REQUEST_BUDGET_SPENT;
+    const warnings: string[] = [];
+    try {
+      const values = await resolvePortable(state, resolver, v.article.custom_fields, `${v.article.external_id} custom_fields`, warnings);
+      need(state, 1);
+      await call(ctx.api, { method: "PATCH", path: `/articles/${item.article_id}`, body: { custom_fields: values } }, state.hardDeadline);
+      ctx.progress.custom_fields[v.article.external_id] = { hash, done: true };
+      state.warnings.push(...warnings.map((w) => `- ${w}`));
+    } catch (err) {
+      if (isFatal(err) || err instanceof OutOfRequests) throw err;
+      if (isTransient(err)) return `the API was busy (${apiProblem(err)}) while setting ${v.article.external_id}'s custom fields`;
+      ctx.progress.custom_fields[v.article.external_id] = { hash, done: false, error: apiProblem(err) };
+      state.problems.push(`- ${itemLabel(v.check)}: its custom fields were not set, ${apiProblem(err)}`);
+    }
+    await save(state);
+  }
+  await save(state, true);
+  return null;
+}
+
+function customFieldsReport(ctx: Loaded): string[] {
+  const items = customFieldItems(ctx);
+  if (items.length === 0) return [];
+  const done = items.filter((v) => ctx.progress.custom_fields?.[v.article.external_id]?.done).length;
+  const failed = items.filter((v) => ctx.progress.custom_fields?.[v.article.external_id]?.error).length;
+  return ["", `Articles' custom fields: set on ${done} of ${items.length}${failed ? `, ${failed} refused (listed above)` : ""}.`];
+}
+
+/** Everything done since the last batch that the article counters do not show (the job runner's
+ *  "did this batch move?"): content types, entries, custom fields, redirects and engagement sent. */
+function sectionWorkUnits(progress: ImportProgress | null): number {
+  if (!progress) return 0;
+  const entries = Object.values(progress.entries ?? {});
+  return (
+    (progress.content_types?.done ? 1 : 0) +
+    entries.filter((e) => e.id).length +
+    entries.filter((e) => e.stage === "done").length +
+    Object.values(progress.custom_fields ?? {}).filter((c) => c.done || c.error).length +
+    (progress.redirects?.sent ?? 0) +
+    (progress.engagement ? progress.engagement.daily_sent + progress.engagement.reactions_sent : 0)
+  );
 }

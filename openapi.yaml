@@ -4745,6 +4745,10 @@ paths:
           in: query
           required: false
           schema: { type: string }
+        - name: external_id
+          in: query
+          required: false
+          schema: { type: string }
         - name: order
           in: query
           required: false
@@ -5401,6 +5405,75 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
         "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /export:
+    get:
+      operationId: exportSite
+      tags: [Imports]
+      summary: Export the Site
+      description: |
+        The whole Site as Writavo Import Format, so it can be backed up, restored or moved to
+        another Site: articles and pages (with their SEO fields, source records, old URLs and custom
+        fields), authors, categories, tags, content types, entries, redirects and engagement history.
+        Media travels as URLs; importing copies each into the target Site's library. References
+        between entries and articles are written portably (`$ref` by external_id or slug, `$media`
+        by URL), so they resolve on the target Site.
+
+        **Volumes.** An import document is at most 10 MB, so the export comes in volumes of about
+        8 MB, each a complete document. When there is more, the response carries
+        `Writavo-Export-Next` (also `source.export.next` in the document): pass it back as
+        `cursor` for the next volume. Import the volumes in order with `POST /imports`; a volume
+        whose report lists references it could not resolve yet (they were in a later volume) is
+        fixed by importing it again at the end.
+
+        Left out: the AI pipeline's working rows, revisions, Writavo's own costs, and the source
+        pages' scraped text unless `source_text=true` (it can be several times the size of the
+        articles). The body is the document itself, not the usual `{ ok, data }` envelope.
+      x-scope: articles:read
+      x-also-scopes: [taxonomy:read, authors:read, entries:read]
+      x-permission: articles.write
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: false
+      parameters:
+        - name: cursor
+          in: query
+          required: false
+          description: The `Writavo-Export-Next` of the previous volume. Omit for the first.
+          schema: { type: string }
+        - name: engagement
+          in: query
+          required: false
+          description: Include the engagement history (views, reactions, shares). Default true.
+          schema: { type: boolean, default: true }
+        - name: source_text
+          in: query
+          required: false
+          description: Include each source page's scraped text (large). Default false.
+          schema: { type: boolean, default: false }
+      responses:
+        "200":
+          description: One volume of the export, a Writavo Import Format document.
+          headers:
+            Writavo-Export-Part:
+              description: Which volume this is, from 1.
+              schema: { type: integer }
+            Writavo-Export-Next:
+              description: The cursor of the next volume. Absent on the last.
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                type: object
+                description: "Writavo Import Format v1 (https://writavo.com/schemas/import-v1.json)."
+                additionalProperties: true
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "503": { $ref: "#/components/responses/Maintenance" }
         "500": { $ref: "#/components/responses/InternalError" }
@@ -13650,6 +13723,7 @@ components:
         id: { type: string, format: uuid }
         type: { type: string, description: The content type's API id., examples: ["product"] }
         slug: { type: [string, "null"], description: Unique within the type; singletons have none. }
+        external_id: { type: [string, "null"], pattern: "^[\\x21-\\x7E]{1,255}$", description: "Your own id for the entry (an import's source id, an integration's key); unique on the Site. Re-running an import updates the entry that carries it." }
         title: { type: [string, "null"], description: "The value of the type's `title_field`." }
         status: { type: string, enum: [draft, scheduled, published] }
         data:
@@ -13669,6 +13743,7 @@ components:
       properties:
         data: { type: object, additionalProperties: true }
         slug: { type: [string, "null"], pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$", maxLength: 200 }
+        external_id: { type: [string, "null"], pattern: "^[\\x21-\\x7E]{1,255}$", description: "Your own id for the entry (an import's source id, an integration's key); unique on the Site. Re-running an import updates the entry that carries it." }
         status: { type: string, enum: [draft, published], default: draft }
 
     EntryUpdate:
@@ -13679,6 +13754,7 @@ components:
           additionalProperties: true
           description: Merged key by key; a key set to null clears that field.
         slug: { type: [string, "null"], pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$", maxLength: 200 }
+        external_id: { type: [string, "null"], pattern: "^[\\x21-\\x7E]{1,255}$", description: "Your own id for the entry (an import's source id, an integration's key); unique on the Site. Re-running an import updates the entry that carries it." }
         replace: { type: boolean, default: false, description: Replace `data` whole instead of merging. }
 
     EntryRevision:

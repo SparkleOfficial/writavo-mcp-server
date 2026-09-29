@@ -2,6 +2,8 @@ import type { z } from "zod/v4";
 import {
   AuthorSchema,
   CategorySchema,
+  ContentTypeDefSchema,
+  type ContentTypeDef,
   EngagementDailySchema,
   EngagementReactionSchema,
   type EngagementDaily,
@@ -9,7 +11,9 @@ import {
   IMPORT_FORMAT_NAME,
   IMPORT_FORMAT_VERSION,
   ImportArticleSchema,
+  ImportEntrySchema,
   ImportEnvelopeSchema,
+  type ImportEntry,
   RedirectEntrySchema,
   TagSchema,
   type ImportArticle,
@@ -47,16 +51,78 @@ export interface RedirectsCheck {
   problems: string[];
 }
 
+export interface ContentTypesCheck {
+  types: ContentTypeDef[];
+  /** One line per unusable type, "content_types[1]: ...". The Site's own dry run judges the fields. */
+  problems: string[];
+}
+
+export interface EntriesCheck {
+  rows: ImportEntry[];
+  /** One line per skipped entry, "entries[3]: ...". Never blocks the articles. */
+  problems: string[];
+}
+
 export interface DocumentCheck {
   envelope: ImportEnvelope | null;
   envelopeErrors: string[];
   items: ItemCheck[];
   engagement: EngagementCheck;
   redirects: RedirectsCheck;
+  contentTypes: ContentTypesCheck;
+  entries: EntriesCheck;
 }
 
 const NO_ENGAGEMENT: EngagementCheck = { daily: [], reactions: [], problems: [] };
 const NO_REDIRECTS: RedirectsCheck = { rows: [], problems: [] };
+const NO_TYPES: ContentTypesCheck = { types: [], problems: [] };
+const NO_ENTRIES: EntriesCheck = { rows: [], problems: [] };
+
+/** The content_types section: each must name itself; the fields are the Site's to judge (a dry run
+ *  of POST /content-types/apply), so they are not second-guessed here. */
+export function checkContentTypes(raw: unknown[] | undefined): ContentTypesCheck {
+  if (!raw) return NO_TYPES;
+  const out: ContentTypesCheck = { types: [], problems: [] };
+  const seen = new Set<string>();
+  raw.forEach((row, i) => {
+    const parsed = ContentTypeDefSchema.safeParse(row);
+    if (!parsed.success) {
+      out.problems.push(`content_types[${i}]: ${parsed.error.issues.map((x) => describeIssue(x)).join("; ")}`);
+      return;
+    }
+    if (seen.has(parsed.data.api_id)) return void out.problems.push(`content_types[${i}]: "${parsed.data.api_id}" appears more than once`);
+    seen.add(parsed.data.api_id);
+    // The row as written (fields and all), not the parsed copy: the Site checks every key.
+    out.types.push(row as ContentTypeDef);
+  });
+  return out;
+}
+
+/** The entries section, row by row: a bad entry is reported and skipped. */
+export function checkEntries(raw: unknown[] | undefined, types: ContentTypesCheck, now = Date.now()): EntriesCheck {
+  if (!raw) return NO_ENTRIES;
+  const out: EntriesCheck = { rows: [], problems: [] };
+  const seen = new Set<string>();
+  const componentTypes = new Set(types.types.filter((t) => t.kind === "component" || t.kind === "article_fields").map((t) => t.api_id));
+  raw.forEach((row, i) => {
+    const parsed = ImportEntrySchema.safeParse(row);
+    if (!parsed.success) {
+      out.problems.push(`entries[${i}]: ${parsed.error.issues.map((x) => describeIssue(x)).join("; ")}`);
+      return;
+    }
+    const e = parsed.data;
+    if (seen.has(e.external_id)) return void out.problems.push(`entries[${i}]: external_id "${e.external_id}" appears more than once`);
+    seen.add(e.external_id);
+    if (componentTypes.has(e.type)) return void out.problems.push(`entries[${i}]: "${e.type}" is a ${types.types.find((t) => t.api_id === e.type)!.kind} type, which has no entries`);
+    if (e.status === "scheduled" && e.scheduled_at && Date.parse(e.scheduled_at) <= now) {
+      out.problems.push(`entries[${i}]: scheduled_at ${e.scheduled_at} has passed, so ${e.external_id} is imported as a draft`);
+      out.rows.push({ ...e, status: "draft", scheduled_at: undefined });
+      return;
+    }
+    out.rows.push(e);
+  });
+  return out;
+}
 
 /** The optional redirects section, row by row: a bad row is reported and skipped. */
 export function checkRedirects(raw: unknown[] | undefined): RedirectsCheck {
@@ -145,7 +211,7 @@ export function itemLabel(item: Pick<ItemCheck, "index" | "externalId">): string
 function salvageEnvelope(value: unknown): ImportEnvelope | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const raw = value as Record<string, unknown>;
-  if (!Array.isArray(raw.articles) || raw.articles.length === 0) return null;
+  if (!Array.isArray(raw.articles)) return null;
   const keep = <T>(entries: unknown, schema: z.ZodType<T>): T[] | undefined =>
     Array.isArray(entries)
       ? entries.flatMap((entry) => {
@@ -163,6 +229,8 @@ function salvageEnvelope(value: unknown): ImportEnvelope | null {
       ? { engagement: raw.engagement as { daily?: unknown[]; reactions?: unknown[] } }
       : {}),
     ...(Array.isArray(raw.redirects) ? { redirects: raw.redirects as unknown[] } : {}),
+    ...(Array.isArray(raw.content_types) ? { content_types: raw.content_types as unknown[] } : {}),
+    ...(Array.isArray(raw.entries) ? { entries: raw.entries as unknown[] } : {}),
     articles: raw.articles,
   };
 }
@@ -183,8 +251,14 @@ export function checkDocument(value: unknown, now = Date.now()): DocumentCheck {
       items: [],
       engagement: NO_ENGAGEMENT,
       redirects: NO_REDIRECTS,
+      contentTypes: NO_TYPES,
+      entries: NO_ENTRIES,
     };
   }
+  const hasSomething =
+    envelope.articles.length > 0 || (envelope.entries?.length ?? 0) > 0 || (envelope.content_types?.length ?? 0) > 0 ||
+    (envelope.redirects?.length ?? 0) > 0 || (envelope.engagement?.daily?.length ?? 0) + (envelope.engagement?.reactions?.length ?? 0) > 0;
+  if (!hasSomething) envelopeErrors.push("The document has nothing to import: no articles, entries, content types, redirects or engagement.");
 
   const duplicates = (values: string[], what: string) => {
     const seen = new Set<string>();
@@ -208,6 +282,7 @@ export function checkDocument(value: unknown, now = Date.now()): DocumentCheck {
   const seenExternalIds = new Map<string, number>();
   const seenSlugs = new Map<string, number>();
 
+  const contentTypes = checkContentTypes(envelope.content_types);
   const items: ItemCheck[] = envelope.articles.map((raw, index) => {
     const externalId =
       raw && typeof raw === "object" && typeof (raw as Record<string, unknown>).external_id === "string"
@@ -285,5 +360,7 @@ export function checkDocument(value: unknown, now = Date.now()): DocumentCheck {
     items,
     engagement: checkEngagement(envelope.engagement, now),
     redirects: checkRedirects(envelope.redirects),
+    contentTypes,
+    entries: checkEntries(envelope.entries, contentTypes, now),
   };
 }

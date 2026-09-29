@@ -504,6 +504,10 @@ async function main(): Promise<void> {
     // POST /redirects/bulk (0127), SET on the old URL; to_external_id must name a Site article.
     redirects: new Map<string, Row>(),
     redirectCalls: 0,
+    // 0136: content types (by api_id) and entries, as writavo-api-content answers.
+    contentTypes: new Map<string, Row>(),
+    entries: [] as Row[],
+    entryCreates: 0,
   };
   const ok = (data: unknown, status = 200) => ({ status, body: { ok: true, data } });
   const fail = (status: number, code: string, message: string) => ({ status, body: { ok: false, error: { code, message } } });
@@ -638,6 +642,42 @@ async function main(): Promise<void> {
       row.cost_history = body.entries;
       const total = ((body.entries ?? []) as Row[]).reduce((n, e) => n + Number(e.cost_usd), 0);
       return ok({ article_id: row.id, imported_total_usd: total, entries: body.entries, problems: [] });
+    }
+    if (path === "/content-types/apply" && req.method === "POST") {
+      const types = (body.types ?? []) as Row[];
+      const plan = {
+        create: types.filter((t) => !site.contentTypes.has(String(t.api_id))).map((t) => t.api_id),
+        update: [], delete: [],
+        unchanged: types.filter((t) => site.contentTypes.has(String(t.api_id))).map((t) => t.api_id),
+      };
+      if (!body.dry_run) for (const t of types) site.contentTypes.set(String(t.api_id), { ...t, kind: t.kind ?? "collection" });
+      return ok({ dry_run: !!body.dry_run, ok: true, plan, errors: [] });
+    }
+    if (path === "/content-types" && req.method === "GET") return ok({ items: [...site.contentTypes.values()] });
+    const ent = /^\/entries\/([a-z][a-z0-9_]*)(?:\/([^/]+))?(\/publish|\/schedule|\/schedule-unpublish)?$/.exec(path);
+    if (ent) {
+      const [, type, id, verb] = ent;
+      if (!site.contentTypes.has(type!)) return fail(404, "NOT_FOUND", "No such object.");
+      if (!id && req.method === "GET") {
+        const items = site.entries.filter((e) => e.type === type && (!q.get("external_id") || e.external_id === q.get("external_id")));
+        return ok({ items, next_cursor: null });
+      }
+      if (!id && req.method === "POST") {
+        site.entryCreates += 1;
+        const row = { id: randomUUID(), type, status: "draft", external_id: body.external_id ?? null, slug: body.slug ?? null, data: body.data ?? {} };
+        site.entries.push(row);
+        return ok(row, 201);
+      }
+      const row = site.entries.find((e) => e.id === id && e.type === type);
+      if (!row) return fail(404, "NOT_FOUND", "No such object.");
+      if (verb === "/publish") row.status = "published";
+      else if (verb === "/schedule") row.status = "scheduled";
+      else if (verb === "/schedule-unpublish") row.unpublish_at = body.at;
+      else if (req.method === "PATCH") {
+        row.data = body.replace ? body.data : { ...(row.data as Row), ...(body.data as Row) };
+        if ("slug" in body) row.slug = body.slug;
+      }
+      return ok(row);
     }
     return fail(404, "NOT_FOUND", `The stub has no route for ${req.method} ${path}.`);
   };
@@ -1329,6 +1369,67 @@ async function main(): Promise<void> {
     const callsBefore = site.redirectCalls;
     const again = bodyOf(await handleImportContent(CTX, { import_id: redId, dry_run: false, background: false }, store));
     check("running it again sends nothing new (the redirects are already delivered)", again.includes("Import complete") && site.redirectCalls === callsBefore, again.slice(0, 300));
+  }
+
+  // -- 14j. Content types and entries (0136) ------------------------------------------
+  console.log("\n[ 14j. Content types and entries travel, references and media resolved ]");
+  {
+    currentKey = SECRET_KEY;
+    const ref = (type: string, external_id: string) => ({ $ref: { type, external_id } });
+    const doc = {
+      format: "writavo-import",
+      version: 1,
+      content_types: [
+        { api_id: "product", kind: "collection", name: "Product", title_field: "name", fields: [
+          { api_id: "name", name: "Name", type: "text" },
+          { api_id: "related", name: "Related", type: "reference", to: ["product", "article"], list: true },
+          { api_id: "photo", name: "Photo", type: "media" },
+        ] },
+        { api_id: "article", kind: "article_fields", name: "Article fields", fields: [{ api_id: "featured", name: "Featured", type: "reference", to: ["product"] }] },
+      ],
+      articles: [
+        { external_id: "ct:a1", status: "draft", title: "With a product", slug: "with-a-product", content: "x", custom_fields: { featured: ref("product", "ct:p2") } },
+      ],
+      entries: [
+        { external_id: "ct:p1", type: "product", slug: "one", status: "published", data: {
+          name: "One", related: [ref("product", "ct:p2"), ref("article", "ct:a1")], photo: { $media: { url: "https://img.example.test/p1.png", alt: "P1" } } } },
+        { external_id: "ct:p2", type: "product", data: { name: "Two", related: [ref("product", "ct:missing")] } },
+        { external_id: "ct:bad", type: "nope", data: {} },
+      ],
+    };
+    const store = memStore("g:key-content");
+    stub.reset();
+    const dry = bodyOf(await handleImportContent(CTX, { data: doc }, store));
+    const ctId = /imp_[A-Za-z0-9_-]{22}/.exec(dry)?.[0] ?? "";
+    check(
+      "the dry run shows the Site's plan for the content types, the entries by type, the unknown type and the custom fields; it writes nothing",
+      dry.includes("Content types: 2 in the file") && dry.includes("plan: create product, article") &&
+        dry.includes("Entries: 2 (2 product)") && dry.includes('"nope" is not a content type') &&
+        dry.includes("Articles' custom fields: 1 articles") && site.contentTypes.size === 0 && site.entryCreates === 0,
+      dry.slice(dry.indexOf("Content types"), dry.indexOf("Content types") + 900),
+    );
+    const applied = bodyOf(await handleImportContent(CTX, { import_id: ctId, dry_run: false, background: false, confirm: true }, store));
+    const p1 = site.entries.find((e) => e.external_id === "ct:p1");
+    const p2 = site.entries.find((e) => e.external_id === "ct:p2");
+    const a1 = site.articles.find((a) => a.external_id === "ct:a1");
+    const p1data = (p1?.data ?? {}) as Row;
+    check(
+      "the apply creates the types, then the entries, then resolves references (entries and articles) and media into ids, and publishes",
+      applied.includes("Import complete") && applied.includes("Content types: applied") && site.contentTypes.has("product") &&
+        Array.isArray(p1data.related) && (p1data.related as unknown[])[0] === p2?.id && (p1data.related as unknown[])[1] === a1?.id &&
+        typeof p1data.photo === "string" && /^[0-9a-f-]{36}$/.test(String(p1data.photo)) && p1?.status === "published" && p2?.status === "draft",
+      `${applied.slice(0, 1200)}\n${JSON.stringify(site.entries)}`,
+    );
+    check(
+      "a reference to something in neither the document nor the Site is left out and reported; the custom fields point at the entry",
+      applied.includes("product ct:missing is not in this document or on the Site") &&
+        Array.isArray((p2?.data as Row)?.related) && ((p2?.data as Row).related as unknown[]).length === 0 &&
+        (a1?.custom_fields as Row | undefined)?.featured === p2?.id,
+      applied.slice(0, 2000),
+    );
+    const creates = site.entryCreates;
+    const again = bodyOf(await handleImportContent(CTX, { import_id: ctId, dry_run: false, background: false, confirm: true }, store));
+    check("running it again creates nothing new", again.includes("Import complete") && site.entryCreates === creates, again.slice(0, 400));
   }
 
   // -- 14h. Scheduled posts and the SEO overrides (0128) ---------------------------

@@ -234,6 +234,12 @@ const articleFields = {
   og_image: FeaturedImageSchema.nullable()
     .optional()
     .describe("The social-share image, when it differed from the featured image. Copied into the media library like every other image."),
+  custom_fields: z
+    .record(z.string(), z.unknown())
+    .optional()
+    .describe(
+      "Values of the Site's custom article fields (the content type `article`), keyed by field API id. References and media are portable values ($ref, $media), as in entries[].data. Applied after every article and entry exists.",
+    ),
 };
 
 // ---------------------------------------------------------------------------
@@ -356,6 +362,48 @@ export const ScheduledArticleSchema = z.strictObject({
 
 export const ImportArticleSchema = z.discriminatedUnion("status", [PublishedArticleSchema, DraftArticleSchema, ScheduledArticleSchema]);
 
+// ---------------------------------------------------------------------------
+// Content types and entries (API 1.5.0, 0136)
+// ---------------------------------------------------------------------------
+export const API_ID_PATTERN = /^[a-z][a-z0-9_]{0,62}$/;
+
+/** A content type exactly as POST /content-types/apply takes it; the Site's own check (a dry run of
+ *  that call) is the authority on the fields, so they are carried here unparsed. */
+export const ContentTypeDefSchema = z
+  .object({
+    api_id: z.string().regex(API_ID_PATTERN, "must be lower-case letters, digits and _, starting with a letter"),
+    kind: z.enum(["collection", "singleton", "component", "article_fields"]).optional(),
+    name: z.string().min(1).max(80),
+    description: z.string().max(500).nullable().optional(),
+    title_field: z.string().nullable().optional(),
+    fields: z.array(z.record(z.string(), z.unknown())).max(100),
+  })
+  .describe("A content type as GET /content-types returns it and POST /content-types/apply takes it.");
+
+const entryExternalId = z
+  .string()
+  .regex(EXTERNAL_ID_PATTERN, "must be 1 to 255 printable ASCII characters with no spaces")
+  .describe("Your stable id for the entry. Re-running an import updates the entry with this id rather than creating another.");
+
+export const ImportEntrySchema = z
+  .strictObject({
+    external_id: entryExternalId,
+    type: z.string().regex(API_ID_PATTERN, "must be a content type's API id").describe("The content type's API id (in content_types[] or already on the Site)."),
+    slug: slug(LIMITS.slug).nullable().optional(),
+    status: z.enum(["draft", "published", "scheduled"]).optional().describe("draft (the default), published, or scheduled with scheduled_at."),
+    scheduled_at: dateTime.optional().describe("When a scheduled entry goes live. A time already passed imports it as a draft."),
+    unpublish_at: dateTime.optional().describe("When a published entry comes down again (a future time)."),
+    data: z
+      .record(z.string(), z.unknown())
+      .describe(
+        'The values, keyed by field API id. A reference is { "$ref": { "type": "<content type, article or page>", "external_id": "..." } } or { "$ref": { "type": "category" | "tag" | "author", "slug": "..." } }; a media value is { "$media": { "url": "https://...", "alt": "..." } }, copied into the media library. Both become ids on the target Site.',
+      ),
+  })
+  .refine((e) => e.status !== "scheduled" || e.scheduled_at !== undefined, { message: "a scheduled entry needs scheduled_at", path: ["scheduled_at"] });
+
+export type ImportEntry = z.infer<typeof ImportEntrySchema>;
+export type ContentTypeDef = z.infer<typeof ContentTypeDefSchema>;
+
 const documentFields = {
   format: z.literal(IMPORT_FORMAT_NAME),
   version: z.literal(IMPORT_FORMAT_VERSION),
@@ -363,6 +411,14 @@ const documentFields = {
     .strictObject({
       name: z.string().max(200).optional(),
       url: z.string().max(LIMITS.url).optional(),
+      exported_at: z.string().max(40).optional().describe("Written by a Writavo export: when."),
+      export: z
+        .strictObject({
+          part: z.number().int().min(1),
+          next: z.string().max(2000).nullable().describe("The cursor of the next volume (GET /export?cursor=...), or null for the last."),
+        })
+        .optional()
+        .describe("Written by a Writavo export that came in volumes: which one this is."),
     })
     .optional()
     .describe("Informational only."),
@@ -376,12 +432,24 @@ const documentFields = {
     .optional()
     .describe("Old URLs that are not an article's own (category archives, pages, feeds) and where each goes now. An article's own old URLs go in its old_urls."),
   conversion: ConversionSchema.optional(),
+  content_types: z
+    .array(ContentTypeDefSchema)
+    .max(100)
+    .optional()
+    .describe("Content types to create or change on the Site (applied first, like POST /content-types/apply; types the Site has and this list does not name are left alone)."),
+  entries: z
+    .array(ImportEntrySchema)
+    .max(50_000)
+    .optional()
+    .describe("Entries of content types, created or updated after every article; references and media resolved once they all exist."),
 };
 
 export const ImportDocumentSchema = z
   .strictObject({
     ...documentFields,
-    articles: z.array(ImportArticleSchema).min(1).describe("Processed in file order."),
+    articles: z
+      .array(ImportArticleSchema)
+      .describe("Processed in file order. May be empty when the document carries entries or content types."),
   })
   .describe("Writavo Import Format v1: a blog's articles, authors, categories and tags, for import_content.");
 
@@ -395,7 +463,9 @@ export const ImportEnvelopeSchema = z.strictObject({
   // failing the document or the articles.
   engagement: EngagementEnvelopeSchema.optional(),
   redirects: z.array(z.unknown()).max(50_000).optional(),
-  articles: z.array(z.unknown()).min(1),
+  content_types: z.array(z.unknown()).max(100).optional(),
+  entries: z.array(z.unknown()).max(50_000).optional(),
+  articles: z.array(z.unknown()),
 });
 
 export type ImportDocument = z.infer<typeof ImportDocumentSchema>;
@@ -551,6 +621,29 @@ to_external_id names an article. status is 301 (default) or 302. They and every 
 are sent after the articles are imported. A URL on the blog's own domain is answered by Writavo;
 one it never receives (the old blog lived at the site root and the new one is under /blog) is kept
 and listed for the customer's own server (GET /redirects/export).
+
+Content types (optional, top level): the Site's content models, exactly as GET /content-types
+returns them and POST /content-types/apply takes them: [{ api_id, kind?, name, description?,
+title_field?, fields: [...] }]. Applied first; types the Site has and this list does not name are
+left alone, and a type that exists is changed to match. The dry run shows the Site's plan and any
+field the Site refuses.
+
+Entries (optional, top level): entries of the content types, [{ external_id, type, slug?, status?
+(draft, the default | published | scheduled with scheduled_at), unpublish_at?, data }]. data holds
+the values by field API id. A reference is written portably, because an id means nothing on another
+Site: { "$ref": { "type": "<content type, article or page>", "external_id": "..." } } or
+{ "$ref": { "type": "category" | "tag" | "author", "slug": "..." } }. A media value is
+{ "$media": { "url": "https://...", "alt": "..." } }, copied into the media library. Entries are
+written after every article (matched by external_id, new ones created as drafts), then their
+references and media are resolved and their status set. A reference to something neither in the
+document nor on the Site is left out with a warning; importing again later fills it in.
+
+Articles may carry custom_fields: the values of the Site's custom article fields (the content type
+"article"), written the same portable way, and set after every entry exists.
+
+A Writavo export (GET /export) is this format, in volumes of at most about 8 MB: import them in
+order, and run a volume again if its report lists references it could not resolve yet. articles may
+be empty when a document carries entries, content types, redirects or engagement.
 
 Images: inline markdown images ![alt](https://...), featured images, how-to step images and
 author avatars are copied into the Site's media library and the URLs rewritten, unless

@@ -3172,6 +3172,15 @@ export const OPERATIONS: McpOperation[] = [
         "nullable": false
       },
       {
+        "name": "external_id",
+        "in": "query",
+        "required": false,
+        "description": "",
+        "explode": false,
+        "kind": "string",
+        "nullable": false
+      },
+      {
         "name": "order",
         "in": "query",
         "required": false,
@@ -3267,6 +3276,15 @@ export const OPERATIONS: McpOperation[] = [
         "in": "body",
         "required": false,
         "description": "",
+        "explode": false,
+        "kind": "string",
+        "nullable": true
+      },
+      {
+        "name": "external_id",
+        "in": "body",
+        "required": false,
+        "description": "Your own id for the entry (an import's source id, an integration's key); unique on the Site. Re-running an import updates the entry that carries it.",
         "explode": false,
         "kind": "string",
         "nullable": true
@@ -3419,6 +3437,15 @@ export const OPERATIONS: McpOperation[] = [
         "in": "body",
         "required": false,
         "description": "",
+        "explode": false,
+        "kind": "string",
+        "nullable": true
+      },
+      {
+        "name": "external_id",
+        "in": "body",
+        "required": false,
+        "description": "Your own id for the entry (an import's source id, an integration's key); unique on the Site. Re-running an import updates the entry that carries it.",
         "explode": false,
         "kind": "string",
         "nullable": true
@@ -3745,6 +3772,13 @@ export const REFUSALS: McpRefusal[] = [
     "operationId": "cancelImport",
     "method": "POST",
     "path": "/imports/{import_id}/cancel",
+    "tag": "Imports",
+    "reason": "Use import_content instead: it is the same import (the stored document, the dry run, the background run, its status and cancel) with the confirmation step built in, so it is not offered twice."
+  },
+  {
+    "operationId": "exportSite",
+    "method": "GET",
+    "path": "/export",
     "tag": "Imports",
     "reason": "Use import_content instead: it is the same import (the stored document, the dry run, the background run, its status and cancel) with the confirmation step built in, so it is not offered twice."
   },
