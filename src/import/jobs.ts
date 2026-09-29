@@ -12,8 +12,9 @@ import { normaliseProgress, type ImportProgress, type ProgressStore } from "./pr
  * With one, the document arrives ONCE (inline in parts, from an https URL, or uploaded straight to
  * the server with an upload link) and every later call is just { import_id }.
  *
- * A job belongs to the connection (the key) that created it. The store answers for any other
- * connection's id exactly as for an id that never existed.
+ * A job belongs to an owner the host chooses: on the hosted server the Site the sign-in is for
+ * (so a new sign-in, which is a new key, still reaches it), for a raw key that key. The store
+ * answers for any other owner's id exactly as for an id that never existed.
  */
 
 /** A stored document's ceiling. The Worker holds it, parsed, in memory for the length of a call. */

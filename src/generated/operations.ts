@@ -4484,6 +4484,63 @@ export const ACTIONS: McpOperation[] = [
     }
   },
   {
+    "tool": "set_article_cost_history_bulk",
+    "operationId": "setArticleCostHistoryBulk",
+    "method": "POST",
+    "path": "/articles/cost-history",
+    "tag": "Articles",
+    "surface": "action",
+    "area": "articles",
+    "summary": "Set the imported cost history of many articles",
+    "brief": "`setArticleCostHistory` for up to 100 articles in one call, so a migrated blog whose articles are already live backfills what they cost without one request per article.",
+    "description": "Set the imported cost history of many articles. `setArticleCostHistory` for up to 100 articles in one call, so a migrated blog whose articles are already live backfills what they cost without one request per article. Each item names ONE article of this Site by `external_id` (what an import sets), or by `slug` or `id`, and carries the same `entries` as the single route. Changes content on the customer's Site. Nothing becomes public: publishing is always a separate call. Needs a secret key (wv_sk_) carrying the articles:write scope.",
+    "scope": "articles:write",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": false,
+    "spendsCredits": false,
+    "spendsMoney": false,
+    "consequence": null,
+    "makesPublic": false,
+    "readOnly": false,
+    "confirm": false,
+    "confirmReason": null,
+    "idempotency": true,
+    "ifMatch": false,
+    "params": [
+      {
+        "name": "dry_run",
+        "in": "body",
+        "required": false,
+        "description": "Resolve and check everything, write nothing.",
+        "explode": false,
+        "kind": "boolean",
+        "nullable": false
+      },
+      {
+        "name": "items",
+        "in": "body",
+        "required": true,
+        "description": "",
+        "explode": false,
+        "kind": "array",
+        "nullable": false,
+        "itemKind": "object"
+      }
+    ],
+    "approval": null,
+    "approvalMode": null,
+    "approvalKind": null,
+    "approvalWhen": null,
+    "annotations": {
+      "title": "Set the imported cost history of many articles",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
     "tool": "set_article_cost_history",
     "operationId": "setArticleCostHistory",
     "method": "POST",

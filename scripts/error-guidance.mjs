@@ -23,7 +23,7 @@ export const ERROR_GUIDANCE = {
   API_KEY_EXPIRED:
     "The key passed its `expires_at`. Create a replacement. If you did not expect an expiry, check whether the key was created with one.",
   INSUFFICIENT_SCOPE:
-    "Either the key lacks the scope, or its creator's permissions no longer cover it. Check `GET /ping` for the scopes the key carries now, then check the creator still has the matching dashboard permission. It never means the object belongs to someone else. For an AI agent, the message names the permission row (for example \"SEO and outreach\" or \"Team and organisation\") the person must set to Read or Read and write when they connect the assistant again; tell them that, and do not retry until they have.",
+    "Either the key lacks the scope, or its creator's permissions no longer cover it. Check `GET /ping` for the scopes the key carries now, then check the creator still has the matching dashboard permission. It never means the object belongs to someone else. For an AI agent, tell the person which permission row (for example \"Articles\" or \"Team and organisation\") needs Read or Read and write. They can add it to the SAME connection in Settings > AI agents (Permissions on that connection, or the Add button when a new permission is offered) or in Settings > API keys (Scopes on that key), with no new sign-in: the assistant stays signed in and may need to refresh its tools. Do not retry until they have.",
   NOT_ENTITLED:
     "Your plan does not include this capability. Upgrading is the only fix; topping up credits will not help. This is answered before the credit check, so it tells you nothing about your balance.",
   INSUFFICIENT_CREDITS:

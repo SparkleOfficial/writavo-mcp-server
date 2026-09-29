@@ -1,5 +1,6 @@
 import { WritavoApiError, type ApprovalInfo } from "./api/client.js";
 import { ERRORS_BY_CODE } from "./generated/errors.js";
+import { SCOPE_SCREEN } from "./generated/scopes.js";
 import { AGENTS_URL, BILLING_URL, KEYS_URL } from "./core/constants.js";
 import { redact } from "./core/redact.js";
 
@@ -80,6 +81,15 @@ export function formatApiError(err: unknown, ctx: ErrorContext): ToolResult {
         ? `This needs the scopes ${ctx.scope}. Add them to the key, or use a key that carries them.`
         : `The missing scope is ${ctx.scope}. Add it to the key, or use a key that carries it.`,
     );
+    // An assistant connected by sign-in (this server) does not need to sign in again: the person
+    // adds the permission to the same connection, so tell them where, with the row's name.
+    const rows = ctx.scope.split(" and ").map((s) => SCOPE_SCREEN[s.trim()]).filter((r): r is string => Boolean(r));
+    if (rows.length > 0) {
+      lines.push(
+        `On the sign-in screen this is: ${rows.join("; ")}.`,
+        `A person can add it to this connection without signing in again: Settings > AI agents (${AGENTS_URL}), Permissions on this connection, or Settings > API keys, Scopes on this key. The assistant stays signed in; it may need to refresh its tools.`,
+      );
+    }
   }
   if (err.code === "NOT_ENTITLED" && ctx.entitlement && ctx.entitlement !== "none") {
     lines.push("", `The plan feature this needs is ${ctx.entitlement}. Upgrade at ${BILLING_URL}.`);

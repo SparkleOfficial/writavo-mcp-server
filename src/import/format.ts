@@ -671,3 +671,84 @@ export function importFormatDocument(): string {
     "```",
   ].join("\n");
 }
+
+/**
+ * The sections import_content can return on its own (its `section` argument). The default,
+ * "guide", is the guide and a sample: about 12 KB, where the whole document with the JSON Schema
+ * is over 100 KB and overflows some MCP clients' response limits. A section is the guide's
+ * paragraph for it (when there is one) plus that part of the JSON Schema.
+ */
+export const IMPORT_FORMAT_SECTIONS = [
+  "guide",
+  "sample",
+  "schema",
+  "authors",
+  "categories",
+  "tags",
+  "articles",
+  "cost_history",
+  "engagement",
+  "redirects",
+  "content_types",
+  "entries",
+] as const;
+export type ImportFormatSection = (typeof IMPORT_FORMAT_SECTIONS)[number];
+
+/** The blank-line-separated paragraph of the guide that starts with `heading`, and what follows it that is indented. */
+function guideParagraph(heading: string): string | null {
+  const blocks = IMPORT_FORMAT_GUIDE.split(/\n\s*\n/);
+  const at = blocks.findIndex((b) => b.trimStart().startsWith(heading));
+  return at === -1 ? null : blocks[at]!.trimEnd();
+}
+
+const GUIDE_PARAGRAPH: Partial<Record<ImportFormatSection, string>> = {
+  engagement: "Engagement (optional, top level)",
+  redirects: "Redirects (optional, top level)",
+  content_types: "Content types (optional, top level)",
+  entries: "Entries (optional, top level)",
+};
+
+function jsonBlock(value: unknown): string[] {
+  return ["```json", JSON.stringify(value, null, 2), "```"];
+}
+
+/** What `import_content` returns with no document: short by default, one part on request. */
+export function importFormatSection(section: ImportFormatSection = "guide"): string {
+  const schema = importFormatJsonSchema() as { properties?: Record<string, unknown> };
+  const others = IMPORT_FORMAT_SECTIONS.filter((s) => s !== section);
+  const more = `\nOther sections (call import_content with section: "<name>", no document): ${others.join(", ")}. The whole JSON Schema is section "schema", or at ${IMPORT_FORMAT_SCHEMA_ID}.`;
+  switch (section) {
+    case "guide":
+      return [IMPORT_FORMAT_GUIDE, "## Sample document", "", ...jsonBlock(IMPORT_SAMPLE), more].join("\n");
+    case "sample":
+      return ["## Sample document", "", ...jsonBlock(IMPORT_SAMPLE), more].join("\n");
+    case "schema":
+      return ["## JSON Schema", "", ...jsonBlock(importFormatJsonSchema())].join("\n");
+    case "cost_history": {
+      const articles = schema.properties?.["articles"] as { items?: { anyOf?: { properties?: Record<string, unknown> }[] } } | undefined;
+      const fragment = articles?.items?.anyOf?.map((a) => a.properties?.["cost_history"]).find((x) => x !== undefined);
+      const bullet = IMPORT_FORMAT_GUIDE.split(/\n(?=  - )/).find((b) => b.trimStart().startsWith("- cost_history"));
+      return [
+        "## cost_history (on each article)",
+        "",
+        bullet?.trimEnd() ?? "",
+        "",
+        "It is sent while the article is written and, for an article that is already live when publish is false, on its own after the articles (cost history never appears on the public blog, so it is written either way).",
+        "",
+        ...(fragment ? ["JSON Schema of the field:", ...jsonBlock(fragment)] : []),
+        more,
+      ].join("\n");
+    }
+    default: {
+      const paragraph = GUIDE_PARAGRAPH[section] ? guideParagraph(GUIDE_PARAGRAPH[section]!) : null;
+      const fragment = schema.properties?.[section];
+      return [
+        `## ${section}`,
+        "",
+        ...(paragraph ? [paragraph, ""] : []),
+        ...(fragment ? ["JSON Schema of the section:", ...jsonBlock(fragment)] : ["No JSON Schema for this section."]),
+        more,
+      ].join("\n");
+    }
+  }
+}

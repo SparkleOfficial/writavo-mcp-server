@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { hasKey, keyKindOf, forTool, type ToolContext } from "../core/context.js";
 import { publishableKeyRefusal, text, toolError, type ToolResult } from "../errors.js";
-import { importFormatDocument } from "../import/format.js";
+import { IMPORT_FORMAT_SECTIONS, importFormatSection, type ImportFormatSection } from "../import/format.js";
 import { runImport, type ImportBudget, type ImportSource } from "../import/engine.js";
 import { convertWxr, looksLikeWxr, MAX_WXR_BYTES } from "../import/wordpress/index.js";
 import {
@@ -68,7 +68,7 @@ function description(can: Capabilities): string {
       : "Runs as a dry run by default, which checks the whole document against the Site, reports every problem in one pass, and writes nothing. An apply imports as much as fits in one call (about 20 seconds) and says what is left.",
     "Articles are matched by external_id, so running it again updates rather than duplicates. It never deletes or unpublishes anything.",
     "Applying with publish true makes articles publicly visible on the customer's own live site, so it needs confirm: true, which you pass only after the user has agreed.",
-    "Call it with no document to get the format's JSON Schema and a sample.",
+    "Call it with no document to get the format's guide and a sample (short); pass section (schema, engagement, cost_history, redirects, content_types, entries, articles...) for the JSON Schema or one part of the format.",
     "Needs a secret key (wv_sk_) with articles, taxonomy, authors and media write scopes.",
   ].join(" ");
 }
@@ -80,7 +80,7 @@ function inputSchema(can: Capabilities): Record<string, z.ZodTypeAny> {
       .union([z.record(z.unknown()), z.string()])
       .optional()
       .describe(
-        `The import document itself, as a JSON object (or its JSON text): { "format": "writavo-import", "version": 1, "articles": [...] }. At most ${MAX_INLINE_ARTICLES} articles and ${INLINE_LIMIT} per call; anything bigger goes by upload: true or url.${can.jobs ? " With import_id, it is added to that import: authors merge on ref, categories and tags on slug, articles on external_id, and an entry with the same key replaces the stored one." : ""} ${oneOf} Omit every document argument to get the format description, JSON Schema and a sample instead.`.trim(),
+        `The import document itself, as a JSON object (or its JSON text): { "format": "writavo-import", "version": 1, "articles": [...] }. At most ${MAX_INLINE_ARTICLES} articles and ${INLINE_LIMIT} per call; anything bigger goes by upload: true or url.${can.jobs ? " With import_id, it is added to that import: authors merge on ref, categories and tags on slug, articles on external_id, and an entry with the same key replaces the stored one." : ""} ${oneOf} Omit every document argument to get the format guide and a sample instead (section picks another part).`.trim(),
       ),
     ...(can.jobs
       ? {
@@ -104,7 +104,7 @@ function inputSchema(can: Capabilities): Record<string, z.ZodTypeAny> {
           import_id: z
             .string()
             .optional()
-            .describe(`The import_id a previous call returned (imp_...). Alone, it dry-runs or continues that import from where it stopped. Stored imports are kept ${JOB_TTL_DAYS} days after their last use, for this connection only.`),
+            .describe(`The import_id a previous call returned (imp_...). Alone, it dry-runs or continues that import from where it stopped. Stored imports are kept ${JOB_TTL_DAYS} days after their last use, for the Site this connection is signed in to (signing in again keeps them).`),
         }
       : {}),
     ...(can.background
@@ -117,6 +117,10 @@ function inputSchema(can: Capabilities): Record<string, z.ZodTypeAny> {
           cancel: z.boolean().optional().describe("With import_id: stop a background import after its current batch. What is already imported stays."),
         }
       : {}),
+    section: z
+      .enum(IMPORT_FORMAT_SECTIONS)
+      .optional()
+      .describe("With no document: which part of the format to return. Defaults to guide (the format guide and a sample, about 12 KB). schema is the whole JSON Schema (about 90 KB); the others (engagement, cost_history, redirects, content_types, entries, authors, categories, tags, articles) are that part of it with its guide text."),
     dry_run: z
       .boolean()
       .optional()
@@ -238,7 +242,7 @@ function inlineSource(data: unknown): ImportSource | ToolResult {
 }
 
 const NO_SUCH_IMPORT = (id: string) =>
-  `There is no import ${id} for this connection. Imports are kept ${JOB_TTL_DAYS} days after their last use, and only the connection that started one can use it. Send the document again without import_id to start a new import; articles already imported are found again by external_id, so nothing is duplicated.`;
+  `There is no import ${id} for this connection. Imports are kept ${JOB_TTL_DAYS} days after their last use, and belong to the Site the connection is signed in to (an import started before that rule, or on another Site or with a raw API key, cannot be used here). Send the document again without import_id to start a new import; articles already imported are found again by external_id, so nothing is duplicated.`;
 
 /**
  * The hosted path: turn the call's document argument (if any) into a stored import, merged into
@@ -430,6 +434,7 @@ export async function handleImportContent(
     background?: boolean;
     status?: boolean;
     cancel?: boolean;
+    section?: string;
     wordpress_url?: string;
     wordpress_username?: string;
     wordpress_application_password?: string;
@@ -442,7 +447,7 @@ export async function handleImportContent(
   const hasWp = jobs !== null && typeof args.wordpress_url === "string" && args.wordpress_url.length > 0;
   const hasId = jobs !== null && typeof args.import_id === "string" && args.import_id.length > 0;
   const given = [hasData, hasUrl, wantsUpload, hasWp].filter(Boolean).length;
-  if (given === 0 && !hasId) return text(importFormatDocument());
+  if (given === 0 && !hasId) return text(importFormatSection(args.section as ImportFormatSection | undefined));
   if (given > 1) return toolError("import_content takes one of data, url, upload or wordpress_url per call, not several.");
   if (hasWp && Boolean(args.wordpress_username) !== Boolean(args.wordpress_application_password)) {
     return toolError("Give wordpress_username and wordpress_application_password together, or neither (published posts only).");

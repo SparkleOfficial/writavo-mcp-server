@@ -1323,6 +1323,125 @@ paths:
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/InternalError" }
 
+  /articles/cost-history:
+    post:
+      operationId: setArticleCostHistoryBulk
+      tags: [Articles]
+      summary: Set the imported cost history of many articles
+      description: |
+        `setArticleCostHistory` for up to 100 articles in one call, so a migrated blog whose
+        articles are already live backfills what they cost without one request per article. Each
+        item names ONE article of this Site by `external_id` (what an import sets), or by `slug`
+        or `id`, and carries the same `entries` as the single route.
+
+        Per article it behaves exactly like the single route: the entries REPLACE that article's
+        imported history (sending the same call again changes nothing, an empty list clears it),
+        each entry is checked on its own, and it is history for display only, never billed or
+        counted against a spend cap or credits.
+
+        An item that matches no article of this Site is reported `not_found` and the others are
+        still written; an item that is malformed, or names an article an earlier item in the call
+        already names, is `invalid`. `dry_run: true` resolves every item and checks every entry
+        and writes nothing. Read one article's result back with `GET /insights/articles/{id}/costs`.
+      x-scope: articles:write
+      x-permission: articles.write
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-cross-tenant: 404
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyRequired"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [items]
+              additionalProperties: false
+              properties:
+                dry_run: { type: boolean, default: false, description: "Resolve and check everything, write nothing." }
+                items:
+                  type: array
+                  minItems: 1
+                  maxItems: 100
+                  items:
+                    type: object
+                    required: [entries]
+                    additionalProperties: false
+                    description: Name the article with exactly one of `external_id`, `slug` or `id`.
+                    properties:
+                      external_id: { type: string, description: "The id the article was imported with." }
+                      slug: { type: string }
+                      id: { type: string, format: uuid }
+                      entries:
+                        type: array
+                        maxItems: 500
+                        items:
+                          type: object
+                          required: [cost_usd]
+                          additionalProperties: false
+                          properties:
+                            cost_usd: { type: number, minimum: 0, maximum: 100000, description: "What it cost, in US dollars." }
+                            stage: { type: string, maxLength: 60, description: "What it paid for: research, generate, images..." }
+                            provider: { type: string, maxLength: 60, description: "Who was paid: openai, dataforseo..." }
+                            calls: { type: integer, minimum: 0 }
+                            tokens: { type: integer, minimum: 0 }
+                            occurred_on: { type: string, format: date, description: "Not in the future; not before 1990." }
+                            description: { type: string, maxLength: 500 }
+            examples:
+              backfill:
+                value:
+                  items:
+                    - { external_id: "blogify-1041", entries: [ { stage: generate, provider: openai, cost_usd: 0.0421, occurred_on: "2026-05-10" } ] }
+                    - { external_id: "blogify-1042", entries: [ { stage: images, provider: replicate, cost_usd: 0.06, calls: 3 } ] }
+      responses:
+        "200":
+          description: What happened to each item, in the order sent.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [dry_run, written, not_found, invalid, results]
+                        properties:
+                          dry_run: { type: boolean }
+                          written: { type: integer, description: "Articles written (or, in a dry run, that would be)." }
+                          not_found: { type: integer }
+                          invalid: { type: integer }
+                          results:
+                            type: array
+                            items:
+                              type: object
+                              required: [index, status]
+                              properties:
+                                index: { type: integer, description: "The item's position in `items`." }
+                                status: { type: string, enum: [written, would_write, not_found, invalid] }
+                                article_id: { type: string, format: uuid }
+                                entries: { type: integer, description: "How many entries the article now holds." }
+                                imported_total_usd: { type: number }
+                                error: { type: string, description: "Why the item was not_found or invalid." }
+                                problems:
+                                  type: array
+                                  description: Entries that were skipped, by their position in the item's `entries`.
+                                  items:
+                                    type: object
+                                    properties:
+                                      index: { type: integer }
+                                      error: { type: string }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
   /articles/{id}/cost-history:
     parameters:
       - $ref: "#/components/parameters/ArticleId"

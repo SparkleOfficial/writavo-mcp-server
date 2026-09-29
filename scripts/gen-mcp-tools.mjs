@@ -26,7 +26,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, relative } from "node:path";
 import { parse } from "yaml";
-import { ACTION_TAGS, LOCAL_TOOLS, NEVER_ACTIONS, areaOf, buildMcpSurface } from "./mcp-surface.mjs";
+import { ACTION_TAGS, LOCAL_TOOLS, NEVER_ACTIONS, areaOf, SCOPE_SCREEN, buildMcpSurface } from "./mcp-surface.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -355,6 +355,14 @@ export const ERROR_CATALOG: ErrorEntry[] = ${json(errorCatalog)};
 export const ERRORS_BY_CODE: Record<string, ErrorEntry> = Object.fromEntries(
   ERROR_CATALOG.map((entry) => [entry.code, entry]),
 );
+`,
+
+  "scopes.ts": `${BANNER(null)}
+/**
+ * Where a person grants each scope on the sign-in screen (one row per area, set to No access,
+ * Read or Read and write). For messages that tell someone what to change; not an authorisation.
+ */
+export const SCOPE_SCREEN: Record<string, string> = ${json(SCOPE_SCREEN)};
 `,
 
   "reference.ts": `${BANNER("scripts/error-guidance.mjs")}

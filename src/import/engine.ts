@@ -3,6 +3,7 @@ import { WritavoApiError } from "../api/client.js";
 import { MediaError, fetchImage, uploadImage } from "../api/media.js";
 import { newApiStats, type ApiStats, type ToolContext } from "../core/context.js";
 import { formatApiError, text, toolError, type ToolResult } from "../errors.js";
+import { SCOPE_SCREEN } from "../generated/scopes.js";
 import { howtoSteps, type CostEntry, type ImportArticle, type ImportAuthor, type ImportEntry, type ImportEnvelope, type ImportTerm } from "./format.js";
 import { articleImages, htmlImageCount, isHttps, rewriteMarkdownImages } from "./images.js";
 import { newProgress, type ImportProgress, type ProgressItem, type ProgressStore } from "./progress.js";
@@ -500,7 +501,7 @@ async function dryRun(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
   }
 
   const mayTouchLive = opts.publish;
-  const counts = { create: 0, update: 0, done: 0, unchangedLive: 0, publish: 0, schedule: 0, blocked: 0 };
+  const counts = { create: 0, update: 0, done: 0, unchangedLive: 0, costOnLive: 0, publish: 0, schedule: 0, blocked: 0 };
   const warnings: string[] = [];
   const pending: ValidItem[] = [];
 
@@ -508,6 +509,14 @@ async function dryRun(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
     const { article } = item;
     const label = itemLabel(item.check);
     for (const w of item.check.warnings) warnings.push(`- ${label}: ${w}`);
+    // Cost history is not public content, so it is written for an article that is live and left
+    // unchanged too (publish false): counted whether or not the article itself is settled.
+    if (!opts.publish && article.cost_history !== undefined && byExternalId.get(article.external_id)?.status === "published") {
+      const entry = progress.items[article.external_id];
+      const p = progress.cost_history?.[article.external_id];
+      const sentBefore = entry && entry.hash === item.hash && entry.outcome === "done";
+      if (!sentBefore && !(p && p.done && p.hash === costHash(article.cost_history))) counts.costOnLive += 1;
+    }
     if (isSettled(progress.items[article.external_id], item, opts, mayTouchLive)) {
       counts.done += 1;
       continue;
@@ -621,6 +630,9 @@ async function dryRun(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
     `- update: ${counts.update} (already on the Site with the same external_id)`,
     ...(counts.done ? [`- already done by an earlier run: ${counts.done}`] : []),
     ...(counts.unchangedLive ? [`- left unchanged because they are live and publish is false: ${counts.unchangedLive}`] : []),
+    ...(counts.costOnLive
+      ? [`- cost history to write on live articles: ${counts.costOnLive} (publish is false, so their content stays as it is; cost history is never shown publicly, so it is written anyway)`]
+      : []),
     `- blocked by a problem below: ${counts.blocked}`,
     opts.publish
       ? `- to publish with their original dates: ${counts.publish}`
@@ -647,6 +659,25 @@ async function dryRun(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
   lines.push(...redirectsDryRun(ctx));
   lines.push(...engagementDryRun(ctx, byExternalId, bySlug));
 
+  // What the apply will still write beyond articles, and the permissions all of it needs.
+  const otherWork: string[] = [];
+  if (counts.costOnLive) otherWork.push(`cost history on ${plural(counts.costOnLive, "live article")}`);
+  if (engagementPending(ctx)) otherWork.push("the engagement history");
+  if (redirectsPending(ctx)) otherWork.push("redirects");
+  if (contentTypesPending(ctx)) otherWork.push("content types");
+  if (entriesPending(ctx)) otherWork.push("entries");
+  const needs = new Map<string, string>();
+  if (pending.length > 0) needs.set("articles:write", "writing articles");
+  else if (counts.costOnLive) needs.set("articles:write", "cost history");
+  else if (redirectsPending(ctx)) needs.set("articles:write", "redirects");
+  if (categoriesToCreate.length + tagsToCreate.length > 0) needs.set("taxonomy:write", "creating categories and tags");
+  if (authorsToCreate.length + authorsToFill.length > 0) needs.set("authors:write", "creating and filling in authors");
+  if (opts.rehostImages && toCopy.size > 0) needs.set("media:write", "copying images into the media library");
+  if (engagementPending(ctx)) needs.set("engagement:write", "the engagement history");
+  if (contentTypesPending(ctx)) needs.set("content_types:write", "content types");
+  if (entriesPending(ctx)) needs.set("entries:write", "entries");
+  const missingScopes = await scopeReport(ctx, needs, lines);
+
   const topLevel = ctx.envelopeErrors;
   if (topLevel.length > 0) {
     lines.push(
@@ -672,11 +703,30 @@ async function dryRun(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
     return text(lines.join("\n"));
   }
   if (pending.length === 0) {
-    lines.push(invalid.length > 0 ? "Nothing else to import. Fix the problems above and run the dry run again." : "Nothing to import: everything in the document is already on the Site.");
+    if (invalid.length > 0) {
+      lines.push("No article is left to import. Fix the problems above and run the dry run again.");
+    } else if (otherWork.length === 0) {
+      lines.push("Nothing to import: everything in the document is already on the Site.");
+    } else {
+      lines.push(`No article needs writing, but this import still has work to do: ${otherWork.join(", ")}.`);
+    }
+    if (otherWork.length > 0) {
+      lines.push(
+        ...(missingScopes.length ? [`Grant ${missingScopes.join(", ")} first (see above); without it that part is reported and skipped.`] : []),
+        "To apply, call:",
+        nextCall(ctx.source, opts, {}),
+        ctx.source.store
+          ? "Then call it again with the same arguments until it reports the import is complete."
+          : "If a call stops before the end, it says what is left.",
+      );
+    }
   } else {
     const needsConfirm = opts.publish && pending.some((p) => lifecycleOf(p.article, opts) !== null);
     if (invalid.length > 0) {
       lines.push("Fix the problems above in the document and run the dry run again. Or apply now: the articles with problems are skipped and reported, and everything else is imported.");
+    }
+    if (missingScopes.length) {
+      lines.push(`Grant ${missingScopes.join(", ")} first (see above), or apply anyway: what this connection may do is imported and the rest is reported as refused.`);
     }
     lines.push(
       needsConfirm
@@ -689,6 +739,36 @@ async function dryRun(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
     );
   }
   return text(lines.join("\n"));
+}
+
+/**
+ * The permissions the apply will need, against what this connection carries (GET /ping). Pushes
+ * its lines onto `lines` and returns the scopes that are missing. A connection that cannot be
+ * read is reported as unchecked, never as fine.
+ */
+async function scopeReport(ctx: Loaded, needs: Map<string, string>, lines: string[]): Promise<string[]> {
+  if (needs.size === 0) return [];
+  const list = [...needs].map(([scope, why]) => `${scope} (${why})`).join(", ");
+  let carried: string[];
+  try {
+    const res = await call<{ scopes?: string[] }>(ctx.api, { method: "GET", path: "/ping" });
+    carried = res.data?.scopes ?? [];
+  } catch (err) {
+    lines.push("", `Permissions this import needs: ${list}. This connection's permissions could not be read (${apiProblem(err)}), so they were not checked.`);
+    return [];
+  }
+  const missing = [...needs.keys()].filter((scope) => !carried.includes(scope));
+  lines.push("", `Permissions this import needs: ${list}.`);
+  if (missing.length === 0) {
+    lines.push("This connection has all of them.");
+    return [];
+  }
+  lines.push(
+    `MISSING on this connection: ${missing.join(", ")}. That part will be refused until it is granted.`,
+    ...missing.map((scope) => `- ${scope}: on the sign-in screen, ${SCOPE_SCREEN[scope] ?? "ask the person who owns the Site"}.`),
+    "To grant it without signing in again, the person opens Settings > AI agents (https://app.writavo.com/settings/agents), finds this connection and adds the permission (Permissions, or the Add button), then runs the dry run again. Or they reconnect Writavo in this AI client and set those rows on the sign-in screen. verify_api_key lists what the connection carries.",
+  );
+  return missing;
 }
 
 // ---------------------------------------------------------------------------
@@ -1534,6 +1614,114 @@ async function sendCostHistory(state: ApplyState, articleId: string, entries: Co
   }
 }
 
+// ---------------------------------------------------------------------------
+// Cost history of live articles left unchanged (publish false)
+// ---------------------------------------------------------------------------
+/** Items per call to POST /articles/cost-history (the API takes 100). */
+const COST_BULK_CHUNK = 100;
+
+function costHash(entries: CostEntry[]): string {
+  return sha256(JSON.stringify(entries));
+}
+
+/**
+ * Articles whose content was left alone because they are live and publish is false, and whose
+ * cost history has not been written yet. The cost history never appears on the public blog, so it
+ * is not part of the "do not touch live content" promise: it is sent for them on its own, after
+ * the articles, so a migrated blog whose articles were already live can still get it.
+ */
+function costHistoryTargets(ctx: Loaded): ValidItem[] {
+  return ctx.valid.filter((v) => {
+    if (v.article.cost_history === undefined) return false;
+    const item = ctx.progress.items[v.article.external_id];
+    if (!item || item.hash !== v.hash || item.outcome !== "deferred") return false;
+    const p = ctx.progress.cost_history?.[v.article.external_id];
+    return !(p && p.done && p.hash === costHash(v.article.cost_history));
+  });
+}
+
+interface BulkCostResult {
+  results?: { index: number; status: string; error?: string; problems?: { index: number; error: string }[] }[];
+}
+
+/**
+ * Send that cost history, up to 100 articles per request, named by external_id. SET semantics per
+ * article, so a chunk sent twice changes nothing. A reason to stop (time, requests, a busy API),
+ * or null when this call finished (delivered, or refused for a reason recorded in
+ * progress.cost_history_error, which the next apply retries).
+ */
+async function sendLiveCostHistory(state: ApplyState): Promise<string | null> {
+  const { ctx } = state;
+  const targets = costHistoryTargets(ctx);
+  if (targets.length === 0) return null;
+  ctx.progress.cost_history ??= {};
+  delete ctx.progress.cost_history_error;
+  for (let i = 0; i < targets.length; i += COST_BULK_CHUNK) {
+    if (Date.now() > state.deadline) return "the time for this call ran out while sending cost history";
+    const max = state.opts.budget?.maxRequests;
+    if (max !== undefined && requestsUsed(state) + 1 > max) return REQUEST_BUDGET_SPENT;
+    const chunk = targets.slice(i, i + COST_BULK_CHUNK);
+    const items = chunk.map((v) => ({ external_id: v.article.external_id, entries: v.article.cost_history! }));
+    try {
+      const res = await call<BulkCostResult>(
+        ctx.api,
+        {
+          method: "POST",
+          path: "/articles/cost-history",
+          body: { items },
+          headers: { "Idempotency-Key": `import-costs-bulk-${sha256(JSON.stringify(items))}` },
+        },
+        state.hardDeadline,
+      );
+      for (const r of res.data?.results ?? []) {
+        const v = chunk[r.index];
+        if (!v) continue;
+        const id = v.article.external_id;
+        const label = itemLabel(v.check);
+        const hash = costHash(v.article.cost_history!);
+        if (r.status === "written") {
+          ctx.progress.cost_history[id] = { hash, done: true };
+          for (const prob of r.problems ?? []) state.warnings.push(`- ${label}: cost_history[${prob.index}] was not imported: ${prob.error}`);
+        } else {
+          ctx.progress.cost_history[id] = { hash, done: true, error: r.error ?? r.status };
+          state.warnings.push(`- ${label}: its cost history was not imported: ${r.error ?? r.status}`);
+        }
+      }
+      await save(state, true);
+    } catch (err) {
+      if (isFatal(err)) throw err;
+      if (isTransient(err)) return `the API was busy (${apiProblem(err)}) while sending cost history`;
+      ctx.progress.cost_history_error =
+        err instanceof WritavoApiError && err.status === 404
+          ? "this Site's API does not accept bulk cost history yet"
+          : apiProblem(err);
+      await save(state, true);
+      return null;
+    }
+  }
+  return null;
+}
+
+/** Cost history of live articles for an apply reply. */
+function costHistoryReport(ctx: Loaded): string[] {
+  const all = ctx.valid.filter(
+    (v) => v.article.cost_history !== undefined && ctx.progress.items[v.article.external_id]?.hash === v.hash && ctx.progress.items[v.article.external_id]?.outcome === "deferred",
+  );
+  if (all.length === 0) return [];
+  const written = all.filter((v) => {
+    const p = ctx.progress.cost_history?.[v.article.external_id];
+    return p?.done && !p.error && p.hash === costHash(v.article.cost_history!);
+  }).length;
+  const refused = all.filter((v) => ctx.progress.cost_history?.[v.article.external_id]?.error).length;
+  const err = ctx.progress.cost_history_error;
+  return [
+    "",
+    err
+      ? `Cost history of live articles: NOT imported, because ${err}. The articles are not affected; run the import again later to send it.`
+      : `Cost history of live articles (their content was left as it is): written for ${written} of ${all.length}${refused ? `, ${refused} refused (listed above)` : ""}.`,
+  ];
+}
+
 async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
   if (ctx.envelopeErrors.length > 0) {
     const invalidItems = ctx.items.filter((i) => i.errors.length > 0);
@@ -1696,6 +1884,17 @@ async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
   }
   // Redirects go after every article (they point at the articles by external_id), then the
   // engagement history (keyed by the posts), both in chunks and both SET, never add.
+  if (remaining === 0 && !stopped && costHistoryTargets(ctx).length > 0) {
+    try {
+      const why = await sendLiveCostHistory(state);
+      if (why) stopped = why;
+    } catch (err) {
+      await save(state, true);
+      if (err instanceof OutOfRequests) stopped = REQUEST_BUDGET_SPENT;
+      else if (isFatal(err)) return tagged("stopped", stopReport(state, err));
+      else throw err;
+    }
+  }
   if (remaining === 0 && !stopped && redirectsPending(ctx)) {
     const why = await sendRedirects(state);
     if (why) stopped = why;
@@ -1704,11 +1903,12 @@ async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
     const why = await sendEngagement(state);
     if (why) stopped = why;
   }
+  const costUnfinished = costHistoryTargets(ctx).length > 0 && !ctx.progress.cost_history_error;
   const redirectsUnfinished = redirectsPending(ctx) && !ctx.progress.redirects?.error;
   const engagementUnfinished = engagementPending(ctx) && !ctx.progress.engagement?.error;
   const sectionsUnfinished =
     (contentTypesPending(ctx) && !ctx.progress.content_types?.error) || entriesPending(ctx) || customFieldsPending(ctx);
-  const allDone = remaining === 0 && !engagementUnfinished && !redirectsUnfinished && !sectionsUnfinished;
+  const allDone = remaining === 0 && !engagementUnfinished && !redirectsUnfinished && !costUnfinished && !sectionsUnfinished;
   const c = state.counts;
   const lines: string[] = [];
   const thisCall = `This call: created ${c.created}, updated ${c.updated}, published ${c.published}${c.scheduled ? `, scheduled ${c.scheduled}` : ""}, left unchanged ${c.deferred}, skipped ${c.skipped}, failed ${c.failed}. Images copied ${c.imagesCopied}${c.imagesFailed ? `, not copied ${c.imagesFailed}` : ""}.`;
@@ -1732,6 +1932,7 @@ async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
     }
     if (state.warnings.length > 0) lines.push("", "Warnings from this call:", ...listed(state.warnings));
     lines.push(...contentTypesReport(ctx), ...entriesReport(ctx), ...customFieldsReport(ctx));
+    lines.push(...costHistoryReport(ctx));
     lines.push(...redirectsReport(ctx));
     lines.push(...engagementReport(ctx));
     lines.push(
@@ -1747,7 +1948,7 @@ async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
       remaining === 0
         ? sectionsUnfinished
           ? `Every article is imported into the Site "${ctx.site.name}"; the content types, entries or custom fields are still being written.`
-          : `Every article is imported into the Site "${ctx.site.name}"; the ${redirectsUnfinished ? "redirects" : "engagement history"} ${redirectsUnfinished && engagementUnfinished ? "and the engagement history are" : "is"} still being sent.`
+          : `Every article is imported into the Site "${ctx.site.name}"; ${[costUnfinished && "the cost history", redirectsUnfinished && "the redirects", engagementUnfinished && "the engagement history"].filter(Boolean).join(" and ")} ${[costUnfinished, redirectsUnfinished, engagementUnfinished].filter(Boolean).length > 1 ? "are" : "is"} still being sent.`
         : `Imported a batch into the Site "${ctx.site.name}". ${ctx.valid.length - remaining} of ${ctx.valid.length} articles are done and ${remaining} remain.`,
       "",
       thisCall,
@@ -1757,6 +1958,7 @@ async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
     if (state.problems.length > 0) lines.push("", "Problems this call:", ...listed(state.problems));
     if (state.warnings.length > 0) lines.push("", "Warnings this call:", ...listed(state.warnings));
     lines.push(...contentTypesReport(ctx), ...entriesReport(ctx), ...customFieldsReport(ctx));
+    lines.push(...costHistoryReport(ctx));
     lines.push(...redirectsReport(ctx));
     lines.push(...engagementReport(ctx));
     if (ctx.source.store) {
@@ -2317,6 +2519,7 @@ function sectionWorkUnits(progress: ImportProgress | null): number {
     entries.filter((e) => e.id).length +
     entries.filter((e) => e.stage === "done").length +
     Object.values(progress.custom_fields ?? {}).filter((c) => c.done || c.error).length +
+    Object.values(progress.cost_history ?? {}).filter((c) => c.done).length +
     (progress.redirects?.sent ?? 0) +
     (progress.engagement ? progress.engagement.daily_sent + progress.engagement.reactions_sent : 0)
   );

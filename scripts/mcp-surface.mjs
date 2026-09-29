@@ -374,6 +374,55 @@ function describe(op, { method, confirm, scope, publishable, tag }) {
  * Never throws on a bad spec: problems are collected so a caller can report all of them at once,
  * the way the sibling generators do.
  */
+/**
+ * Where each scope comes from on the sign-in screen (the dashboard's /device page and Settings >
+ * AI agents): one row per area, one choice per row. apps/dashboard/lib/agents.ts (AGENT_AREAS)
+ * is the source of truth for the rows; this mirrors it so the reference and the importer's dry run
+ * can say "set Articles to Read and write" instead of naming a scope the person never sees.
+ * buildMcpSurface fails when a scope in the specification has no entry here, so a new scope cannot
+ * ship without saying where a person grants it.
+ */
+export const SCOPE_SCREEN = {
+  "articles:read": 'Articles, Read',
+  "articles:write": 'Articles, Read and write',
+  "engagement:write": 'Articles, Read and write (importing views, reactions and shares also needs your own articles.write permission)',
+  "entries:read": 'Content types and entries, Read',
+  "entries:write": 'Content types and entries, Read and write',
+  "content_types:write": 'Content types and entries, Read and write (only if you may change content types)',
+  "taxonomy:read": 'Categories, tags and authors, Read',
+  "taxonomy:write": 'Categories, tags and authors, Read and write',
+  "authors:read": 'Categories, tags and authors, Read',
+  "authors:write": 'Categories, tags and authors, Read and write',
+  "media:read": 'Media, Read',
+  "media:write": 'Media, Read and write',
+  "pipeline:read": 'AI pipeline, Read',
+  "pipeline:run": 'AI pipeline, Read, plan and run (spends credits)',
+  "plan:write": 'AI pipeline, Read, plan and run (spends credits)',
+  "pipeline:config": 'AI pipeline, Read, plan and run (only if you may configure the pipeline)',
+  "prompts:write": 'AI pipeline, Read, plan and run (only if you may edit prompts)',
+  "site:read": 'Site settings and design, Read',
+  "site:write": 'Site settings and design, Read and write',
+  "delivery:read": 'Publishing and domains, Read',
+  "delivery:write": 'Publishing and domains, Read and write (domains can cost money)',
+  "integrations:write": 'Publishing and domains, Read and write (only if you may manage integrations)',
+  "seo:read": 'SEO, Read',
+  "seo:write": 'SEO, Read and write (scans spend credits)',
+  "outreach:read": 'Outreach contacts, Read (off unless you choose it)',
+  "team:read": 'Team and organisation, Read',
+  "team:write": 'Team and organisation, Read and write',
+  "roles:write": 'Team and organisation, Read and write (only if you may edit roles)',
+  "org:write": 'Team and organisation, Read and write (only if you may edit the organisation)',
+  "billing:read": 'Billing, Read',
+  "billing:write": 'Billing, Read and write (spends money)',
+  "insights:read": 'Reports and logs, Read',
+  "logs:read": 'Reports and logs, Read',
+  "meta:read": 'always included: the Site name and settings',
+  "keys:read": 'not available to an AI agent: a person creates API keys in Settings > API keys',
+  "keys:write": 'not available to an AI agent: a person creates API keys in Settings > API keys',
+  "webhooks:read": 'not available to an AI agent: a person sets up webhooks in Settings > Webhooks',
+  "webhooks:write": 'not available to an AI agent: a person sets up webhooks in Settings > Webhooks',
+};
+
 export function buildMcpSurface(spec) {
   const problems = [];
   const bail = (msg) => problems.push(msg);
@@ -693,9 +742,11 @@ export function buildMcpSurface(spec) {
       "",
       schemaProse("Scope"),
       "",
-      "The scopes themselves:",
+      "The scopes themselves, and where a person grants each one on the sign-in screen (the rows there are areas, each set to No access, Read or Read and write):",
       "",
-      ...(spec.components?.schemas?.Scope?.enum ?? []).map((s) => `- ${s}`),
+      ...(spec.components?.schemas?.Scope?.enum ?? []).map((s) => `- ${s}: ${SCOPE_SCREEN[s] ?? "(not on the sign-in screen)"}`),
+      "",
+      "A connection that is missing a scope keeps it missing until the person reconnects and sets that row on the sign-in screen; verify_api_key lists what this connection carries.",
     ].join("\n"),
   );
 
@@ -805,6 +856,13 @@ export function buildMcpSurface(spec) {
   }
   for (const row of errorCatalog) {
     if (!row.action) bail(`error code ${row.code} has no guidance in scripts/error-guidance.mjs`);
+  }
+
+  for (const scope of spec.components?.schemas?.Scope?.enum ?? []) {
+    if (!(scope in SCOPE_SCREEN)) bail(`scope ${scope} is not in SCOPE_SCREEN (scripts/mcp-surface.mjs): say where a person grants it on the sign-in screen`);
+  }
+  for (const scope of Object.keys(SCOPE_SCREEN)) {
+    if (!(spec.components?.schemas?.Scope?.enum ?? []).includes(scope)) bail(`SCOPE_SCREEN names ${scope}, which is not a scope in the specification`);
   }
 
   return { operations, actions, refusals, sections, errorCatalog, baseUrl, problems };

@@ -64,6 +64,15 @@ export interface ImportProgress {
   engagement?: EngagementProgress;
   /** The redirects (articles' old_urls + the redirects section), sent after every article. */
   redirects?: RedirectsProgress;
+  /**
+   * Cost history of articles that were live and left unchanged (publish false), by external_id.
+   * It is not public content, so it is written for them anyway, in bulk, after the articles.
+   * `hash` is of the entries as sent; `error` is why an item could not be written (settled: the
+   * next apply does not retry it).
+   */
+  cost_history?: Record<string, { hash: string; done: boolean; error?: string }>;
+  /** Why the last attempt to send cost history could not deliver it (the next apply tries again). */
+  cost_history_error?: string;
   /** The content_types section (0136), applied before anything else. */
   content_types?: ContentTypesProgress;
   /** Entries by external_id (0136): written, then their references and media resolved. */

@@ -501,6 +501,11 @@ async function main(): Promise<void> {
     engagementPicks: new Map<string, Row>(),
     engagementCalls: 0,
     engagementOff: false,
+    // POST /articles/cost-history (0138): SET per article by external_id; `bulkCostOff` is an API without the route.
+    bulkCostCalls: 0,
+    bulkCostOff: false,
+    // What GET /ping reports this connection carries (null: every scope the importer may need).
+    scopes: null as string[] | null,
     // POST /redirects/bulk (0127), SET on the old URL; to_external_id must name a Site article.
     redirects: new Map<string, Row>(),
     redirectCalls: 0,
@@ -520,6 +525,10 @@ async function main(): Promise<void> {
     const body = (req.body ? JSON.parse(req.body) : {}) as Row;
 
     if (req.method === "GET" && path === "/site") return ok({ id: "00000000-0000-4000-8000-0000000051e1", name: "Smoke Site" });
+    if (req.method === "GET" && path === "/ping") {
+      const all = ["articles:read", "articles:write", "taxonomy:write", "authors:write", "media:write", "engagement:write", "content_types:write", "entries:write", "meta:read"];
+      return ok({ pong: true, key_kind: "secret", scopes: site.scopes ?? all });
+    }
     if (req.method === "GET" && path === "/usage") {
       return ok({ plan: { key: "free", name: "Free" }, limits: [{ key: "documents", limit: 10000, used: 5 }], credits: { balance: 0 } });
     }
@@ -565,6 +574,16 @@ async function main(): Promise<void> {
       const response = ok(row, 201);
       site.replays.set(req.idempotencyKey ?? "", response);
       return response;
+    }
+    if (path === "/articles/cost-history" && req.method === "POST" && !site.bulkCostOff) {
+      site.bulkCostCalls += 1;
+      const results = ((body.items ?? []) as Row[]).map((item, index) => {
+        const row = site.articles.find((a) => a.external_id === item.external_id);
+        if (!row) return { index, status: "not_found", error: "no article of this Site matches" };
+        row.cost_history = item.entries;
+        return { index, status: "written", article_id: row.id, entries: (item.entries as Row[]).length, problems: [] };
+      });
+      return ok({ dry_run: false, written: results.filter((r) => r.status === "written").length, not_found: results.filter((r) => r.status === "not_found").length, invalid: 0, results });
     }
     const one = /^\/articles\/([^/]+)(\/publish|\/schedule)?$/.exec(path);
     if (one) {
@@ -1324,6 +1343,85 @@ async function main(): Promise<void> {
       off.slice(0, 800),
     );
     site.engagementOff = false;
+  }
+
+  // -- 14f2. Live articles with publish false: cost history and engagement still go ---------
+  console.log("\n[ 14f2. Cost history reaches live articles left unchanged; the dry run says so and checks permissions ]");
+  {
+    currentKey = SECRET_KEY;
+    const liveAt = "2025-03-01T10:00:00.000Z";
+    for (const n of [1, 2, 3]) {
+      site.articles.push({ id: randomUUID(), external_id: `live:${n}`, slug: `live-${n}`, title: `Live ${n}`, content: `Live body ${n}`, status: "published", published_at: liveAt });
+    }
+    const doc = {
+      format: "writavo-import",
+      version: 1,
+      articles: [1, 2, 3].map((n) => ({
+        external_id: `live:${n}`, status: "published", title: `Live ${n}`, slug: `live-${n}`, content: `Live body ${n}`, published_at: liveAt,
+        cost_history: [{ cost_usd: 0.1 * n, stage: "generate", provider: "openai", occurred_on: "2025-02-27" }],
+      })),
+      engagement: { daily: [{ external_id: "live:1", day: "2025-04-01", views: 7 }] },
+    };
+    const store = memStore("g:key-live-costs");
+    stub.reset();
+    site.scopes = ["articles:read", "articles:write", "meta:read"];
+    const dry = bodyOf(await handleImportContent(CTX, { data: doc, publish: false }, store));
+    const liveId = /imp_[A-Za-z0-9_-]{22}/.exec(dry)?.[0] ?? "";
+    check(
+      "a dry run on live articles with publish false does not say there is nothing to import: it names the cost history and the engagement it will still write",
+      !dry.includes("Nothing to import") && dry.includes("cost history to write on live articles: 3") && dry.includes("this import still has work to do") &&
+        dry.includes("3 live articles") && dry.includes("the engagement history"),
+      dry.slice(0, 1800),
+    );
+    check(
+      "it names every permission the apply needs and which ones this connection is missing, and where to grant it",
+      dry.includes("Permissions this import needs: articles:write (cost history), engagement:write (the engagement history)") &&
+        dry.includes("MISSING on this connection: engagement:write") && dry.includes("Articles, Read and write") && dry.includes("reconnect Writavo"),
+      dry.slice(dry.indexOf("Permissions"), dry.indexOf("Permissions") + 900),
+    );
+    check("nothing was written by the dry run", site.bulkCostCalls === 0 && byExternal("live:1").cost_history === undefined);
+
+    site.scopes = null;
+    stub.reset();
+    const dry2 = bodyOf(await handleImportContent(CTX, { import_id: liveId, publish: false }, store));
+    check("with every permission held the dry run says so", dry2.includes("This connection has all of them.") && !dry2.includes("MISSING"), dry2.slice(dry2.indexOf("Permissions"), dry2.indexOf("Permissions") + 400));
+
+    stub.reset();
+    const applied = bodyOf(await handleImportContent(CTX, { import_id: liveId, dry_run: false, publish: false, background: false }, store));
+    check(
+      "an apply writes the cost history of the live articles in ONE bulk request, and leaves their content alone",
+      applied.includes("Import complete") && site.bulkCostCalls === 1 &&
+        (byExternal("live:2").cost_history as Row[])?.[0]?.cost_usd === 0.2 && byExternal("live:3").content === "Live body 3" && byExternal("live:1").status === "published" &&
+        applied.includes("Cost history of live articles (their content was left as it is): written for 3 of 3") && applied.includes("Engagement history: delivered"),
+      applied.slice(0, 1500),
+    );
+    const before = site.bulkCostCalls;
+    const again = bodyOf(await handleImportContent(CTX, { import_id: liveId, dry_run: false, publish: false, background: false }, store));
+    check("running it again sends no cost history twice", again.includes("Import complete") && site.bulkCostCalls === before, again.slice(0, 300));
+
+    // an API that predates the bulk route: reported, and the import does not fail
+    site.bulkCostOff = true;
+    const other = { ...doc, articles: [{ ...doc.articles[0]!, external_id: "live:1", cost_history: [{ cost_usd: 9 }] }], engagement: undefined };
+    const oldApi = bodyOf(await handleImportContent(CTX, { data: other, dry_run: false, publish: false }, memStore("g:key-live-costs-old")));
+    check(
+      "an API without the bulk route does not fail the import: the cost history is reported as not imported",
+      oldApi.includes("Cost history of live articles: NOT imported, because this Site's API does not accept bulk cost history yet"),
+      oldApi.slice(0, 900),
+    );
+    site.bulkCostOff = false;
+  }
+
+  // -- 14f3. import_content with no document is short; a section returns one part -------
+  console.log("\n[ 14f3. import_content with no document is short, and section picks a part ]");
+  {
+    const guide = bodyOf(await handleImportContent(CTX, {}));
+    check("with no arguments the reply is the guide and a sample, well under 20 KB, and lists the sections", guide.length < 20_000 && guide.includes("## Sample document") && guide.includes('section: "<name>"'), String(guide.length));
+    const eng = bodyOf(await handleImportContent(CTX, { section: "engagement" }));
+    check("section: engagement returns its guide text and its JSON Schema", eng.includes("Engagement (optional, top level)") && eng.includes("JSON Schema of the section") && eng.length < 20_000, String(eng.length));
+    const cost = bodyOf(await handleImportContent(CTX, { section: "cost_history" }));
+    check("section: cost_history returns the field's text and schema", cost.includes("cost_usd") && cost.includes("never billed") && cost.includes("JSON Schema of the field"), cost.slice(0, 300));
+    const schema = bodyOf(await handleImportContent(CTX, { section: "schema" }));
+    check("section: schema is the whole JSON Schema", schema.includes("Writavo Import Format v1") && schema.length > 50_000, String(schema.length));
   }
 
   // -- 14g. Redirects: articles' old_urls and the redirects section (0127) --------
@@ -2653,6 +2751,11 @@ async function main(): Promise<void> {
       "run: INSUFFICIENT_SCOPE names both scopes an action needs",
       twoScopes.isError === true && bodyOf(twoScopes).includes("seo:write and plan:write"),
       bodyOf(twoScopes).slice(0, 300),
+    );
+    check(
+      "run: INSUFFICIENT_SCOPE says where the person adds it, on the same connection and without signing in again",
+      bodyOf(twoScopes).includes("On the sign-in screen this is: SEO, Read and write") && bodyOf(twoScopes).includes("without signing in again: Settings > AI agents"),
+      bodyOf(twoScopes).slice(0, 900),
     );
     currentKey = null;
     stub.reset();
