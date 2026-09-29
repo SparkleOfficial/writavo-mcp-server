@@ -510,7 +510,7 @@ Top level:
   - author: an authors[].ref. category: the primary category's slug; categories: the slugs of any
     other categories it is filed under. tags: tag slugs. A nested category names its parent's slug
     in categories[].parent.
-  - format: a content type key on the Site (see get_content_types). Optional.
+  - format: an article format key on the Site (the list_formats action). Optional.
   - source: optional, private (never on the public blog). The page the article was written from:
     { url, title?, competitor?, content?, originality_pct?, target_keywords?, metrics? }. With
     content (the source page's text, max 80,000 characters) Writavo measures how original the

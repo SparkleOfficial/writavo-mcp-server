@@ -341,8 +341,8 @@ async function main(): Promise<void> {
     );
     const resource = JSON.stringify(await client.readResource({ uri: "writavo://import-format" }));
     check("the import format resource reads", resource.includes("external_id") && resource.includes("json-schema.org/draft/2020-12"), resource.slice(0, 200));
-    const contentTypes = JSON.stringify(await client.readResource({ uri: "writavo://content-types" }));
-    check("the content types resource says to reconnect, with no key", contentTypes.includes("Reconnect Writavo") && !contentTypes.includes("WRITAVO_API_KEY"), contentTypes.slice(0, 200));
+    const formats = JSON.stringify(await client.readResource({ uri: "writavo://formats" }));
+    check("the formats resource says to reconnect, with no key", formats.includes("Reconnect Writavo") && !formats.includes("WRITAVO_API_KEY"), formats.slice(0, 200));
     check("with no key, nothing reached the API", stub.requests.length === 0);
     await client.close();
   }
@@ -519,7 +519,7 @@ async function main(): Promise<void> {
     if (req.method === "GET" && path === "/usage") {
       return ok({ plan: { key: "free", name: "Free" }, limits: [{ key: "documents", limit: 10000, used: 5 }], credits: { balance: 0 } });
     }
-    if (req.method === "GET" && path === "/content-types") {
+    if (req.method === "GET" && path === "/formats") {
       return ok({ items: [{ id: "00000000-0000-4000-8000-00000000f0f0", key: "how_to", name: "How-To", is_active: true }] });
     }
     for (const kind of ["categories", "tags", "authors"] as const) {

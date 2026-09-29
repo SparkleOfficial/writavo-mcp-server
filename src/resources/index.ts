@@ -63,23 +63,23 @@ export function readErrorCodes(): ResourceContents {
   return contents(errorCodesResource, body);
 }
 
-export const contentTypesResource: ResourceDefinition = {
-  uri: "writavo://content-types",
-  name: "Content types for the connected Site",
+export const formatsResource: ResourceDefinition = {
+  uri: "writavo://formats",
+  name: "Article formats for the connected Site",
   description:
-    "The article formats available on the Site this key belongs to. A format is an SEO blueprint that shapes how an article is structured.",
+    "The article formats available on the Site this key belongs to. A format is an SEO blueprint that shapes how an article is structured. (The Site's custom content types are the get_content_types tool.)",
   mimeType: "application/json",
 };
 
-export async function readContentTypes(ctx: ToolContext): Promise<ResourceContents> {
+export async function readFormats(ctx: ToolContext): Promise<ResourceContents> {
   if (!hasKey(ctx)) {
     return contents(
-      contentTypesResource,
+      formatsResource,
       JSON.stringify(
         {
           available: false,
           reason:
-            "This connection has no Writavo credentials, and content types are per Site. Reconnect Writavo in the assistant to read the real list.",
+            "This connection has no Writavo credentials, and formats are per Site. Reconnect Writavo in the assistant to read the real list.",
           reference: "writavo://api-reference",
         },
         null,
@@ -88,11 +88,11 @@ export async function readContentTypes(ctx: ToolContext): Promise<ResourceConten
     );
   }
   try {
-    const response = await apiRequest<{ items: unknown[] }>(ctx, { method: "GET", path: "/content-types" });
-    return contents(contentTypesResource, JSON.stringify(response.data, null, 2));
+    const response = await apiRequest<{ items: unknown[] }>(ctx, { method: "GET", path: "/formats" });
+    return contents(formatsResource, JSON.stringify(response.data, null, 2));
   } catch (err) {
     return contents(
-      contentTypesResource,
+      formatsResource,
       JSON.stringify(
         { available: false, reason: err instanceof Error ? err.message : String(err) },
         null,

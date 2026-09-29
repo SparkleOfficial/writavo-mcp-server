@@ -27,6 +27,9 @@ import { ERROR_GUIDANCE, ERROR_LINKS } from "./error-guidance.mjs";
  */
 export const TOOL_TAGS = [
   "Meta", "Articles", "Categories", "Tags", "Authors", "Media", "Pipeline", "Device sign-in",
+  // 0136: entries are everyday content; of the schema, only reading it is a tool (changing it is
+  // configuration, an action).
+  "Content types", "Entries",
 ];
 
 /**
@@ -61,6 +64,11 @@ export const CORE_TOOL_OPERATIONS = [
   "listAuthors", "createAuthor", "getAuthor", "updateAuthor", "deleteAuthor",
   "listMedia", "getMediaAsset", "updateMediaAsset", "deleteMediaAsset",
   "listPipelineRuns", "createPipelineRun", "getPipelineRun", "listPipelineQueue",
+  // 0136. listContentTypes is a new operation under an old name: until 0136 it listed article
+  // formats (now listFormats, an action under "Formats and prompts").
+  "getContentType",
+  "listEntries", "createEntry", "getEntry", "updateEntry", "deleteEntry",
+  "publishEntry", "unpublishEntry", "scheduleEntry",
 ];
 
 /**
@@ -68,7 +76,7 @@ export const CORE_TOOL_OPERATIONS = [
  * operations say "Changes content on the customer's Site. Nothing becomes public"; every other
  * write says which settings it changes instead (contract §10.2).
  */
-export const CONTENT_TAGS = ["Articles", "Categories", "Tags", "Authors", "Media", "Pipeline", "Formats and prompts"];
+export const CONTENT_TAGS = ["Articles", "Categories", "Tags", "Authors", "Media", "Pipeline", "Formats and prompts", "Entries"];
 
 /** The catalog's area for a tag: "Site settings" -> "site_settings". */
 export const areaOf = (tag) => String(tag).toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
@@ -173,6 +181,7 @@ export const NAME_OVERRIDES = {
   ping: "verify_api_key",
   getSite: "get_site_info",
   listContentTypes: "get_content_types",
+  getContentType: "get_content_type",
   createPipelineRun: "trigger_pipeline_run",
   getPipelineRun: "get_pipeline_status",
   listPipelineQueue: "get_pipeline_queue",

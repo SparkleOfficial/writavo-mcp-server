@@ -19,11 +19,11 @@ import {
 } from "../tools/actions.js";
 import {
   apiReferenceResource,
-  contentTypesResource,
+  formatsResource,
   errorCodesResource,
   importFormatResource,
   readApiReference,
-  readContentTypes,
+  readFormats,
   readErrorCodes,
   readImportFormat,
 } from "../resources/index.js";
@@ -256,10 +256,10 @@ export function createWritavoMcpServer(opts: CoreOptions): McpServer {
   );
 
   server.registerResource(
-    contentTypesResource.name,
-    contentTypesResource.uri,
-    { description: contentTypesResource.description, mimeType: contentTypesResource.mimeType },
-    async () => readContentTypes(ctx),
+    formatsResource.name,
+    formatsResource.uri,
+    { description: formatsResource.description, mimeType: formatsResource.mimeType },
+    async () => readFormats(ctx),
   );
 
   server.registerResource(

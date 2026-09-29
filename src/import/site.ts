@@ -91,7 +91,8 @@ export interface SiteAuthor {
   author_type?: string;
 }
 
-export interface SiteContentType {
+/** An article format (GET /formats; /content-types before API 1.5.0). */
+export interface SiteFormat {
   id: string;
   key: string;
   is_active?: boolean;

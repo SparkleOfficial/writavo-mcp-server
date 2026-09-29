@@ -17,7 +17,7 @@ import {
   listAll,
   type SiteArticle,
   type SiteAuthor,
-  type SiteContentType,
+  type SiteFormat,
   type SiteInfo,
   type SiteTerm,
 } from "./site.js";
@@ -363,7 +363,7 @@ async function load(api: ToolContext, source: ImportSource): Promise<Loaded | To
       listAll<SiteTerm>(api, "/categories", [["fields", "id,name,slug"]]),
       listAll<SiteTerm>(api, "/tags", [["fields", "id,name,slug"]]),
       listAll<SiteAuthor>(api, "/authors", [["fields", AUTHOR_FIELDS]]),
-      call<{ items: SiteContentType[] }>(api, { method: "GET", path: "/content-types" }),
+      call<{ items: SiteFormat[] }>(api, { method: "GET", path: "/formats" }),
     ]);
     siteCategories = new Map(categories.map((c) => [c.slug, c.id]));
     siteTags = new Map(tags.map((t) => [t.slug, t.id]));

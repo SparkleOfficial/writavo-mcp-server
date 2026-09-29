@@ -2,7 +2,7 @@ openapi: 3.1.0
 
 info:
   title: Writavo Content API
-  version: "1.4.0"
+  version: "1.5.0"
   summary: The CMS control plane for a Writavo Site.
   description: |
     The Writavo Content API is the programmable half of the CMS. It lets you create, edit,
@@ -209,7 +209,7 @@ externalDocs:
 
 tags:
   - name: Meta
-    description: Connectivity, Site information, content types, limits and usage.
+    description: Connectivity, Site information, article formats, limits and usage.
   - name: Articles
     description: The content spine. Create, edit, organise, publish and schedule.
   - name: Categories
@@ -238,6 +238,18 @@ tags:
     description: |
       Article formats (the SEO blueprints the generator follows) and the AI prompt used at each
       pipeline stage: read the defaults, override one for this Site, reset it.
+  - name: Content types
+    description: |
+      Your Site's own content models: a Product, a Testimonial, a Homepage. A content type is a list
+      of fields (text, numbers, dates, choices, media, references to other entries and articles,
+      reusable components and flexible blocks) with validation rules. Define them in the dashboard,
+      one at a time here, or all at once from a file with `POST /content-types/apply`. A type of kind
+      `article_fields` (API id `article`) adds custom fields to your articles instead.
+  - name: Entries
+    description: |
+      The content of your content types. Entries are drafts until published, can be scheduled to
+      publish and to unpublish, keep every saved version, and count as documents on the CMS meter
+      like articles do. A publishable key reads published entries only.
   - name: Site settings
     x-mcp-surface: action
     description: |
@@ -391,11 +403,11 @@ paths:
         "503": { $ref: "#/components/responses/Maintenance" }
         "500": { $ref: "#/components/responses/InternalError" }
 
-  /content-types:
+  /formats:
     get:
-      operationId: listContentTypes
+      operationId: listFormats
       tags: [Meta]
-      summary: List content types
+      summary: List article formats
       description: |
         The article formats available to this Site. A format is an SEO blueprint (How-To,
         Listicle, Versus and so on) that shapes how the generator structures an article, and
@@ -403,9 +415,12 @@ paths:
 
         The list merges the platform defaults with any formats defined for your Site. A Site
         format with the same `key` as a platform default overrides it, and only the override is
-        returned. Define, change or remove a Site format with `POST /content-types`,
-        `PATCH /content-types/{id}` and `DELETE /content-types/{id}`; read one format's blueprint
-        with `GET /content-types/{id}`.
+        returned. Define, change or remove a Site format with `POST /formats`,
+        `PATCH /formats/{id}` and `DELETE /formats/{id}`; read one format's blueprint
+        with `GET /formats/{id}`.
+
+        Until API version 1.5.0 this was `GET /content-types`. That path now lists the Site's
+        custom content types (the models of its entries), which are a different thing.
       x-scope: meta:read
       x-permission: none
       x-entitlement: none
@@ -414,7 +429,7 @@ paths:
       x-publishable: true
       responses:
         "200":
-          description: The available content types.
+          description: The available article formats.
           content:
             application/json:
               schema:
@@ -428,7 +443,7 @@ paths:
                         properties:
                           items:
                             type: array
-                            items: { $ref: "#/components/schemas/ContentType" }
+                            items: { $ref: "#/components/schemas/Format" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/InsufficientScope" }
         "429": { $ref: "#/components/responses/RateLimited" }
@@ -436,7 +451,7 @@ paths:
         "500": { $ref: "#/components/responses/InternalError" }
 
     post:
-      operationId: createContentType
+      operationId: createFormat
       tags: [Formats and prompts]
       summary: Define an article format
       description: |
@@ -460,7 +475,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/ContentTypeCreate" }
+            schema: { $ref: "#/components/schemas/FormatCreate" }
       responses:
         "201":
           description: The new format.
@@ -471,7 +486,7 @@ paths:
                   - { $ref: "#/components/schemas/SuccessEnvelope" }
                   - type: object
                     properties:
-                      data: { $ref: "#/components/schemas/ContentTypeDetail" }
+                      data: { $ref: "#/components/schemas/FormatDetail" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/InsufficientScope" }
@@ -3140,7 +3155,7 @@ paths:
         While it is off, nothing happens until it is turned on or a run is requested. To keep a topic
         without it being written, add it and then set it to `skipped`.
 
-        `format_key` must be the key of an active format this Site can use (`GET /content-types`), or it
+        `format_key` must be the key of an active format this Site can use (`GET /formats`), or it
         is `422`.
       x-scope: plan:write
       x-permission: articles.write
@@ -4267,11 +4282,11 @@ paths:
   # ==========================================================================
   # FORMATS (MCP-3)
   # ==========================================================================
-  /content-types/{id}:
+  /formats/{id}:
     parameters:
-      - $ref: "#/components/parameters/ContentTypeId"
+      - $ref: "#/components/parameters/FormatId"
     get:
-      operationId: getContentType
+      operationId: getFormat
       tags: [Formats and prompts]
       summary: Read one article format
       description: |
@@ -4295,7 +4310,7 @@ paths:
                   - { $ref: "#/components/schemas/SuccessEnvelope" }
                   - type: object
                     properties:
-                      data: { $ref: "#/components/schemas/ContentTypeDetail" }
+                      data: { $ref: "#/components/schemas/FormatDetail" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/InsufficientScope" }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -4304,7 +4319,7 @@ paths:
         "500": { $ref: "#/components/responses/InternalError" }
 
     patch:
-      operationId: updateContentType
+      operationId: updateFormat
       tags: [Formats and prompts]
       summary: Change an article format
       description: |
@@ -4325,7 +4340,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/ContentTypeUpdate" }
+            schema: { $ref: "#/components/schemas/FormatUpdate" }
       responses:
         "200":
           description: The updated format.
@@ -4336,7 +4351,7 @@ paths:
                   - { $ref: "#/components/schemas/SuccessEnvelope" }
                   - type: object
                     properties:
-                      data: { $ref: "#/components/schemas/ContentTypeDetail" }
+                      data: { $ref: "#/components/schemas/FormatDetail" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/InsufficientScope" }
@@ -4348,7 +4363,7 @@ paths:
         "500": { $ref: "#/components/responses/InternalError" }
 
     delete:
-      operationId: deleteContentType
+      operationId: deleteFormat
       tags: [Formats and prompts]
       summary: Delete an article format
       description: |
@@ -4384,6 +4399,1008 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
         "428": { $ref: "#/components/responses/ApprovalRequired" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  # ==========================================================================
+  # CUSTOM CONTENT TYPES AND ENTRIES (0136)
+  # ==========================================================================
+  /content-types:
+
+    get:
+      operationId: listContentTypes
+      tags: [Content types]
+      summary: List content types
+      description: |
+        The Site's content types: collections (many entries), singletons (one entry), components
+        (reusable groups of fields used inside other types) and, if the Site has them, its custom
+        article fields (kind `article_fields`, API id `article`). At most 100, so this is not paginated.
+
+        Until API version 1.5.0 this path listed article formats; those are now `GET /formats`.
+      x-scope: entries:read
+      x-permission: none
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: true
+      parameters:
+        - name: kind
+          in: query
+          required: false
+          schema: { type: string, enum: [collection, singleton, component, article_fields] }
+      responses:
+        "200":
+          description: The Site's content types.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [items]
+                        properties:
+                          items:
+                            type: array
+                            items: { $ref: "#/components/schemas/ContentType" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+    post:
+      operationId: createContentType
+      tags: [Content types]
+      summary: Create a content type
+      description: |
+        Define one content type. An API id that already exists is `409 CONFLICT`; change it with
+        `PATCH /content-types/{api_id}`. A definition with problems is `422 VALIDATION_FAILED`, with
+        `error.fields` keyed by the path of each problem (for example `product.price.validation.min`).
+      x-scope: content_types:write
+      x-permission: content_types.manage
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      parameters:
+        - { $ref: "#/components/parameters/IdempotencyKeyRequired" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              { $ref: "#/components/schemas/ContentTypeInput" }
+      responses:
+        "201":
+          description: The new content type.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/ContentType" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /content-types/apply:
+    post:
+      operationId: applyContentSchema
+      tags: [Content types]
+      summary: Apply a whole schema
+      description: |
+        The declarative way to manage content types, for a schema kept in a file: send the types you
+        want and Writavo works out what to create and change. Types you leave out are kept, unless
+        `delete_missing` is true. Send `dry_run: true` first: you get the plan (what is created,
+        changed, deleted and how many entries each change touches) and every problem, and nothing is
+        written. A dry run that finds problems still answers 200, with `ok: false` and the errors;
+        a real run with problems is `422 VALIDATION_FAILED` and writes nothing.
+
+        Schema changes never rewrite entries, with one exception you ask for: a field with
+        `renamed_from` moves the old field's stored values to the new name. A removed field's values
+        stay stored but are no longer returned; a field whose type changed keeps its values, and an
+        entry whose value no longer fits must be fixed when it is next saved. A type's `kind` never
+        changes, and a type that still has entries cannot be deleted.
+
+        `GET /content-types` returns types in exactly the shape this accepts, so read, edit and send
+        back. From the CLI: `writavo apply-content-schema --body-file schema.json`, where the file is
+        `{ "types": [...], "dry_run": true }`.
+      x-scope: content_types:write
+      x-permission: content_types.manage
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-agent-consequence: "Changes the Site's content types: fields may be added, renamed or removed, and with delete_missing whole types are deleted."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [types]
+              properties:
+                types:
+                  type: array
+                  maxItems: 100
+                  items: { $ref: "#/components/schemas/ContentTypeInput" }
+                dry_run: { type: boolean, default: false, description: "Report the plan and every problem; write nothing." }
+                delete_missing: { type: boolean, default: false, description: "Delete stored types this list does not name." }
+      responses:
+        "200":
+          description: The plan, and on a real run the resulting types.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/ContentSchemaResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /content-types/typescript:
+
+    get:
+      operationId: getContentTypesTypescript
+      tags: [Content types]
+      summary: Generate TypeScript types
+      description: |
+        One self-contained TypeScript file describing every content type: an interface per type and
+        component, `ContentTypes` (API id to interface) and a generic `Entry<T>`. Required fields are
+        required in the types, which is what a published entry guarantees. Save `typescript` to a
+        `.ts` file in your front end (from the CLI, `writavo get-content-types-typescript`; the file is
+        the `typescript` value).
+      x-scope: entries:read
+      x-permission: content_types.manage
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: false
+      responses:
+        "200":
+          description: The generated file.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [typescript, schema_version, types]
+                        properties:
+                          typescript: { type: string, description: The file's contents. }
+                          schema_version: { type: integer, description: Grows whenever any type changes; regenerate when it moves. }
+                          types: { type: integer, description: How many content types it describes. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /content-types/{api_id}:
+
+    parameters:
+
+      - name: api_id
+        in: path
+        required: true
+        description: The content type's API id.
+        schema: { type: string, pattern: "^[a-z][a-z0-9_]{0,62}$", examples: ["product"] }
+
+    get:
+      operationId: getContentType
+      tags: [Content types]
+      summary: Read a content type
+      description: |
+        One content type with its fields. The `ETag` header versions it for `If-Match`.
+      x-scope: entries:read
+      x-permission: none
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: true
+      responses:
+        "200":
+          description: The content type.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/ContentType" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+    patch:
+      operationId: updateContentType
+      tags: [Content types]
+      summary: Change a content type
+      description: |
+        Change one content type. A top-level key you leave out (name, description, title field)
+        keeps its value; `fields`, when you send it, is the whole field list, in order. The API id
+        and kind cannot change. Send `If-Match` with the `ETag` you read
+        (or `expected_version`) so a concurrent edit is `412 PRECONDITION_FAILED` rather than lost.
+        The rules of `POST /content-types/apply` apply: `renamed_from` moves values; nothing else rewrites
+        entries.
+      x-scope: content_types:write
+      x-permission: content_types.manage
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-agent-consequence: "Changes a content type's fields; removed fields' values stop being returned (they stay stored)."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              { $ref: "#/components/schemas/ContentTypeUpdate" }
+      responses:
+        "200":
+          description: The changed content type.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/ContentType" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "412": { $ref: "#/components/responses/PreconditionFailed" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+    delete:
+      operationId: deleteContentType
+      tags: [Content types]
+      summary: Delete a content type
+      description: |
+        Delete a content type. Refused with `409 CONFLICT` while it has entries (delete them first) or
+        while another type uses it (a reference to it, or a component field). Deleting the `article`
+        type removes the custom article fields from the schema; the values stay stored on the articles.
+      x-scope: content_types:write
+      x-permission: content_types.manage
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-agent-consequence: "Permanently deletes the content type definition. It must have no entries."
+      responses:
+        "204": {description: Deleted. No body.}
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /entries/{type}:
+
+    parameters:
+
+      - name: type
+        in: path
+        required: true
+        description: The API id of the entry's content type (a collection or singleton).
+        schema: { type: string, pattern: "^[a-z][a-z0-9_]{0,62}$", examples: ["product"] }
+
+    get:
+      operationId: listEntries
+      tags: [Entries]
+      summary: List entries
+      description: |
+        Entries of one content type, newest updated first, cursor paginated. A publishable key sees
+        published entries only.
+
+        Filter with `filter[<field>]=<value>` on a top-level field of the type (equality; for a list
+        field, membership), up to five. Numbers and `true` / `false` are matched as such.
+      x-scope: entries:read
+      x-permission: none
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: true
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+        - name: status
+          in: query
+          required: false
+          schema: { type: string, enum: [draft, scheduled, published] }
+        - name: slug
+          in: query
+          required: false
+          schema: { type: string }
+        - name: order
+          in: query
+          required: false
+          description: "`updated_at`, `created_at` or `published_at` (needs `status=published`); a leading `-` for newest first."
+          schema: { type: string, default: "-updated_at", enum: ["-updated_at", updated_at, "-created_at", created_at, "-published_at", published_at] }
+        - name: filter
+          in: query
+          required: false
+          style: deepObject
+          explode: true
+          description: "`filter[field]=value`, at most five."
+          schema: { type: object, additionalProperties: { type: string } }
+
+        - name: expand
+          in: query
+          required: false
+          description: |
+            Comma separated reference and media fields to expand: their ids become the objects they point
+            at (one level). An entry has `_type` set to its content type; an article, page, category, tag,
+            author or media item has `_type` set to that name. A target that is gone, or that a
+            publishable key may not see, becomes `null` (and drops out of a list).
+          schema: { type: string, examples: ["related,author"] }
+      responses:
+        "200":
+          description: A page of entries.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data:
+                        allOf:
+                          - { $ref: "#/components/schemas/Page" }
+                          - type: object
+                            properties:
+                              items:
+                                type: array
+                                items: { $ref: "#/components/schemas/Entry" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+    post:
+      operationId: createEntry
+      tags: [Entries]
+      summary: Create an entry
+      description: |
+        Create an entry of this content type. It is a draft unless you send `status: published`, which
+        publishes it in the same step (and so must pass the type's `required` rules). A draft is checked
+        for shape and type but may leave required fields empty. Fields you leave out take their
+        `default`. A singleton takes one entry; a second is `409 CONFLICT`.
+
+        Problems are `422 VALIDATION_FAILED` with `error.fields` keyed by the value's path, for example
+        `data.price` or `data.body[2].label`. A slug another entry of this type uses is `409 SLUG_CONFLICT`.
+
+        An entry is a document on the CMS meter, like an article. Over the included allowance it bills;
+        it is refused only when there is no way to bill it (`402 PAYMENT_METHOD_REQUIRED`).
+      x-scope: entries:write
+      x-permission: entries.write
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      parameters:
+        - { $ref: "#/components/parameters/IdempotencyKeyRequired" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              { $ref: "#/components/schemas/EntryCreate" }
+      responses:
+        "201":
+          description: The new entry.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Entry" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "402": { $ref: "#/components/responses/PaymentRequired" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /entries/{type}/{id}:
+
+    parameters:
+
+      - name: type
+        in: path
+        required: true
+        description: The API id of the entry's content type (a collection or singleton).
+        schema: { type: string, pattern: "^[a-z][a-z0-9_]{0,62}$", examples: ["product"] }
+
+      - name: id
+        in: path
+        required: true
+        description: The entry's id or, to read, its slug.
+        schema: { type: string }
+
+    get:
+      operationId: getEntry
+      tags: [Entries]
+      summary: Read an entry
+      description: |
+        One entry, by id or slug. The `ETag` header versions it for `If-Match`.
+      x-scope: entries:read
+      x-permission: none
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: true
+      x-cross-tenant: 404
+      parameters:
+        - name: expand
+          in: query
+          required: false
+          description: |
+            Comma separated reference and media fields to expand: their ids become the objects they point
+            at (one level). An entry has `_type` set to its content type; an article, page, category, tag,
+            author or media item has `_type` set to that name. A target that is gone, or that a
+            publishable key may not see, becomes `null` (and drops out of a list).
+          schema: { type: string, examples: ["related,author"] }
+      responses:
+        "200":
+          description: The entry.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Entry" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+    patch:
+      operationId: updateEntry
+      tags: [Entries]
+      summary: Change an entry
+      description: |
+        Change an entry. `data` is merged key by key over what is stored: a key you send replaces that
+        field, a key set to `null` clears it, a key you leave out is kept. Send `replace: true` to
+        replace `data` whole. A published or scheduled entry must stay valid, `required` rules
+        included. Send `If-Match` with the `ETag` you read to refuse a lost update. Every change is a
+        revision (`GET .../revisions`).
+      x-scope: entries:write
+      x-permission: entries.write
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-cross-tenant: 404
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              { $ref: "#/components/schemas/EntryUpdate" }
+      responses:
+        "200":
+          description: The changed entry.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Entry" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "412": { $ref: "#/components/responses/PreconditionFailed" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+    delete:
+      operationId: deleteEntry
+      tags: [Entries]
+      summary: Delete an entry
+      description: |
+        Delete an entry and its revisions. Other entries that referenced it keep the id; with `expand`
+        it reads as `null`.
+      x-scope: entries:write
+      x-permission: entries.write
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-cross-tenant: 404
+      x-agent-consequence: "Permanently deletes the entry and its revisions."
+      responses:
+        "204": {description: Deleted. No body.}
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /entries/{type}/{id}/publish:
+
+    parameters:
+
+      - name: type
+        in: path
+        required: true
+        description: The API id of the entry's content type (a collection or singleton).
+        schema: { type: string, pattern: "^[a-z][a-z0-9_]{0,62}$", examples: ["product"] }
+
+      - name: id
+        in: path
+        required: true
+        description: The entry's id.
+        schema: { type: string, format: uuid }
+
+    post:
+      operationId: publishEntry
+      tags: [Entries]
+      summary: Publish an entry
+      description: |
+        Make the entry live. Its values must pass every rule of its type, `required` included; if not,
+        `422 VALIDATION_FAILED` names each field. Clears a pending schedule. Publishing a published
+        entry changes nothing.
+      x-scope: entries:write
+      x-permission: entries.write
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-makes-public: true
+      responses:
+        "200":
+          description: The entry.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Entry" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /entries/{type}/{id}/unpublish:
+
+    parameters:
+
+      - name: type
+        in: path
+        required: true
+        description: The API id of the entry's content type (a collection or singleton).
+        schema: { type: string, pattern: "^[a-z][a-z0-9_]{0,62}$", examples: ["product"] }
+
+      - name: id
+        in: path
+        required: true
+        description: The entry's id.
+        schema: { type: string, format: uuid }
+
+    post:
+      operationId: unpublishEntry
+      tags: [Entries]
+      summary: Unpublish an entry
+      description: |
+        Take a published entry down; it is a draft again. Clears a scheduled unpublish.
+      x-scope: entries:write
+      x-permission: entries.write
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      responses:
+        "200":
+          description: The entry.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Entry" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /entries/{type}/{id}/schedule:
+
+    parameters:
+
+      - name: type
+        in: path
+        required: true
+        description: The API id of the entry's content type (a collection or singleton).
+        schema: { type: string, pattern: "^[a-z][a-z0-9_]{0,62}$", examples: ["product"] }
+
+      - name: id
+        in: path
+        required: true
+        description: The entry's id.
+        schema: { type: string, format: uuid }
+
+    post:
+      operationId: scheduleEntry
+      tags: [Entries]
+      summary: Schedule an entry to publish
+      description: |
+        Publish the entry at `at` (a time in the future). It must already pass its type's rules. If a
+        later edit leaves it invalid, the schedule does not publish it and it goes back to draft.
+      x-scope: entries:write
+      x-permission: entries.write
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [at]
+              properties:
+                at: { type: string, format: date-time }
+      responses:
+        "200":
+          description: The entry.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Entry" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /entries/{type}/{id}/unschedule:
+
+    parameters:
+
+      - name: type
+        in: path
+        required: true
+        description: The API id of the entry's content type (a collection or singleton).
+        schema: { type: string, pattern: "^[a-z][a-z0-9_]{0,62}$", examples: ["product"] }
+
+      - name: id
+        in: path
+        required: true
+        description: The entry's id.
+        schema: { type: string, format: uuid }
+
+    post:
+      operationId: unscheduleEntry
+      tags: [Entries]
+      summary: Cancel an entry's schedule
+      description: |
+        Cancel a pending publish; the entry is a draft again.
+      x-scope: entries:write
+      x-permission: entries.write
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      responses:
+        "200":
+          description: The entry.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Entry" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /entries/{type}/{id}/schedule-unpublish:
+
+    parameters:
+
+      - name: type
+        in: path
+        required: true
+        description: The API id of the entry's content type (a collection or singleton).
+        schema: { type: string, pattern: "^[a-z][a-z0-9_]{0,62}$", examples: ["product"] }
+
+      - name: id
+        in: path
+        required: true
+        description: The entry's id.
+        schema: { type: string, format: uuid }
+
+    post:
+      operationId: scheduleEntryUnpublish
+      tags: [Entries]
+      summary: Schedule an entry to unpublish
+      description: |
+        Take a published entry down at `at` (a time in the future); `null` cancels it.
+      x-scope: entries:write
+      x-permission: entries.write
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [at]
+              properties:
+                at: { type: [string, "null"], format: date-time }
+      responses:
+        "200":
+          description: The entry.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Entry" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /entries/{type}/{id}/revisions:
+
+    parameters:
+
+      - name: type
+        in: path
+        required: true
+        description: The API id of the entry's content type (a collection or singleton).
+        schema: { type: string, pattern: "^[a-z][a-z0-9_]{0,62}$", examples: ["product"] }
+
+      - name: id
+        in: path
+        required: true
+        description: The entry's id.
+        schema: { type: string, format: uuid }
+
+    get:
+      operationId: listEntryRevisions
+      tags: [Entries]
+      summary: List an entry's revisions
+      description: |
+        Every saved version of the entry, newest first, without their values (read one for those).
+        Autosaves are kept 30 days; an entry keeps its latest 300 versions and always its first.
+      x-scope: entries:read
+      x-permission: entries.write
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: false
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: A page of revisions.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data:
+                        allOf:
+                          - { $ref: "#/components/schemas/Page" }
+                          - type: object
+                            properties:
+                              items:
+                                type: array
+                                items: { $ref: "#/components/schemas/EntryRevision" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /entries/{type}/{id}/revisions/{rid}:
+
+    parameters:
+
+      - name: type
+        in: path
+        required: true
+        description: The API id of the entry's content type (a collection or singleton).
+        schema: { type: string, pattern: "^[a-z][a-z0-9_]{0,62}$", examples: ["product"] }
+
+      - name: id
+        in: path
+        required: true
+        description: The entry's id.
+        schema: { type: string, format: uuid }
+
+      - name: rid
+        in: path
+        required: true
+        description: The revision's id.
+        schema: { type: string, format: uuid }
+
+    get:
+      operationId: getEntryRevision
+      tags: [Entries]
+      summary: Read a revision
+      description: |
+        One saved version of the entry, with its values.
+      x-scope: entries:read
+      x-permission: entries.write
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: false
+      responses:
+        "200":
+          description: The revision.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/EntryRevision" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /entries/{type}/{id}/revisions/{rid}/restore:
+
+    parameters:
+
+      - name: type
+        in: path
+        required: true
+        description: The API id of the entry's content type (a collection or singleton).
+        schema: { type: string, pattern: "^[a-z][a-z0-9_]{0,62}$", examples: ["product"] }
+
+      - name: id
+        in: path
+        required: true
+        description: The entry's id.
+        schema: { type: string, format: uuid }
+
+      - name: rid
+        in: path
+        required: true
+        description: The revision's id.
+        schema: { type: string, format: uuid }
+
+    post:
+      operationId: restoreEntryRevision
+      tags: [Entries]
+      summary: Restore a revision
+      description: |
+        Put a saved version's values back, as a new change (so it can itself be undone). Fields the
+        type no longer has are left out. A published entry must stay valid.
+      x-scope: entries:write
+      x-permission: entries.write
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      responses:
+        "200":
+          description: The entry, restored.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Entry" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "503": { $ref: "#/components/responses/Maintenance" }
         "500": { $ref: "#/components/responses/InternalError" }
@@ -10670,7 +11687,7 @@ components:
       in: path
       required: true
       schema: {type: string, format: uuid}
-    ContentTypeId:
+    FormatId:
       name: id
       in: path
       required: true
@@ -11416,6 +12433,9 @@ components:
         - insights:read
         - logs:read
         - org:write
+        - entries:read
+        - entries:write
+        - content_types:write
 
     WebhookEvent:
       type: string
@@ -11451,6 +12471,11 @@ components:
         - media.deleted
         - pipeline.run.completed
         - pipeline.run.failed
+        - entry.created
+        - entry.updated
+        - entry.deleted
+        - entry.published
+        - entry.unpublished
 
     WebhookPayload:
       type: object
@@ -11634,7 +12659,7 @@ components:
         format_id:
           type: [string, "null"]
           format: uuid
-          description: The content type. See `GET /content-types`.
+          description: The article format. See `GET /formats`.
         tag_ids:
           type: array
           items: { type: string, format: uuid }
@@ -11728,6 +12753,12 @@ components:
           type: [string, "null"]
           maxLength: 500
           description: Alt text for `og_image_url`. Null means `featured_image_alt`, then the title.
+        custom_fields:
+          type: object
+          additionalProperties: true
+          description: |
+            The values of the Site's custom article fields (the content type of kind `article_fields`,
+            `GET /content-types/article`), keyed by field API id. Not in the list default projection.
         created_at: { type: string, format: date-time, readOnly: true }
         updated_at: { type: string, format: date-time, readOnly: true }
         source:
@@ -11917,6 +12948,14 @@ components:
           type: [string, "null"]
           maxLength: 500
           description: Alt text for `og_image_url`. Null means `featured_image_alt`, then the title.
+        custom_fields:
+          type: [object, "null"]
+          additionalProperties: true
+          description: |
+            The values of the Site's custom article fields, keyed by field API id, sent WHOLE (what you
+            send replaces what is stored; null clears them). Each value is checked against
+            `GET /content-types/article`; a bad one is `422` with `error.fields` naming it
+            (`custom_fields.rating`).
 
     ArticleUpdate:
       type: object
@@ -12038,6 +13077,14 @@ components:
           type: [string, "null"]
           maxLength: 500
           description: Alt text for `og_image_url`. Null means `featured_image_alt`, then the title.
+        custom_fields:
+          type: [object, "null"]
+          additionalProperties: true
+          description: |
+            The values of the Site's custom article fields, keyed by field API id, sent WHOLE (what you
+            send replaces what is stored; null clears them). Each value is checked against
+            `GET /content-types/article`; a bad one is `422` with `error.fields` naming it
+            (`custom_fields.rating`).
 
     ArticleRevisionSummary:
       type: object
@@ -12409,7 +13456,7 @@ components:
             Whether the AI engine runs on its own cadence for this Site. False means the CMS
             works exactly as before and nothing is generated unless you ask for a run.
 
-    ContentType:
+    Format:
       type: object
       description: An article format, that is, an SEO blueprint you can set on an article via `format_id`.
       required: [id, key, name]
@@ -12421,6 +13468,235 @@ components:
         is_platform_default:
           type: boolean
           description: True for a format we ship, false for one defined on your Site.
+
+    ContentField:
+      type: object
+      description: |
+        One field of a content type. `api_id` is the key its value has in an entry's `data`.
+
+        | type | value | settings |
+        |---|---|---|
+        | `text` | one line of text | `validation.min_length`, `max_length` (default 500, at most 5000), `pattern`, `pattern_message` |
+        | `long_text` | plain text | `min_length`, `max_length` (default 20000) |
+        | `rich_text` | markdown | `min_length`, `max_length` (default 200000) |
+        | `number` | a number | `validation.min`, `max`, `integer` |
+        | `boolean` | true or false | |
+        | `date` | `YYYY-MM-DD` | |
+        | `datetime` | ISO 8601 | |
+        | `select` | one of `options` | `options` (1 to 200) |
+        | `email`, `url`, `color` | text in that format (`#rrggbb` for a colour) | |
+        | `json` | any JSON, at most 100 KB | |
+        | `media` | a media id from this Site's library | |
+        | `reference` | the id of something on this Site | `to`: content type API ids, or `article`, `page`, `category`, `tag`, `author` |
+        | `component` | an object with the component's fields | `component`: a component type's API id |
+        | `blocks` | a list of objects, each with `_type` (one of `components`) and that component's fields, and an optional `_key` | `components` |
+
+        `list: true` makes the value a list (not for `boolean`, `json`, the long text types or
+        `blocks`, which is always one), with `validation.min_items` / `max_items`. `required` is
+        enforced when an entry is published or scheduled, not while it is a draft. `unique` (a
+        single text, number, email, url, date or select field of a collection) refuses a second
+        entry with the same value. `condition` shows a field only when another field has a given
+        value, and `required` then applies only when it is shown. `default` fills the field when
+        an entry is created without it.
+      required: [api_id, name, type]
+      properties:
+        api_id: { type: string, pattern: "^[a-z][a-z0-9_]{0,62}$", examples: ["price"] }
+        name: { type: string, minLength: 1, maxLength: 80, examples: ["Price"] }
+        type:
+          type: string
+          enum: [text, long_text, rich_text, number, boolean, date, datetime, select, email, url, color, json, media, reference, component, blocks]
+        description: { type: string, maxLength: 500 }
+        required: { type: boolean }
+        unique: { type: boolean }
+        list: { type: boolean }
+        default: { description: "A value of the field's type (text, number, boolean, select, date, colour, url or email fields)." }
+        validation:
+          type: object
+          properties:
+            min_length: { type: integer, minimum: 0 }
+            max_length: { type: integer, minimum: 0 }
+            pattern: { type: string, description: A regular expression (POSIX) the text must match. }
+            pattern_message: { type: string }
+            min: { type: number }
+            max: { type: number }
+            integer: { type: boolean }
+            min_items: { type: integer, minimum: 0 }
+            max_items: { type: integer, minimum: 0 }
+        options: { type: array, items: { type: string } }
+        to: { type: array, items: { type: string }, examples: [["product", "article"]] }
+        component: { type: string }
+        components: { type: array, items: { type: string } }
+        condition:
+          type: object
+          description: '`{ "field": "tier", "equals": "pro" }`; or `not_equals`, or `in: [...]`.'
+          required: [field]
+          properties:
+            field: { type: string }
+            equals: {}
+            not_equals: {}
+            in: { type: array }
+        renamed_from:
+          type: string
+          writeOnly: true
+          description: |
+            On a change: the field's previous API id. Its stored values move to the new one. Not
+            stored; top-level fields of collections, singletons and article fields only.
+
+    ContentTypeInput:
+      type: object
+      description: A content type as you send it. `GET /content-types` returns this shape plus read-only fields, so a type read can be sent back.
+      required: [api_id, name]
+      properties:
+        api_id:
+          type: string
+          pattern: "^[a-z][a-z0-9_]{0,62}$"
+          description: |
+            Lower-case letters, digits and `_`. Reserved: `article` (only for kind `article_fields`),
+            `articles`, `pages`, `categories`, `tags`, `authors`, `media`, `entries`, `formats`,
+            `typescript` and a few more the API uses.
+          examples: ["product"]
+        kind:
+          type: string
+          enum: [collection, singleton, component, article_fields]
+          default: collection
+          description: |
+            `collection`: any number of entries. `singleton`: exactly one (a homepage, site footer).
+            `component`: no entries of its own; a reusable group of fields for `component` and `blocks`
+            fields. `article_fields`: custom fields on every article (API id `article`; values in the
+            article's `custom_fields`; cannot be `required`, because the AI pipeline publishes articles
+            without them). Never changes once created.
+        name: { type: string, minLength: 1, maxLength: 80, examples: ["Product"] }
+        description: { type: [string, "null"], maxLength: 500 }
+        title_field:
+          type: [string, "null"]
+          description: A single text field whose value is the entry's `title` in lists.
+        fields:
+          type: array
+          maxItems: 100
+          items: { $ref: "#/components/schemas/ContentField" }
+        expected_version:
+          type: integer
+          writeOnly: true
+          description: On `PATCH /content-types/{api_id}`, the `version` you read; a newer one is `412`.
+
+    ContentTypeUpdate:
+      type: object
+      description: A change to one content type. A key you leave out keeps its value; `fields` is the whole list. The API id and kind never change.
+      properties:
+        name: { type: string, minLength: 1, maxLength: 80 }
+        description: { type: [string, "null"], maxLength: 500 }
+        title_field: { type: [string, "null"] }
+        fields:
+          type: array
+          maxItems: 100
+          items: { $ref: "#/components/schemas/ContentField" }
+        expected_version:
+          type: integer
+          description: The `version` you read; a newer one is `412 PRECONDITION_FAILED`.
+
+    ContentType:
+      allOf:
+        - { $ref: "#/components/schemas/ContentTypeInput" }
+        - type: object
+          required: [id, kind, fields, version, created_at, updated_at]
+          properties:
+            id: { type: string, format: uuid, readOnly: true }
+            version: { type: integer, readOnly: true, description: Grows with every change. }
+            created_at: { type: string, format: date-time, readOnly: true }
+            updated_at: { type: string, format: date-time, readOnly: true }
+
+    ContentSchemaResult:
+      type: object
+      required: [dry_run, ok, plan, errors]
+      properties:
+        dry_run: { type: boolean }
+        ok: { type: boolean, description: False when the schema has problems (only on a dry run; a real run is 422). }
+        plan:
+          type: object
+          required: [create, update, delete, unchanged]
+          properties:
+            create: { type: array, items: { type: string } }
+            delete: { type: array, items: { type: string } }
+            unchanged: { type: array, items: { type: string } }
+            update:
+              type: array
+              items:
+                type: object
+                properties:
+                  api_id: { type: string }
+                  added: { type: array, items: { type: string } }
+                  removed: { type: array, items: { type: string } }
+                  renamed: { type: array, items: { type: object, properties: { from: { type: string }, to: { type: string } } } }
+                  retyped: { type: array, items: { type: string } }
+                  entries: { type: integer, description: How many entries (or articles with custom fields) the type holds. }
+        errors:
+          type: array
+          items:
+            type: object
+            required: [path, code, message]
+            properties:
+              path: { type: string, examples: ["product.price.validation.min"] }
+              code: { type: string, examples: ["type"] }
+              message: { type: string }
+        content_types:
+          type: array
+          description: On a real run, every content type afterwards.
+          items: { $ref: "#/components/schemas/ContentType" }
+
+    Entry:
+      type: object
+      required: [id, type, slug, title, status, data, version, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        type: { type: string, description: The content type's API id., examples: ["product"] }
+        slug: { type: [string, "null"], description: Unique within the type; singletons have none. }
+        title: { type: [string, "null"], description: "The value of the type's `title_field`." }
+        status: { type: string, enum: [draft, scheduled, published] }
+        data:
+          type: object
+          additionalProperties: true
+          description: The values, keyed by field API id. Only the type's current fields are returned.
+        published_at: { type: [string, "null"], format: date-time }
+        first_published_at: { type: [string, "null"], format: date-time }
+        scheduled_publish_at: { type: [string, "null"], format: date-time }
+        scheduled_unpublish_at: { type: [string, "null"], format: date-time }
+        version: { type: integer }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    EntryCreate:
+      type: object
+      properties:
+        data: { type: object, additionalProperties: true }
+        slug: { type: [string, "null"], pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$", maxLength: 200 }
+        status: { type: string, enum: [draft, published], default: draft }
+
+    EntryUpdate:
+      type: object
+      properties:
+        data:
+          type: object
+          additionalProperties: true
+          description: Merged key by key; a key set to null clears that field.
+        slug: { type: [string, "null"], pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$", maxLength: 200 }
+        replace: { type: boolean, default: false, description: Replace `data` whole instead of merging. }
+
+    EntryRevision:
+      type: object
+      required: [id, seq, source, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        seq: { type: integer }
+        source: { type: string, enum: [create, manual, autosave, api, import, restore] }
+        actor_user_id: { type: [string, "null"], format: uuid }
+        actor_api_key_id: { type: [string, "null"], format: uuid }
+        restored_from: { type: [string, "null"], format: uuid }
+        status: { type: [string, "null"] }
+        slug: { type: [string, "null"] }
+        title: { type: [string, "null"] }
+        byte_size: { type: integer }
+        created_at: { type: string, format: date-time }
+        data: { type: object, additionalProperties: true, description: The values at this version (on GET of one revision). }
 
     Usage:
       type: object
@@ -13208,7 +14484,7 @@ components:
         format_key:
           type: [string, "null"]
           pattern: ^[a-z][a-z0-9_]{1,39}$
-          description: The `key` of an active format this Site can use (`GET /content-types`).
+          description: The `key` of an active format this Site can use (`GET /formats`).
 
     PlanItemUpdate:
       type: object
@@ -13221,7 +14497,7 @@ components:
         format_key:
           type: [string, "null"]
           pattern: ^[a-z][a-z0-9_]{1,39}$
-          description: The `key` of an active format this Site can use (`GET /content-types`).
+          description: The `key` of an active format this Site can use (`GET /formats`).
         status:
           type: string
           enum: [planned, skipped]
@@ -13343,10 +14619,10 @@ components:
           maxItems: 20
           description: The outline, in order.
 
-    ContentTypeDetail:
+    FormatDetail:
       description: An article format with its blueprint and the instructions the writer receives for it.
       allOf:
-        - { $ref: "#/components/schemas/ContentType" }
+        - { $ref: "#/components/schemas/Format" }
         - type: object
           required: [blueprint, description, prompt_addendum]
           properties:
@@ -13367,7 +14643,7 @@ components:
           type: array
           items: {type: string}
 
-    ContentTypeCreate:
+    FormatCreate:
       type: object
       required: [name, blueprint]
       additionalProperties: false
@@ -13382,7 +14658,7 @@ components:
         description: {type: [string, "null"], maxLength: 1000}
         prompt_addendum: {type: [string, "null"], maxLength: 4000, description: Writing instructions for this format. May use the AI writing profile placeholders.}
 
-    ContentTypeUpdate:
+    FormatUpdate:
       type: object
       description: The key cannot change.
       additionalProperties: false
@@ -14006,7 +15282,7 @@ components:
         format_key:
           type: [string, "null"]
           pattern: ^[a-z][a-z0-9_]{1,39}$
-          description: The `key` of an active format this Site can use (`GET /content-types`).
+          description: The `key` of an active format this Site can use (`GET /formats`).
 
     GapPlanned:
       type: object
