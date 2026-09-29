@@ -363,6 +363,21 @@ export function backgroundStatusText(importId: string, st: BackgroundStatus): st
   const lines = [
     `Import ${importId}: ${state[st.state]}.`,
     `Articles ${p.articles_done} of ${p.articles_total} done${p.articles_failed ? `, ${p.articles_failed} failed` : ""}${p.articles_skipped ? `, ${p.articles_skipped} skipped` : ""}. Images copied ${p.images_copied}${p.images_failed ? `, ${p.images_failed} not copied` : ""}. Created: ${p.categories_created} categories, ${p.tags_created} tags, ${p.authors_created} authors.`,
+    ...(p.cost_history
+      ? [p.cost_history.error
+          ? `Cost history of live articles: NOT imported, because ${p.cost_history.error}.`
+          : `Cost history of live articles (content left as it is): written for ${p.cost_history.written}${p.cost_history.refused ? `, ${p.cost_history.refused} refused` : ""}.`]
+      : []),
+    ...(p.engagement
+      ? [p.engagement.error
+          ? `Engagement history: NOT imported, because ${p.engagement.error}.`
+          : `Engagement history: ${p.engagement.done ? "delivered" : "being sent"}. Days written ${p.engagement.daily}, share rows ${p.engagement.share_rows}, visitor reactions ${p.engagement.picks}.`]
+      : []),
+    ...(p.redirects
+      ? [p.redirects.error
+          ? `Redirects: NOT imported, because ${p.redirects.error}.`
+          : `Redirects: ${p.redirects.done ? "delivered" : "being sent"}. Created ${p.redirects.created}, updated ${p.redirects.updated}, unchanged ${p.redirects.unchanged}.`]
+      : []),
     ...(st.started_at ? [`Started ${st.started_at}; ${st.batches} batch${st.batches === 1 ? "" : "es"} so far; last update ${st.updated_at}${st.finished_at ? `; finished ${st.finished_at}` : ""}.`] : []),
     ...(st.error ? ["", `Why it stopped: ${st.error}`] : []),
     ...(st.last_report ? ["", "Last batch:", batchReportForStatus(st.last_report)] : []),

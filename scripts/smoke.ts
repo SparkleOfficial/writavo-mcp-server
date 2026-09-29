@@ -150,7 +150,8 @@ async function main(): Promise<void> {
   const { handleUploadMedia } = await import("../src/tools/upload-media.js");
   const { inputShapeFor } = await import("../src/tools/schema.js");
   const { START_PLAN_PURCHASE, handleStartPlanPurchase } = await import("../src/tools/plan-purchase.js");
-  const { IMPORT_CONTENT, handleImportContent, importContentTool } = await import("../src/tools/import-content.js");
+  const { IMPORT_CONTENT, handleImportContent, importContentTool, backgroundStatusText } = await import("../src/tools/import-content.js");
+  const { summariseProgress } = await import("../src/import/engine.js");
   const { UPLOAD_MEDIA } = await import("../src/tools/upload-media.js");
   const { NOT_SIGNED_IN_REMOTE } = await import("../src/core/messages.js");
   const { IMPORT_FORMAT_GUIDE, IMPORT_SAMPLE, ImportDocumentSchema, importFormatJsonSchema } = await import("../src/import/format.js");
@@ -500,6 +501,8 @@ async function main(): Promise<void> {
     engagementDaily: new Map<string, Row>(),
     engagementPicks: new Map<string, Row>(),
     engagementCalls: 0,
+    // Which section each POST /engagement/import carried, in order (picks must come before daily rows).
+    engagementOrder: [] as string[],
     engagementOff: false,
     // POST /articles/cost-history (0138): SET per article by external_id; `bulkCostOff` is an API without the route.
     bulkCostCalls: 0,
@@ -620,6 +623,7 @@ async function main(): Promise<void> {
     }
     if (path === "/engagement/import" && req.method === "POST" && !site.engagementOff) {
       site.engagementCalls += 1;
+      site.engagementOrder.push(Object.keys(body).filter((k) => k === "daily" || k === "reactions").join("+"));
       const findPost = (r: Row) => site.articles.find((a) => (r.external_id !== undefined ? a.external_id === r.external_id : a.slug === r.slug));
       const problems: Row[] = [];
       let daily = 0;
@@ -1329,6 +1333,11 @@ async function main(): Promise<void> {
         site.engagementDaily.has("engaged-one|2026-05-10") && site.engagementDaily.has("engaged-two|2026-05-11") && site.engagementPicks.has("engaged-one|anon-123"),
       applied.slice(0, 1200),
     );
+    check(
+      "visitor reactions are sent BEFORE the daily rows, so a day's total ends at exactly what the daily row says (no double count)",
+      site.engagementOrder.join(",") === "reactions,daily",
+      site.engagementOrder.join(","),
+    );
     check("each article's cost history is sent to its own record, apart from Writavo's costs", Array.isArray(one.cost_history) && (one.cost_history as Row[])[0]?.cost_usd === 0.42);
     const callsBefore = site.engagementCalls;
     const again = bodyOf(await handleImportContent(CTX, { import_id: engId, dry_run: false, background: false }, store));
@@ -1359,6 +1368,7 @@ async function main(): Promise<void> {
       articles: [1, 2, 3].map((n) => ({
         external_id: `live:${n}`, status: "published", title: `Live ${n}`, slug: `live-${n}`, content: `Live body ${n}`, published_at: liveAt,
         cost_history: [{ cost_usd: 0.1 * n, stage: "generate", provider: "openai", occurred_on: "2025-02-27" }],
+        featured_image: { url: `https://images.example.test/live-${n}.png`, alt: `Live ${n}` },
       })),
       engagement: { daily: [{ external_id: "live:1", day: "2025-04-01", views: 7 }] },
     };
@@ -1394,6 +1404,21 @@ async function main(): Promise<void> {
         (byExternal("live:2").cost_history as Row[])?.[0]?.cost_usd === 0.2 && byExternal("live:3").content === "Live body 3" && byExternal("live:1").status === "published" &&
         applied.includes("Cost history of live articles (their content was left as it is): written for 3 of 3") && applied.includes("Engagement history: delivered"),
       applied.slice(0, 1500),
+    );
+    check(
+      "a live article left unchanged costs no image copy (the dry run counts none, and the apply copies none)",
+      !stub.requests.some((r) => r.path.endsWith("/media/upload-url")) && !applied.includes("Images copied 3"),
+      stub.requests.map((r) => r.path).join(" ").slice(0, 600),
+    );
+    const saved = await store.readProgress(liveId);
+    const status = backgroundStatusText(liveId, {
+      state: "complete", progress: summariseProgress(saved ? JSON.parse(saved) : null, 3),
+      started_at: null, updated_at: null, finished_at: null, batches: 1, error: null, last_report: null,
+    } as never);
+    check(
+      "the status reply says what cost history and engagement were written",
+      status.includes("Cost history of live articles (content left as it is): written for 3") && status.includes("Engagement history: delivered"),
+      status.slice(0, 900),
     );
     const before = site.bulkCostCalls;
     const again = bodyOf(await handleImportContent(CTX, { import_id: liveId, dry_run: false, publish: false, background: false }, store));

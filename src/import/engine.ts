@@ -1190,6 +1190,21 @@ async function processArticle(state: ApplyState, item: ValidItem): Promise<void>
   let current: SiteArticle | null = null;
 
   if (!articleId) {
+    // Find the article FIRST: one that is live and left unchanged must not cost a single image
+    // copy (the dry run counts none for it, and an apply that copied them left orphan duplicates).
+    need(state, 1);
+    current = await findByExternalId(ctx.api, article.external_id, state.hardDeadline);
+    if (current && current.status === "published" && !state.mayTouchLive) {
+      record(state, item, {
+        outcome: "deferred",
+        article_id: current.id,
+        error: opts.publish
+          ? "live on the Site, so it was left unchanged; updating live content needs confirm: true"
+          : "live on the Site, so it was left unchanged while publish is false",
+      });
+      state.counts.deferred += 1;
+      return;
+    }
     if (opts.rehostImages) {
       await inPool(articleImages(article), IMAGE_CONCURRENCY, async (image) => {
         await rehost(state, image.url, image.alt, "blog-images", warnings);
@@ -1198,23 +1213,11 @@ async function processArticle(state: ApplyState, item: ValidItem): Promise<void>
     }
     const body = buildBody(article, ctx, (url) => (opts.rehostImages ? ctx.progress.images[url]?.url : undefined));
 
-    // find, write, read back (+ publish, re-read) (+ the cost history), reserved before the write so
+    // write, read back (+ publish, re-read) (+ the cost history), reserved before the write so
     // the article is never recorded done with its cost history still unsent
-    need(state, (needsPublish ? 5 : 3) + (article.cost_history !== undefined ? 1 : 0));
-    current = await findByExternalId(ctx.api, article.external_id, state.hardDeadline);
+    need(state, (needsPublish ? 4 : 2) + (article.cost_history !== undefined ? 1 : 0));
     let action: "created" | "updated";
     if (current) {
-      if (current.status === "published" && !state.mayTouchLive) {
-        record(state, item, {
-          outcome: "deferred",
-          article_id: current.id,
-          error: opts.publish
-            ? "live on the Site, so it was left unchanged; updating live content needs confirm: true"
-            : "live on the Site, so it was left unchanged while publish is false",
-        });
-        state.counts.deferred += 1;
-        return;
-      }
       if (current.status === "published" && article.slug && current.slug && current.slug !== article.slug) {
         warnings.push(`its live URL changed from /${current.slug} to /${article.slug}; nothing redirects the old one`);
       }
@@ -1323,8 +1326,14 @@ async function processArticle(state: ApplyState, item: ValidItem): Promise<void>
 /** Rows per call to POST /engagement/import (the API's caps). */
 const ENGAGEMENT_CHUNK = { daily: 5_000, reactions: 10_000 };
 
+/**
+ * v2: picks are sent BEFORE daily rows. The API applies a pick as +1 on its day and a daily row as
+ * SET, so the daily rows must land last, or every imported pick is counted twice (once in the
+ * day's total, once by the pick). v1 sent daily first; the version in the hash makes a section v1
+ * delivered be sent once more, which repairs it: identical picks are a no-op, daily rows SET.
+ */
 function engagementHash(e: EngagementCheck): string {
-  return sha256(JSON.stringify({ d: e.daily, r: e.reactions }));
+  return sha256(JSON.stringify({ v: 2, d: e.daily, r: e.reactions }));
 }
 
 /** The section has rows that have not all been delivered, as the document now has them. */
@@ -1350,7 +1359,8 @@ async function sendEngagement(state: ApplyState): Promise<string | null> {
   }
   const p = ctx.progress.engagement;
   delete p.error;
-  for (const section of ["daily", "reactions"] as const) {
+  // Picks first, daily rows last (see engagementHash). A section is only ever resumed in this order.
+  for (const section of ["reactions", "daily"] as const) {
     const rows = e[section];
     const sentKey = section === "daily" ? "daily_sent" : "reactions_sent";
     while (p[sentKey] < rows.length) {
@@ -2033,6 +2043,10 @@ export interface ImportProgressSummary {
   /** Section work the counters above do not show (0136): content types, entries, custom fields,
    *  redirects and engagement sent. The job runner counts it as progress. */
   work_units: number;
+  /** What the sections after the articles delivered, for status replies (absent: nothing to say). */
+  engagement?: { daily: number; share_rows: number; picks: number; done: boolean; error: string | null };
+  cost_history?: { written: number; refused: number; error: string | null };
+  redirects?: { created: number; updated: number; unchanged: number; done: boolean; error: string | null };
 }
 
 export function summariseProgress(progress: ImportProgress | null, articlesTotal: number): ImportProgressSummary {
@@ -2049,6 +2063,21 @@ export function summariseProgress(progress: ImportProgress | null, articlesTotal
     tags_created: progress?.created.tags ?? 0,
     authors_created: progress?.created.authors ?? 0,
     work_units: sectionWorkUnits(progress),
+    ...(progress?.engagement
+      ? { engagement: { ...progress.engagement.written, done: progress.engagement.done, error: progress.engagement.error ?? null } }
+      : {}),
+    ...(progress?.cost_history || progress?.cost_history_error
+      ? {
+          cost_history: {
+            written: Object.values(progress.cost_history ?? {}).filter((c) => c.done && !c.error).length,
+            refused: Object.values(progress.cost_history ?? {}).filter((c) => c.error).length,
+            error: progress.cost_history_error ?? null,
+          },
+        }
+      : {}),
+    ...(progress?.redirects
+      ? { redirects: { ...progress.redirects.written, done: progress.redirects.done, error: progress.redirects.error ?? null } }
+      : {}),
   };
 }
 
