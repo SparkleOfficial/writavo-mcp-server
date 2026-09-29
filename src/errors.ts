@@ -143,7 +143,9 @@ export function approvalNeeded(tool: string, err: WritavoApiError): ToolResult {
       `  ${approval.url}`,
       "",
       approval.expires_at ? `The approval request expires at ${approval.expires_at}.` : "The approval request expires in a day.",
-      `Once the user says they have approved it, call ${tool} again with exactly the same arguments plus approval_id: "${approval.id}". It can be used once, for this exact request. If they deny it, do not retry.`,
+      // 0146: wait inside a call rather than ending the turn, so the person does not have to come
+      // back and say "done".
+      `Show the user the link, then call wait_for_approval with approval_id: "${approval.id}". It returns as soon as they decide. When it says approved, call ${tool} again with exactly the same arguments plus approval_id: "${approval.id}". It can be used once, for this exact request. If they deny it, do not retry.`,
     ].join("\n"),
   );
 }

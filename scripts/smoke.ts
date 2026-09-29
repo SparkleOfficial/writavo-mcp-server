@@ -504,6 +504,16 @@ async function main(): Promise<void> {
     // Which section each POST /engagement/import carried, in order (picks must come before daily rows).
     engagementOrder: [] as string[],
     engagementOff: false,
+    // POST /seo/import (0143): keywords match ignoring case and spacing, the plan's keyword limit
+    // refuses new ones past it, positions SET per keyword and day; a dry run writes nothing.
+    seoKeywords: new Map<string, Row>(),
+    seoCompetitors: new Map<string, Row>(),
+    seoPositions: new Map<string, Row>(),
+    seoLimit: 1000,
+    seoDryCalls: 0,
+    seoWrites: 0,
+    // Which section each applied POST /seo/import carried, in order.
+    seoOrder: [] as string[],
     // POST /articles/cost-history (0138): SET per article by external_id; `bulkCostOff` is an API without the route.
     bulkCostCalls: 0,
     bulkCostOff: false,
@@ -516,6 +526,17 @@ async function main(): Promise<void> {
     contentTypes: new Map<string, Row>(),
     entries: [] as Row[],
     entryCreates: 0,
+    // GET / PATCH /site/knowledge-profile: prompt_vars merge by name, gaps name what is unset.
+    // Its variable names are the fake's own: the importer learns them from the Site, never a copy.
+    profile: { product_knowledge: null as string | null, niche_keywords: [] as string[], prompt_vars: {} as Record<string, string> },
+    profilePatches: 0,
+  };
+  const PROFILE_VARS = ["brand_category", "brand_topic", "named_competitors"];
+  const profileBody = () => {
+    const p = site.profile;
+    const vars = PROFILE_VARS.filter((k) => !p.prompt_vars[k]);
+    const gaps = { product_knowledge: !p.product_knowledge, niche_keywords: p.niche_keywords.length === 0, prompt_vars: vars };
+    return { ...p, gaps: { complete: !gaps.product_knowledge && !gaps.niche_keywords && vars.length === 0, ...gaps } };
   };
   const ok = (data: unknown, status = 200) => ({ status, body: { ok: true, data } });
   const fail = (status: number, code: string, message: string) => ({ status, body: { ok: false, error: { code, message } } });
@@ -529,7 +550,7 @@ async function main(): Promise<void> {
 
     if (req.method === "GET" && path === "/site") return ok({ id: "00000000-0000-4000-8000-0000000051e1", name: "Smoke Site" });
     if (req.method === "GET" && path === "/ping") {
-      const all = ["articles:read", "articles:write", "taxonomy:write", "authors:write", "media:write", "engagement:write", "content_types:write", "entries:write", "meta:read"];
+      const all = ["articles:read", "articles:write", "taxonomy:write", "authors:write", "media:write", "engagement:write", "content_types:write", "entries:write", "seo:write", "meta:read"];
       return ok({ pong: true, key_kind: "secret", scopes: site.scopes ?? all });
     }
     if (req.method === "GET" && path === "/usage") {
@@ -621,6 +642,16 @@ async function main(): Promise<void> {
     if (path === "/media" && req.method === "POST") {
       return ok({ id: randomUUID(), bucket: "blog-images", url: `https://cdn.example.test/media/${String(body.upload_id)}.png` }, 201);
     }
+    if (path === "/site/knowledge-profile" && req.method === "GET") return ok(profileBody());
+    if (path === "/site/knowledge-profile" && req.method === "PATCH") {
+      const unknown = Object.keys((body.prompt_vars ?? {}) as Row).find((k) => !PROFILE_VARS.includes(k));
+      if (unknown) return fail(422, "VALIDATION_FAILED", `prompt_vars.${unknown}: Unknown variable.`);
+      site.profilePatches += 1;
+      if (body.product_knowledge !== undefined) site.profile.product_knowledge = body.product_knowledge as string;
+      if (body.niche_keywords !== undefined) site.profile.niche_keywords = body.niche_keywords as string[];
+      Object.assign(site.profile.prompt_vars, body.prompt_vars ?? {});
+      return ok(profileBody());
+    }
     if (path === "/engagement/import" && req.method === "POST" && !site.engagementOff) {
       site.engagementCalls += 1;
       site.engagementOrder.push(Object.keys(body).filter((k) => k === "daily" || k === "reactions").join("+"));
@@ -641,6 +672,52 @@ async function main(): Promise<void> {
         picks += 1;
       });
       return ok({ dry_run: body.dry_run !== false, written: { daily, share_rows: daily, picks }, posts: [], problems });
+    }
+    if (path === "/seo/import" && req.method === "POST") {
+      const dry = body.dry_run !== false;
+      // The API replays an Idempotency-Key's first answer, so a chunk sent again under the same key
+      // changes nothing, even when the Site would now answer differently.
+      const replay = dry ? undefined : site.replays.get(req.idempotencyKey ?? "");
+      if (replay) return replay;
+      if (dry) site.seoDryCalls += 1;
+      else {
+        site.seoWrites += 1;
+        site.seoOrder.push(Object.keys(body).filter((k) => k !== "dry_run").join("+"));
+      }
+      const key = (k: unknown) => String(k).trim().replace(/\s+/g, " ").toLowerCase();
+      const problems: Row[] = [];
+      const written = { keywords_created: 0, keywords_updated: 0, competitors_created: 0, competitors_updated: 0, positions: 0 };
+      const plan = { keywords_new: 0, keywords_existing: 0, competitors_new: 0, competitors_existing: 0, positions: 0 };
+      const added = new Set<string>();
+      let room = site.seoLimit - site.seoKeywords.size;
+      ((body.competitors ?? []) as Row[]).forEach((r) => {
+        const d = String(r.domain).toLowerCase().replace(/^www\./, "");
+        if (site.seoCompetitors.has(d)) return void (plan.competitors_existing += 1);
+        plan.competitors_new += 1;
+        if (!dry) (site.seoCompetitors.set(d, r), (written.competitors_created += 1));
+      });
+      ((body.keywords ?? []) as Row[]).forEach((r, index) => {
+        const k = key(r.keyword);
+        if (site.seoKeywords.has(k)) return void (plan.keywords_existing += 1);
+        if (room <= 0) {
+          return void problems.push({ section: "keywords", index, error: `over the tracked-keyword limit: your plan tracks up to ${site.seoLimit} keywords across the organisation, so this one was not added` });
+        }
+        room -= 1;
+        plan.keywords_new += 1;
+        added.add(k);
+        if (!dry) (site.seoKeywords.set(k, r), (written.keywords_created += 1));
+      });
+      ((body.positions ?? []) as Row[]).forEach((r, index) => {
+        const k = key(r.keyword);
+        if (!site.seoKeywords.has(k) && !added.has(k)) {
+          return void problems.push({ section: "positions", index, error: `no tracked keyword "${String(r.keyword)}" on this Site; add it under keywords` });
+        }
+        plan.positions += 1;
+        if (!dry) (site.seoPositions.set(`${k}|${String(r.day)}`, r), (written.positions += 1));
+      });
+      const response = ok({ dry_run: dry, written, plan, tracked_keywords: { limit: site.seoLimit, active: site.seoKeywords.size }, problems });
+      if (!dry) site.replays.set(req.idempotencyKey ?? "", response);
+      return response;
     }
     if (path === "/redirects/bulk" && req.method === "POST") {
       site.redirectCalls += 1;
@@ -791,6 +868,37 @@ async function main(): Promise<void> {
     planWithKey.includes("Current plan: Free") && planWithKey.includes("https://app.writavo.com/billing\n"),
     planWithKey.slice(0, 300),
   );
+
+  // -- 13b. waiting for an approval (0146) -------------------------------------
+  console.log("\n[ 13b. Waiting for an approval ]");
+  {
+    const { handleWaitForApproval } = await import("../src/tools/wait-approval.js");
+    const before = stub.respond;
+    const APPROVAL = "0000000a-0000-4000-8000-00000000a001";
+    let polls = 0;
+    stub.reset();
+    stub.respond = (req) => {
+      if (req.method === "GET" && req.path.endsWith(`/approvals/${APPROVAL}`)) {
+        polls += 1;
+        return { status: 200, body: { ok: true, data: { id: APPROVAL, action: "media.delete", status: polls < 2 ? "pending" : "approved", expires_at: null } } };
+      }
+      return { status: 404, body: { ok: false, error: { code: "NOT_FOUND", message: "Not found." } } };
+    };
+    const approved = bodyOf(await handleWaitForApproval(CTX, { approval_id: APPROVAL, timeout_seconds: 10 }));
+    check(
+      "it polls until the person decides, then says to retry with approval_id, and never decides itself",
+      approved.includes("Approved by a person") && approved.includes(`approval_id: "${APPROVAL}"`) && polls === 2 &&
+        stub.requests.every((r) => r.method === "GET"),
+      approved.slice(0, 300),
+    );
+    stub.respond = () => ({ status: 200, body: { ok: true, data: { id: APPROVAL, action: "media.delete", status: "denied", expires_at: null } } });
+    const denied = bodyOf(await handleWaitForApproval(CTX, { approval_id: APPROVAL }));
+    check("a denial comes back at once and says not to retry", denied.startsWith("Denied") && denied.includes("Do not retry"));
+    stub.respond = () => ({ status: 404, body: { ok: false, error: { code: "NOT_FOUND", message: "Not found." } } });
+    const unknown = bodyOf(await handleWaitForApproval(CTX, { approval_id: APPROVAL }));
+    check("another connection's approval (404) is refused plainly", unknown.includes("no approval"));
+    stub.respond = before;
+  }
 
   // -- 14. the importer ------------------------------------------------------
   console.log("\n[ 14. The importer ]");
@@ -1354,6 +1462,115 @@ async function main(): Promise<void> {
     site.engagementOff = false;
   }
 
+  // -- 14f-seo. SEO data: keywords, competitors and ranking history -----------------------
+  console.log("\n[ 14f-seo. Keywords, competitors and ranking history travel with the import ]");
+  {
+    currentKey = SECRET_KEY;
+    site.seoLimit = 2;
+    const doc = {
+      format: "writavo-import",
+      version: 1,
+      articles: [{ external_id: "seo:1", status: "draft", title: "Seo one", slug: "seo-one", content: "x" }],
+      seo: {
+        keywords: [{ keyword: "best crm" }, { keyword: "crm pricing", is_priority: true }, { keyword: "crm for dentists" }, { keyword: "Best  CRM" }],
+        competitors: [{ domain: "rival.com", name: "Rival" }],
+        positions: [
+          { keyword: "best crm", day: "2026-05-10", position: 4, url: "https://example.com/crm" },
+          { keyword: "crm pricing", day: "2026-05-10", position: null },
+          { keyword: "crm for dentists", day: "2026-05-10", position: 9 },
+          { keyword: "best crm", day: "2999-01-01", position: 1 },
+        ],
+      },
+    };
+    const store = memStore("g:key-seo");
+    stub.reset();
+    const dry = bodyOf(await handleImportContent(CTX, { data: doc }, store));
+    const seoId = /imp_[A-Za-z0-9_-]{22}/.exec(dry)?.[0] ?? "";
+    const at = dry.indexOf("SEO data:");
+    check(
+      "the dry run summarises the SEO section, flags a repeated keyword and an unfinished day itself, and asks the Site without writing",
+      dry.includes("SEO data: 3 keywords, 1 competitor and 3 days of ranking history for 3 keywords") && dry.includes("appears more than once") &&
+        dry.includes("is not a finished day") && site.seoDryCalls === 1 && site.seoWrites === 0,
+      dry.slice(at, at + 1500),
+    );
+    check(
+      "the dry run says the plan's keyword limit leaves one new keyword out, and which rows the Site would skip",
+      dry.includes("Keyword limit: the plan tracks up to 2 keywords") && dry.includes("1 of the new keywords will NOT be added") &&
+        dry.includes("seo.keywords[2]: over the tracked-keyword limit") && dry.includes("seo.positions[2]: no tracked keyword"),
+      dry.slice(at, at + 1500),
+    );
+    check("the dry run lists seo:write among the permissions the import needs", dry.includes("seo:write (the SEO data"), dry.slice(dry.indexOf("Permissions"), dry.indexOf("Permissions") + 400));
+    stub.reset();
+    const applied = bodyOf(await handleImportContent(CTX, { import_id: seoId, dry_run: false, background: false }, store));
+    check(
+      "an apply writes the articles, then sends competitors, keywords and positions in that order, within the limit",
+      applied.includes("Import complete") && applied.includes("SEO data: delivered. Keywords tracked 2") && site.seoOrder.join(",") === "competitors,keywords,positions" &&
+        site.seoKeywords.size === 2 && site.seoCompetitors.has("rival.com") && site.seoPositions.has("best crm|2026-05-10") &&
+        site.seoPositions.has("crm pricing|2026-05-10") && !site.seoPositions.has("crm for dentists|2026-05-10"),
+      applied.slice(applied.indexOf("SEO data"), applied.indexOf("SEO data") + 900),
+    );
+    check("the rows the Site skipped are reported, with how to send them again", applied.includes("SEO rows skipped") && applied.includes("retry_failed: true"), applied.slice(applied.indexOf("SEO rows"), applied.indexOf("SEO rows") + 600));
+    const writesBefore = site.seoWrites;
+    const again = bodyOf(await handleImportContent(CTX, { import_id: seoId, dry_run: false, background: false }, store));
+    check("running it again sends nothing new (the section is already delivered)", again.includes("Import complete") && site.seoWrites === writesBefore, again.slice(0, 300));
+    site.seoLimit = 3;
+    const retried = bodyOf(await handleImportContent(CTX, { import_id: seoId, dry_run: false, background: false, retry_failed: true }, store));
+    check(
+      "retry_failed after the limit rose sends the section again: the skipped keyword and its history land, nothing is duplicated",
+      retried.includes("SEO data: delivered") && site.seoKeywords.size === 3 && site.seoPositions.has("crm for dentists|2026-05-10") && site.seoPositions.size === 3,
+      retried.slice(retried.indexOf("SEO data"), retried.indexOf("SEO data") + 600),
+    );
+    site.scopes = ["articles:read", "articles:write", "meta:read"];
+    const noScope = bodyOf(await handleImportContent(CTX, { data: { ...doc, articles: [{ ...doc.articles[0]!, external_id: "seo:2", slug: "seo-two" }] } }, memStore("g:key-seo-scope")));
+    check("without seo:write the dry run says so up front, before anything is written", noScope.includes("MISSING on this connection: seo:write"), noScope.slice(noScope.indexOf("Permissions"), noScope.indexOf("Permissions") + 500));
+    site.scopes = null;
+    site.seoLimit = 1000;
+  }
+
+  // -- 14f1. The AI writing profile ------------------------------------------------------
+  console.log("\n[ 14f1. The AI writing profile is filled in by the import, and what stays empty is said ]");
+  {
+    currentKey = SECRET_KEY;
+    const doc = {
+      format: "writavo-import",
+      version: 1,
+      articles: [{ external_id: "prof:1", status: "draft", title: "Profiled", slug: "profiled", content: "x" }],
+      profile: { product_knowledge: "Our product transcribes audio.", prompt_vars: { brand_topic: "audio", not_a_var: "x" } },
+    };
+    const store = memStore("g:key-profile");
+    stub.reset();
+    const dry = bodyOf(await handleImportContent(CTX, { data: doc }, store));
+    const profId = /imp_[A-Za-z0-9_-]{22}/.exec(dry)?.[0] ?? "";
+    check(
+      "the dry run lists what the profile section sets, drops a variable the Site does not know, warns what stays empty, and writes nothing",
+      dry.includes("AI writing profile: sets 2 fields (product_knowledge, prompt_vars.brand_topic)") &&
+        dry.includes("profile.prompt_vars.not_a_var: not a prompt variable on this Site") &&
+        dry.includes("WARNING: after this import the AI writing profile is still empty in: niche_keywords; 2 prompt_vars (brand_category, named_competitors)") &&
+        dry.includes("site:write (the AI writing profile)") && site.profilePatches === 0,
+      dry.slice(dry.indexOf("AI writing profile"), dry.indexOf("AI writing profile") + 900),
+    );
+    stub.reset();
+    const applied = bodyOf(await handleImportContent(CTX, { import_id: profId, dry_run: false, background: false }, store));
+    check(
+      "an apply sets only the fields present, merges prompt_vars, and the final reply says the profile is still incomplete",
+      applied.includes("Import complete") && applied.includes("AI writing profile: set (product_knowledge, prompt_vars.brand_topic)") &&
+        applied.includes("The AI writing profile is still incomplete: niche_keywords; 2 prompt_vars") &&
+        site.profile.product_knowledge === "Our product transcribes audio." && site.profile.prompt_vars.brand_topic === "audio" &&
+        !("not_a_var" in site.profile.prompt_vars) && site.profilePatches === 1,
+      applied.slice(0, 1500),
+    );
+    const again = bodyOf(await handleImportContent(CTX, { import_id: profId, dry_run: false, background: false }, store));
+    check("running it again does not set the profile a second time", again.includes("Import complete") && site.profilePatches === 1, again.slice(0, 300));
+    const full = { ...doc, articles: [{ ...doc.articles[0]!, external_id: "prof:2", slug: "profiled-two" }], profile: { niche_keywords: ["audio", "transcription"], prompt_vars: { brand_category: "an AI transcription tool", named_competitors: "Otter.ai, Rev" } } };
+    const done = bodyOf(await handleImportContent(CTX, { data: full, dry_run: false }, memStore("g:key-profile-full")));
+    check(
+      "a later document fills the rest without clearing what the first one set, and the reply no longer warns",
+      done.includes("Import complete") && !done.includes("still incomplete") && site.profile.product_knowledge === "Our product transcribes audio." &&
+        site.profile.prompt_vars.brand_topic === "audio" && site.profile.niche_keywords.length === 2,
+      done.slice(0, 1500),
+    );
+  }
+
   // -- 14f2. Live articles with publish false: cost history and engagement still go ---------
   console.log("\n[ 14f2. Cost history reaches live articles left unchanged; the dry run says so and checks permissions ]");
   {
@@ -1443,6 +1660,8 @@ async function main(): Promise<void> {
     check("with no arguments the reply is the guide and a sample, well under 20 KB, and lists the sections", guide.length < 20_000 && guide.includes("## Sample document") && guide.includes('section: "<name>"'), String(guide.length));
     const eng = bodyOf(await handleImportContent(CTX, { section: "engagement" }));
     check("section: engagement returns its guide text and its JSON Schema", eng.includes("Engagement (optional, top level)") && eng.includes("JSON Schema of the section") && eng.length < 20_000, String(eng.length));
+    const seo = bodyOf(await handleImportContent(CTX, { section: "seo" }));
+    check("section: seo returns its guide text and its JSON Schema", seo.includes("SEO data (optional, top level)") && seo.includes("JSON Schema of the section") && seo.length < 20_000, String(seo.length));
     const cost = bodyOf(await handleImportContent(CTX, { section: "cost_history" }));
     check("section: cost_history returns the field's text and schema", cost.includes("cost_usd") && cost.includes("never billed") && cost.includes("JSON Schema of the field"), cost.slice(0, 300));
     const schema = bodyOf(await handleImportContent(CTX, { section: "schema" }));

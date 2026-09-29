@@ -23,7 +23,7 @@ import {
   type SiteInfo,
   type SiteTerm,
 } from "./site.js";
-import { checkDocument, itemLabel, type ContentTypesCheck, type EngagementCheck, type EntriesCheck, type ItemCheck, type RedirectsCheck } from "./validate.js";
+import { checkDocument, itemLabel, seoKeywordKey, type ContentTypesCheck, type EngagementCheck, type EntriesCheck, type ItemCheck, type ProfileCheck, type RedirectsCheck, type SeoCheck } from "./validate.js";
 
 /**
  * The importer. One tool call is either a dry run (reads only, writes nothing, not even the
@@ -182,11 +182,18 @@ interface Loaded {
   envelopeErrors: string[];
   /** The engagement section's valid rows and skipped-row problems (validate.ts). */
   engagement: EngagementCheck;
+  /** The SEO section's valid rows and skipped-row problems (validate.ts). */
+  seo: SeoCheck;
   /** The redirects section's valid rows and skipped-row problems (validate.ts). */
   redirects: RedirectsCheck;
   /** The content_types and entries sections (0136). */
   contentTypes: ContentTypesCheck;
   entries: EntriesCheck;
+  /** The AI writing profile section, its prompt variable names checked against the Site. */
+  profile: ProfileCheck;
+  /** The Site's profile as GET /site/knowledge-profile returned it, or why it could not be read.
+   *  Read only when the document has a profile section (the dry run reads it either way). */
+  siteProfile?: SiteProfile | string;
   /** Where this call's time went, for the reply (timingLine). */
   timing: CallTiming;
   items: ItemCheck[];
@@ -391,6 +398,14 @@ async function load(api: ToolContext, source: ImportSource): Promise<Loaded | To
     }
   }
 
+  // The AI writing profile: its prompt variable names are the Site's to define, so a name the Site
+  // does not know is reported and left out here rather than refusing the whole section later.
+  let siteProfile: SiteProfile | string | undefined;
+  if (checked.profile.profile) {
+    siteProfile = await readSiteProfile(api);
+    if (typeof siteProfile !== "string") checkProfileVars(checked.profile, siteProfile);
+  }
+
   const store = source.store;
   const existing = store ? await store.read() : null;
   timing.site = Date.now() - mark;
@@ -448,9 +463,12 @@ async function load(api: ToolContext, source: ImportSource): Promise<Loaded | To
     envelope,
     envelopeErrors: checked.envelopeErrors,
     engagement: checked.engagement,
+    seo: checked.seo,
     redirects: checked.redirects,
     contentTypes: checked.contentTypes,
     entries: checked.entries,
+    profile: checked.profile,
+    siteProfile,
     timing,
     items: checked.items,
     valid,
@@ -627,7 +645,7 @@ async function dryRun(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
     ...(envelope.conversion?.lines.length ? [...envelope.conversion.lines, ""] : []),
     `Articles in the file: ${ctx.items.length} (${published} published, ${scheduled ? `${scheduled} scheduled, ` : ""}${plural(valid.length - published - scheduled, "draft")}${invalid.length ? `, ${invalid.length} with problems` : ""}).`,
     `- create: ${counts.create}`,
-    `- update: ${counts.update} (already on the Site with the same external_id)`,
+    `- update: ${counts.update} (already on the Site with the same external_id; one whose content matches the file exactly is left as it is, with no new revision or webhook)`,
     ...(counts.done ? [`- already done by an earlier run: ${counts.done}`] : []),
     ...(counts.unchangedLive ? [`- left unchanged because they are live and publish is false: ${counts.unchangedLive}`] : []),
     ...(counts.costOnLive
@@ -658,14 +676,18 @@ async function dryRun(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
   if (withCustomFields) lines.push("", `Articles' custom fields: ${withCustomFields} articles carry them; set after every entry exists, with their references and media resolved.`);
   lines.push(...redirectsDryRun(ctx));
   lines.push(...engagementDryRun(ctx, byExternalId, bySlug));
+  lines.push(...(await seoDryRun(ctx)));
+  lines.push(...(await profileDryRun(ctx)));
 
   // What the apply will still write beyond articles, and the permissions all of it needs.
   const otherWork: string[] = [];
   if (counts.costOnLive) otherWork.push(`cost history on ${plural(counts.costOnLive, "live article")}`);
   if (engagementPending(ctx)) otherWork.push("the engagement history");
+  if (seoPending(ctx)) otherWork.push("the SEO data");
   if (redirectsPending(ctx)) otherWork.push("redirects");
   if (contentTypesPending(ctx)) otherWork.push("content types");
   if (entriesPending(ctx)) otherWork.push("entries");
+  if (profilePending(ctx)) otherWork.push("the AI writing profile");
   const needs = new Map<string, string>();
   if (pending.length > 0) needs.set("articles:write", "writing articles");
   else if (counts.costOnLive) needs.set("articles:write", "cost history");
@@ -674,8 +696,10 @@ async function dryRun(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
   if (authorsToCreate.length + authorsToFill.length > 0) needs.set("authors:write", "creating and filling in authors");
   if (opts.rehostImages && toCopy.size > 0) needs.set("media:write", "copying images into the media library");
   if (engagementPending(ctx)) needs.set("engagement:write", "the engagement history");
+  if (seoPending(ctx)) needs.set("seo:write", "the SEO data: keywords, competitors and ranking history");
   if (contentTypesPending(ctx)) needs.set("content_types:write", "content types");
   if (entriesPending(ctx)) needs.set("entries:write", "entries");
+  if (profilePending(ctx)) needs.set("site:write", "the AI writing profile");
   const missingScopes = await scopeReport(ctx, needs, lines);
 
   const topLevel = ctx.envelopeErrors;
@@ -742,6 +766,18 @@ async function dryRun(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
 }
 
 /**
+ * Every scope a whole-blog migration writes with: articles (+ engagement history), entries (+
+ * content types), categories, tags and authors, media, Site settings (the AI writing profile) and
+ * SEO (keywords, competitors, ranking history). The dashboard's "Migrate a blog" permission
+ * shortcut grants exactly these (apps/dashboard/lib/agents.ts MIGRATION_WRITE_AREAS). Asked for
+ * up front, so a migration is never stopped halfway by a permission it could have asked for.
+ */
+export const MIGRATION_SCOPES: readonly string[] = [
+  "articles:write", "engagement:write", "entries:write", "content_types:write", "taxonomy:write",
+  "authors:write", "media:write", "site:read", "site:write", "seo:write",
+];
+
+/**
  * The permissions the apply will need, against what this connection carries (GET /ping). Pushes
  * its lines onto `lines` and returns the scopes that are missing. A connection that cannot be
  * read is reported as unchecked, never as fine.
@@ -766,7 +802,7 @@ async function scopeReport(ctx: Loaded, needs: Map<string, string>, lines: strin
   lines.push(
     `MISSING on this connection: ${missing.join(", ")}. That part will be refused until it is granted.`,
     ...missing.map((scope) => `- ${scope}: on the sign-in screen, ${SCOPE_SCREEN[scope] ?? "ask the person who owns the Site"}.`),
-    "To grant it without signing in again, the person opens Settings > AI agents (https://app.writavo.com/settings/agents), finds this connection and adds the permission (Permissions, or the Add button), then runs the dry run again. Or they reconnect Writavo in this AI client and set those rows on the sign-in screen. verify_api_key lists what the connection carries.",
+    "To grant it without signing in again, the person opens Settings > AI agents (https://app.writavo.com/settings/agents), finds this connection and adds the permission (Permissions, or the Add button), then runs the dry run again. The \"Migrate a blog\" button there grants everything a whole-blog move needs in one step, so nothing else stops the import later. Or they reconnect Writavo in this AI client and choose \"Migrate a blog\" on the sign-in screen. verify_api_key lists what the connection carries.",
   );
   return missing;
 }
@@ -782,7 +818,7 @@ interface ApplyState {
   /** Everything still in flight is cut off at this (the API client's own deadline). */
   hardDeadline: number;
   mayTouchLive: boolean;
-  counts: { created: number; updated: number; published: number; scheduled: number; deferred: number; skipped: number; failed: number; imagesCopied: number; imagesFailed: number };
+  counts: { created: number; updated: number; unchanged: number; published: number; scheduled: number; deferred: number; skipped: number; failed: number; imagesCopied: number; imagesFailed: number };
   problems: string[];
   warnings: string[];
   /** When progress was last written (save). */
@@ -1221,10 +1257,13 @@ async function processArticle(state: ApplyState, item: ValidItem): Promise<void>
       if (current.status === "published" && article.slug && current.slug && current.slug !== article.slug) {
         warnings.push(`its live URL changed from /${current.slug} to /${article.slug}; nothing redirects the old one`);
       }
-      await call(ctx.api, { method: "PATCH", path: `/articles/${encodeURIComponent(current.id)}`, body }, state.hardDeadline);
+      // The API writes nothing when the body matches what is stored (Writavo-Unchanged), so a re-run
+      // of an unchanged file makes no edits, revisions or webhooks, and says so.
+      const patched = await call(ctx.api, { method: "PATCH", path: `/articles/${encodeURIComponent(current.id)}`, body }, state.hardDeadline);
       articleId = current.id;
       action = "updated";
-      state.counts.updated += 1;
+      if (patched.unchanged) state.counts.unchanged += 1;
+      else state.counts.updated += 1;
     } else {
       try {
         const created = await call<SiteArticle>(
@@ -1450,6 +1489,234 @@ function engagementReport(ctx: Loaded): string[] {
   }
   const skipped = [...e.problems, ...(p?.problems ?? [])];
   if (skipped.length) lines.push(`Engagement rows skipped (${skipped.length}):`, ...listed(skipped.map((x) => `- ${x}`), 20));
+  return lines;
+}
+
+// ---------------------------------------------------------------------------
+// SEO data (the document's optional seo section, POST /seo/import, 0143)
+// ---------------------------------------------------------------------------
+/** Rows per call to POST /seo/import: within the API's caps (100 / 2,000 / 10,000), with room
+ *  under its 4 MB body limit for long URLs. */
+const SEO_CHUNK = { competitors: 100, keywords: 1_000, positions: 5_000 } as const;
+/** The API's own caps: a dry run sends every keyword with each positions chunk up to these. */
+const SEO_API_CAP = { competitors: 100, keywords: 2_000, positions: 10_000 } as const;
+const SEO_SECTIONS = ["competitors", "keywords", "positions"] as const;
+
+type SeoWritten = { keywords_created: number; keywords_updated: number; competitors_created: number; competitors_updated: number; positions: number };
+interface SeoImportReply {
+  written?: Partial<SeoWritten>;
+  plan?: { keywords_new?: number; keywords_existing?: number; competitors_new?: number; competitors_existing?: number; positions?: number };
+  tracked_keywords?: { limit: number | null; active: number };
+  problems?: { section: string; index: number; error: string }[];
+}
+
+/**
+ * v1: competitors, then keywords, then positions, because a position may name a keyword the same
+ * section adds. A changed section (or a new version here) is sent again from the start, which is
+ * harmless: keywords and competitors match what is there, positions SET.
+ */
+function seoHash(s: SeoCheck): string {
+  return sha256(JSON.stringify({ v: 1, c: s.competitors, k: s.keywords, p: s.positions }));
+}
+
+/** The section has rows that have not all been delivered, as the document now has them. */
+function seoPending(ctx: Loaded): boolean {
+  const s = ctx.seo;
+  if (s.keywords.length + s.competitors.length + s.positions.length === 0) return false;
+  const p = ctx.progress.seo;
+  return !(p && p.hash === seoHash(s) && p.done);
+}
+
+/** Where a missing permission is added: the same connection, no new sign-in (Blogify, 2026-09-29). */
+const ADD_ON_CONNECTION =
+  'add it to this connection in Settings > AI agents (https://app.writavo.com/settings/agents): Permissions on the connection, or "Migrate a blog". No reconnect is needed, and the next run carries on from here';
+const seoScopeMissing = () =>
+  `this connection lacks seo:write (${SCOPE_SCREEN["seo:write"] ?? "SEO, Read and write"}); ${ADD_ON_CONNECTION}`;
+
+/**
+ * Send what is left of the section, a chunk per request. Keywords and competitors already on the
+ * Site are matched, positions SET their keyword and day, so a chunk sent twice changes nothing. A
+ * reason to stop (time, requests, a busy API), or null when this call finished (delivered, or
+ * refused for a reason recorded in progress.seo.error, which the next apply retries). A missing
+ * seo:write is recorded, not fatal: the articles do not need it.
+ */
+async function sendSeo(state: ApplyState): Promise<string | null> {
+  const { ctx } = state;
+  const s = ctx.seo;
+  const hash = seoHash(s);
+  if (!ctx.progress.seo || ctx.progress.seo.hash !== hash) {
+    ctx.progress.seo = {
+      hash,
+      started: new Date().toISOString(),
+      competitors_sent: 0,
+      keywords_sent: 0,
+      positions_sent: 0,
+      done: false,
+      written: { keywords_created: 0, keywords_updated: 0, competitors_created: 0, competitors_updated: 0, positions: 0 },
+      problems: [],
+    };
+  }
+  const p = ctx.progress.seo;
+  delete p.error;
+  for (const section of SEO_SECTIONS) {
+    const rows: unknown[] = s[section];
+    const sentKey = `${section}_sent` as const;
+    while (p[sentKey] < rows.length) {
+      if (Date.now() > state.deadline) return "the time for this call ran out while sending the SEO data";
+      const max = state.opts.budget?.maxRequests;
+      if (max !== undefined && requestsUsed(state) + 1 > max) return REQUEST_BUDGET_SPENT;
+      const chunk = rows.slice(p[sentKey], p[sentKey] + SEO_CHUNK[section]);
+      try {
+        const res = await call<SeoImportReply>(
+          ctx.api,
+          {
+            method: "POST",
+            path: "/seo/import",
+            body: { dry_run: false, [section]: chunk },
+            // The delivery's start is in the key: a resumed chunk replays safely, while a section
+            // sent again from the start (changed, or retry_failed) is new work, not a replay of the
+            // first answer (which could hold a refusal the Site no longer makes).
+            headers: { "Idempotency-Key": `import-seo-${sha256(`${p.started}|${hash}|${section}|${JSON.stringify(chunk)}`)}` },
+          },
+          state.hardDeadline,
+        );
+        const w = res.data?.written ?? {};
+        p.written.keywords_created += w.keywords_created ?? 0;
+        p.written.keywords_updated += w.keywords_updated ?? 0;
+        p.written.competitors_created += w.competitors_created ?? 0;
+        p.written.competitors_updated += w.competitors_updated ?? 0;
+        p.written.positions += w.positions ?? 0;
+        for (const prob of res.data?.problems ?? []) {
+          if (p.problems.length < 40) p.problems.push(`seo.${prob.section}[${p[sentKey] + prob.index}]: ${prob.error}`);
+        }
+        p[sentKey] += chunk.length;
+        await save(state, true);
+      } catch (err) {
+        if (isFatal(err) && err.code !== "INSUFFICIENT_SCOPE") throw err;
+        if (isTransient(err)) return `the API was busy (${apiProblem(err)}) while sending the SEO data`;
+        p.error =
+          err instanceof WritavoApiError && err.code === "INSUFFICIENT_SCOPE"
+            ? seoScopeMissing()
+            : err instanceof WritavoApiError && err.status === 404
+              ? "this Site's API does not accept SEO data yet"
+              : apiProblem(err);
+        await save(state, true);
+        return null;
+      }
+    }
+  }
+  p.done = true;
+  await save(state, true);
+  return null;
+}
+
+/**
+ * The Site's own answer to the section, through POST /seo/import with dry_run (which writes
+ * nothing): the plan's keyword limit, what already exists, and the rows it would skip. Every
+ * keyword goes with each chunk of positions, so a position naming a keyword the document adds is
+ * judged as the apply will judge it. Null when there is nothing to ask; a string when it could
+ * not be asked.
+ */
+async function seoSiteCheck(ctx: Loaded): Promise<SeoImportReply | string | null> {
+  const s = ctx.seo;
+  if (s.keywords.length + s.competitors.length + s.positions.length === 0) return null;
+  const keywords = s.keywords.slice(0, SEO_API_CAP.keywords);
+  const competitors = s.competitors.slice(0, SEO_API_CAP.competitors);
+  const out: SeoImportReply = { plan: {}, problems: [] };
+  const chunks = Math.max(1, Math.ceil(s.positions.length / SEO_API_CAP.positions));
+  try {
+    for (let i = 0; i < chunks; i += 1) {
+      const positions = s.positions.slice(i * SEO_API_CAP.positions, (i + 1) * SEO_API_CAP.positions);
+      const body = { dry_run: true, ...(i === 0 ? { keywords, competitors } : { keywords }), positions };
+      const res = await call<SeoImportReply>(ctx.api, {
+        method: "POST",
+        path: "/seo/import",
+        body,
+        // A dry run is asked afresh every time: a replayed answer could predate a new keyword limit.
+        headers: { "Idempotency-Key": `import-seo-dry-${sha256(`${Date.now()}:${JSON.stringify(body)}`)}` },
+      });
+      const d = res.data ?? {};
+      if (i === 0) {
+        out.plan = { ...d.plan };
+        out.tracked_keywords = d.tracked_keywords;
+      } else {
+        out.plan!.positions = (out.plan!.positions ?? 0) + (d.plan?.positions ?? 0);
+      }
+      for (const prob of d.problems ?? []) {
+        if (prob.section === "positions") out.problems!.push({ ...prob, index: i * SEO_API_CAP.positions + prob.index });
+        else if (i === 0) out.problems!.push(prob);
+      }
+    }
+  } catch (err) {
+    return err instanceof WritavoApiError && err.code === "INSUFFICIENT_SCOPE" ? seoScopeMissing() : apiProblem(err);
+  }
+  return out;
+}
+
+/** The dry run's view of the SEO section: what it carries, and what the Site says it would do. */
+async function seoDryRun(ctx: Loaded): Promise<string[]> {
+  const s = ctx.seo;
+  if (s.keywords.length + s.competitors.length + s.positions.length + s.problems.length === 0) return [];
+  const withHistory = new Set(s.positions.map((r) => seoKeywordKey(r.keyword))).size;
+  const lines = [
+    "",
+    `SEO data: ${plural(s.keywords.length, "keyword")}, ${plural(s.competitors.length, "competitor")} and ${s.positions.length} days of ranking history for ${plural(withHistory, "keyword")}. Sent after every article (competitors, then keywords, then positions): keywords and competitors already on the Site are updated, never duplicated, and each position SETS its keyword and day, so re-running never duplicates. Free: no rank check runs and nothing is charged.`,
+  ];
+  if (s.problems.length) lines.push(`SEO rows with problems, skipped (${s.problems.length}):`, ...listed(s.problems.map((x) => `- ${x}`), 20));
+  if (!seoPending(ctx)) {
+    lines.push("SEO data: already delivered by an earlier run.");
+    return lines;
+  }
+  const site = await seoSiteCheck(ctx);
+  if (typeof site === "string") {
+    lines.push(`The Site could not check the SEO rows (${site}), so the keyword limit and the rows it would skip were not checked.`);
+    return lines;
+  }
+  if (!site) return lines;
+  const plan = site.plan ?? {};
+  const tk = site.tracked_keywords;
+  lines.push(
+    `On the Site: ${plural(plan.keywords_new ?? 0, "new keyword")} and ${plan.keywords_existing ?? 0} already tracked; ${plural(plan.competitors_new ?? 0, "new competitor")} and ${plan.competitors_existing ?? 0} already there; ${plan.positions ?? 0} days of history accepted.`,
+  );
+  if (tk && tk.limit !== null && tk.limit !== undefined) {
+    const over = (site.problems ?? []).filter((x) => x.section === "keywords" && x.error.startsWith("over the tracked-keyword limit")).length;
+    lines.push(
+      over
+        ? `Keyword limit: the plan tracks up to ${tk.limit} keywords across the organisation and ${tk.active} are tracked now, so ${over} of the new keywords will NOT be added (listed below), nor their ranking history. Raise the limit, or pause keywords, before importing, or remove those keywords from the document.`
+        : `Keyword limit: the plan tracks up to ${tk.limit} keywords across the organisation and ${tk.active} are tracked now; the new keywords fit.`,
+    );
+  }
+  if (s.keywords.length > SEO_API_CAP.keywords) {
+    lines.push(`Only the first ${SEO_API_CAP.keywords} keywords were checked with the Site (the most one request takes); the rest are sent in later requests and checked then.`);
+  }
+  const skipped = (site.problems ?? []).map((x) => `- seo.${x.section}[${x.index}]: ${x.error}`);
+  if (skipped.length) lines.push(`SEO rows the Site would skip (${skipped.length}):`, ...listed(skipped, 20));
+  return lines;
+}
+
+/** The SEO section's lines for an apply reply. */
+function seoReport(ctx: Loaded): string[] {
+  const s = ctx.seo;
+  const p = ctx.progress.seo;
+  if (s.keywords.length + s.competitors.length + s.positions.length + s.problems.length === 0) return [];
+  const lines = [""];
+  if (p?.done && p.hash === seoHash(s)) {
+    const w = p.written;
+    lines.push(
+      `SEO data: delivered. Keywords tracked ${w.keywords_created}, updated ${w.keywords_updated}; competitors added ${w.competitors_created}, updated ${w.competitors_updated}; days of ranking history set ${w.positions}.`,
+    );
+  } else if (p?.error) {
+    lines.push(`SEO data: NOT imported, because ${p.error}. The articles are not affected; run the import again later to send it.`);
+  } else {
+    lines.push(
+      `SEO data: ${p?.competitors_sent ?? 0} of ${s.competitors.length} competitors, ${p?.keywords_sent ?? 0} of ${s.keywords.length} keywords and ${p?.positions_sent ?? 0} of ${s.positions.length} days of ranking history sent so far.`,
+    );
+  }
+  const skipped = [...s.problems, ...(p?.problems ?? [])];
+  if (skipped.length) {
+    lines.push(`SEO rows skipped (${skipped.length}):`, ...listed(skipped.map((x) => `- ${x}`), 20));
+    if (p?.done && p.problems.length) lines.push("To send the section again once that is fixed (a higher keyword limit, say), run the import again with retry_failed: true.");
+  }
   return lines;
 }
 
@@ -1777,7 +2044,7 @@ async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
     deadline: (opts.startedAt ?? Date.now()) + (opts.budget ?? FOREGROUND_BUDGET).workMs,
     hardDeadline: (opts.startedAt ?? Date.now()) + (opts.budget ?? FOREGROUND_BUDGET).workMs + (opts.budget ?? FOREGROUND_BUDGET).graceMs,
     mayTouchLive,
-    counts: { created: 0, updated: 0, published: 0, scheduled: 0, deferred: 0, skipped: 0, failed: 0, imagesCopied: 0, imagesFailed: 0 },
+    counts: { created: 0, updated: 0, unchanged: 0, published: 0, scheduled: 0, deferred: 0, skipped: 0, failed: 0, imagesCopied: 0, imagesFailed: 0 },
     problems: [],
     warnings: [],
     lastSave: Date.now(),
@@ -1793,6 +2060,17 @@ async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
       await save(state, true);
       if (isFatal(err)) return tagged("stopped", stopReport(state, err));
       stopped = err instanceof OutOfRequests ? REQUEST_BUDGET_SPENT : `the content types could not be applied (${apiProblem(err)})`;
+    }
+  }
+  // The AI writing profile is one PATCH and depends on nothing else, so it goes first: a long import
+  // fills the profile on its first call. A refusal is recorded and tried once more at the end.
+  if (!stopped && profilePending(ctx) && !profileRefused(ctx)) {
+    try {
+      stopped = await sendProfile(state);
+    } catch (err) {
+      await save(state, true);
+      if (err instanceof OutOfRequests) stopped = REQUEST_BUDGET_SPENT;
+      else return tagged("stopped", stopReport(state, err));
     }
   }
   const termsStarted = Date.now();
@@ -1913,15 +2191,44 @@ async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
     const why = await sendEngagement(state);
     if (why) stopped = why;
   }
+  // The SEO data last (keyed on keywords and domains, not on the posts). retry_failed sends a
+  // delivered section again when the Site skipped rows, e.g. after the plan's keyword limit rose.
+  if (remaining === 0 && !stopped && opts.retryFailed && ctx.progress.seo?.done && ctx.progress.seo.problems.length > 0) {
+    delete ctx.progress.seo;
+  }
+  if (remaining === 0 && !stopped && seoPending(ctx)) {
+    try {
+      const why = await sendSeo(state);
+      if (why) stopped = why;
+    } catch (err) {
+      await save(state, true);
+      if (err instanceof OutOfRequests) stopped = REQUEST_BUDGET_SPENT;
+      else if (isFatal(err)) return tagged("stopped", stopReport(state, err));
+      else throw err;
+    }
+  }
+  // The profile's one retry, once every article is in (it was refused at the start of a call).
+  if (remaining === 0 && !stopped && profileRefused(ctx)) {
+    try {
+      const why = await sendProfile(state);
+      if (why) stopped = why;
+    } catch (err) {
+      await save(state, true);
+      if (err instanceof OutOfRequests) stopped = REQUEST_BUDGET_SPENT;
+      else return tagged("stopped", stopReport(state, err));
+    }
+  }
   const costUnfinished = costHistoryTargets(ctx).length > 0 && !ctx.progress.cost_history_error;
   const redirectsUnfinished = redirectsPending(ctx) && !ctx.progress.redirects?.error;
   const engagementUnfinished = engagementPending(ctx) && !ctx.progress.engagement?.error;
+  const seoUnfinished = seoPending(ctx) && !ctx.progress.seo?.error;
   const sectionsUnfinished =
     (contentTypesPending(ctx) && !ctx.progress.content_types?.error) || entriesPending(ctx) || customFieldsPending(ctx);
-  const allDone = remaining === 0 && !engagementUnfinished && !redirectsUnfinished && !costUnfinished && !sectionsUnfinished;
+  const profileUnfinished = profilePending(ctx) && !profileRefused(ctx);
+  const allDone = remaining === 0 && !engagementUnfinished && !seoUnfinished && !redirectsUnfinished && !costUnfinished && !sectionsUnfinished && !profileUnfinished;
   const c = state.counts;
   const lines: string[] = [];
-  const thisCall = `This call: created ${c.created}, updated ${c.updated}, published ${c.published}${c.scheduled ? `, scheduled ${c.scheduled}` : ""}, left unchanged ${c.deferred}, skipped ${c.skipped}, failed ${c.failed}. Images copied ${c.imagesCopied}${c.imagesFailed ? `, not copied ${c.imagesFailed}` : ""}.`;
+  const thisCall = `This call: created ${c.created}, updated ${c.updated}, published ${c.published}${c.scheduled ? `, scheduled ${c.scheduled}` : ""}${c.unchanged ? `, already up to date ${c.unchanged}` : ""}, left unchanged ${c.deferred}, skipped ${c.skipped}, failed ${c.failed}. Images copied ${c.imagesCopied}${c.imagesFailed ? `, not copied ${c.imagesFailed}` : ""}.`;
   const created = ctx.progress.created;
 
   if (allDone) {
@@ -1945,6 +2252,8 @@ async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
     lines.push(...costHistoryReport(ctx));
     lines.push(...redirectsReport(ctx));
     lines.push(...engagementReport(ctx));
+    lines.push(...seoReport(ctx));
+    lines.push(...(await profileReport(ctx, true)));
     lines.push(
       "",
       ctx.source.store
@@ -1958,7 +2267,7 @@ async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
       remaining === 0
         ? sectionsUnfinished
           ? `Every article is imported into the Site "${ctx.site.name}"; the content types, entries or custom fields are still being written.`
-          : `Every article is imported into the Site "${ctx.site.name}"; ${[costUnfinished && "the cost history", redirectsUnfinished && "the redirects", engagementUnfinished && "the engagement history"].filter(Boolean).join(" and ")} ${[costUnfinished, redirectsUnfinished, engagementUnfinished].filter(Boolean).length > 1 ? "are" : "is"} still being sent.`
+          : `Every article is imported into the Site "${ctx.site.name}"; ${[costUnfinished && "the cost history", redirectsUnfinished && "the redirects", engagementUnfinished && "the engagement history", seoUnfinished && "the SEO data"].filter(Boolean).join(" and ")} ${[costUnfinished, redirectsUnfinished, engagementUnfinished, seoUnfinished].filter(Boolean).length > 1 ? "are" : "is"} still being sent.`
         : `Imported a batch into the Site "${ctx.site.name}". ${ctx.valid.length - remaining} of ${ctx.valid.length} articles are done and ${remaining} remain.`,
       "",
       thisCall,
@@ -1971,6 +2280,8 @@ async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
     lines.push(...costHistoryReport(ctx));
     lines.push(...redirectsReport(ctx));
     lines.push(...engagementReport(ctx));
+    lines.push(...seoReport(ctx));
+    lines.push(...(await profileReport(ctx, false)));
     if (ctx.source.store) {
       lines.push(
         "",
@@ -2045,6 +2356,7 @@ export interface ImportProgressSummary {
   work_units: number;
   /** What the sections after the articles delivered, for status replies (absent: nothing to say). */
   engagement?: { daily: number; share_rows: number; picks: number; done: boolean; error: string | null };
+  seo?: { keywords_created: number; keywords_updated: number; competitors_created: number; competitors_updated: number; positions: number; done: boolean; error: string | null };
   cost_history?: { written: number; refused: number; error: string | null };
   redirects?: { created: number; updated: number; unchanged: number; done: boolean; error: string | null };
 }
@@ -2066,6 +2378,7 @@ export function summariseProgress(progress: ImportProgress | null, articlesTotal
     ...(progress?.engagement
       ? { engagement: { ...progress.engagement.written, done: progress.engagement.done, error: progress.engagement.error ?? null } }
       : {}),
+    ...(progress?.seo ? { seo: { ...progress.seo.written, done: progress.seo.done, error: progress.seo.error ?? null } } : {}),
     ...(progress?.cost_history || progress?.cost_history_error
       ? {
           cost_history: {
@@ -2538,6 +2851,162 @@ function customFieldsReport(ctx: Loaded): string[] {
   return ["", `Articles' custom fields: set on ${done} of ${items.length}${failed ? `, ${failed} refused (listed above)` : ""}.`];
 }
 
+// ---------------------------------------------------------------------------
+// The AI writing profile (PATCH /site/knowledge-profile)
+// ---------------------------------------------------------------------------
+/** GET /site/knowledge-profile, the parts the importer uses. `gaps` is absent on an older API. */
+interface SiteProfile {
+  product_knowledge: string | null;
+  niche_keywords: string[];
+  prompt_vars: Record<string, string>;
+  gaps?: { complete: boolean; product_knowledge: boolean; niche_keywords: boolean; prompt_vars: string[] };
+}
+
+/** The Site's profile, or why it could not be read (a connection without site:read, say). */
+async function readSiteProfile(api: ToolContext): Promise<SiteProfile | string> {
+  try {
+    const res = await call<SiteProfile>(api, { method: "GET", path: "/site/knowledge-profile" });
+    return res.data ?? "the API returned no profile";
+  } catch (err) {
+    return apiProblem(err);
+  }
+}
+
+/**
+ * Drop the prompt variable names the Site does not know, each reported. The known names are the
+ * Site's own answer (the ones it has set plus the ones it reports unset), so the list is never a
+ * copy kept here. An older API that reports no gaps leaves the check to the PATCH.
+ */
+function checkProfileVars(check: ProfileCheck, site: SiteProfile): void {
+  const vars = check.profile?.prompt_vars;
+  if (!vars || !site.gaps) return;
+  const known = new Set([...Object.keys(site.prompt_vars ?? {}), ...site.gaps.prompt_vars]);
+  const kept: Record<string, string> = {};
+  for (const [k, v] of Object.entries(vars)) {
+    if (known.has(k)) kept[k] = v;
+    else check.problems.push(`profile.prompt_vars.${k}: not a prompt variable on this Site, so it is left out. Known: ${[...known].sort().join(", ")}`);
+  }
+  if (Object.keys(kept).length) check.profile!.prompt_vars = kept;
+  else delete check.profile!.prompt_vars;
+  if (Object.keys(check.profile!).length === 0) check.profile = null;
+}
+
+function profileHash(ctx: Loaded): string {
+  return sha256(JSON.stringify(ctx.profile.profile));
+}
+
+/** The section has fields that have not been set, as the document now has them. */
+function profilePending(ctx: Loaded): boolean {
+  if (!ctx.profile.profile) return false;
+  const p = ctx.progress.profile;
+  return !(p && p.hash === profileHash(ctx) && p.done);
+}
+
+/** The Site refused this version of the section (recorded; retried once at the end of a call). */
+function profileRefused(ctx: Loaded): boolean {
+  const p = ctx.progress.profile;
+  return profilePending(ctx) && !!p && p.hash === profileHash(ctx) && !!p.error;
+}
+
+/** The fields a profile section sets, as the reports name them. */
+function profileFields(profile: NonNullable<ProfileCheck["profile"]>): string[] {
+  const out: string[] = [];
+  for (const [k, v] of Object.entries(profile)) {
+    if (k === "prompt_vars") out.push(...Object.keys(v as Record<string, string>).map((n) => `prompt_vars.${n}`));
+    else if (v !== undefined) out.push(k);
+  }
+  return out;
+}
+
+/**
+ * One PATCH with the fields the document has (prompt_vars merge name by name on the server, so
+ * names left out keep the Site's value). Null, or why to stop. A missing scope or permission is
+ * recorded, not fatal: the articles do not need the profile.
+ */
+async function sendProfile(state: ApplyState): Promise<string | null> {
+  const { ctx } = state;
+  const profile = ctx.profile.profile!;
+  const hash = profileHash(ctx);
+  ctx.progress.profile = { hash, done: false };
+  const p = ctx.progress.profile;
+  need(state, 1);
+  try {
+    await call(ctx.api, { method: "PATCH", path: "/site/knowledge-profile", body: profile }, state.hardDeadline);
+    p.done = true;
+    p.set = profileFields(profile);
+  } catch (err) {
+    if (isFatal(err) && err.code !== "INSUFFICIENT_SCOPE") throw err;
+    if (isTransient(err)) return `the API was busy (${apiProblem(err)}) while setting the AI writing profile`;
+    p.error = err instanceof WritavoApiError && err.code === "INSUFFICIENT_SCOPE"
+      ? `this connection lacks site:write (${SCOPE_SCREEN["site:write"] ?? "Site settings, Read and write"}); ${ADD_ON_CONNECTION}`
+      : apiProblem(err);
+  }
+  await save(state, true);
+  return null;
+}
+
+/** What stays empty after the document's profile is set, from the Site's `gaps`. */
+function gapsAfter(site: SiteProfile, profile: ProfileCheck["profile"]): string[] {
+  const g = site.gaps!;
+  const out: string[] = [];
+  if (g.product_knowledge && !profile?.product_knowledge) out.push("product_knowledge");
+  if (g.niche_keywords && !profile?.niche_keywords?.length) out.push("niche_keywords");
+  const vars = g.prompt_vars.filter((k) => !profile?.prompt_vars?.[k]);
+  if (vars.length) out.push(`${vars.length} prompt_vars (${vars.join(", ")})`);
+  return out;
+}
+
+const PROFILE_GAP_ADVICE =
+  "Until they are filled in, the AI pipeline writes with generic placeholders instead of the brand's details. Add them in a profile section of the document (import_content section \"profile\") and import again, or set them with the knowledge profile action (search_writavo_actions \"knowledge profile\"). Nothing needs them unless the AI pipeline is used.";
+
+/** The dry run's view: what would be set, and what the profile would still lack afterwards. */
+async function profileDryRun(ctx: Loaded): Promise<string[]> {
+  const pr = ctx.profile;
+  const lines = [""];
+  if (pr.profile) {
+    const fields = profileFields(pr.profile);
+    lines.push(
+      profilePending(ctx)
+        ? `AI writing profile: sets ${fields.length} field${fields.length === 1 ? "" : "s"} (${fields.join(", ")}) before the articles. Fields the document leaves out keep what the Site has; nothing is cleared.`
+        : "AI writing profile: already set by an earlier run.",
+    );
+  }
+  if (pr.problems.length) lines.push(`AI writing profile problems, left out (${pr.problems.length}):`, ...listed(pr.problems.map((x) => `- ${x}`), 20));
+  const site = ctx.siteProfile ?? (await readSiteProfile(ctx.api));
+  if (typeof site === "string") {
+    lines.push(`AI writing profile: the Site's profile could not be read (${site}), so what stays empty was not checked.`);
+  } else if (site.gaps) {
+    const left = gapsAfter(site, pr.profile);
+    if (left.length) lines.push(`WARNING: after this import the AI writing profile is still empty in: ${left.join("; ")}. ${PROFILE_GAP_ADVICE}`);
+    else if (pr.profile) lines.push("After this import the AI writing profile is complete.");
+  }
+  return lines.length > 1 ? lines : [];
+}
+
+/**
+ * The apply reply's lines. `final` (the import is complete) reads the profile again and says
+ * whether it still has gaps, whether or not the document had a profile section.
+ */
+async function profileReport(ctx: Loaded, final: boolean): Promise<string[]> {
+  const p = ctx.progress.profile;
+  const lines = [""];
+  if (ctx.profile.profile) {
+    if (p?.done && p.hash === profileHash(ctx)) lines.push(`AI writing profile: set (${(p.set ?? []).join(", ")}).`);
+    else if (p?.error && p.hash === profileHash(ctx)) lines.push(`AI writing profile: NOT set, because ${p.error}. The articles are not affected; run the import again once that is fixed.`);
+    else lines.push("AI writing profile: not set yet.");
+  }
+  if (ctx.profile.problems.length) lines.push(`AI writing profile problems, left out (${ctx.profile.problems.length}):`, ...listed(ctx.profile.problems.map((x) => `- ${x}`), 20));
+  if (final) {
+    const site = await readSiteProfile(ctx.api);
+    if (typeof site === "string") {
+      lines.push(`AI writing profile: could not be checked (${site}).`);
+    } else if (site.gaps && !site.gaps.complete) {
+      lines.push(`The AI writing profile is still incomplete: ${gapsAfter(site, null).join("; ")}. ${PROFILE_GAP_ADVICE}`);
+    }
+  }
+  return lines.length > 1 ? lines : [];
+}
+
 /** Everything done since the last batch that the article counters do not show (the job runner's
  *  "did this batch move?"): content types, entries, custom fields, redirects and engagement sent. */
 function sectionWorkUnits(progress: ImportProgress | null): number {
@@ -2550,6 +3019,8 @@ function sectionWorkUnits(progress: ImportProgress | null): number {
     Object.values(progress.custom_fields ?? {}).filter((c) => c.done || c.error).length +
     Object.values(progress.cost_history ?? {}).filter((c) => c.done).length +
     (progress.redirects?.sent ?? 0) +
-    (progress.engagement ? progress.engagement.daily_sent + progress.engagement.reactions_sent : 0)
+    (progress.engagement ? progress.engagement.daily_sent + progress.engagement.reactions_sent : 0) +
+    (progress.seo ? progress.seo.competitors_sent + progress.seo.keywords_sent + progress.seo.positions_sent : 0) +
+    (progress.profile?.done ? 1 : 0)
   );
 }

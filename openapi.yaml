@@ -532,6 +532,59 @@ paths:
         "503": { $ref: "#/components/responses/Maintenance" }
         "500": { $ref: "#/components/responses/InternalError" }
 
+  /approvals/{id}:
+    get:
+      operationId: getApprovalStatus
+      tags: [Meta]
+      summary: Check an approval you are waiting on
+      description: |
+        Whether a person has decided an approval THIS key asked for (a `428 APPROVAL_REQUIRED`
+        gave you its id): `pending`, `approved`, `denied`, `used` or `expired`. Only the key that
+        asked can read it; any other id is `404`. Cheap and meant to be polled every few seconds
+        while you wait, and it is not written to the Site's agent call log.
+
+        When it reads `approved`, send the original request again, unchanged, with the
+        `Writavo-Approval` header set to the id. The MCP server's `wait_for_approval` tool does
+        the waiting for you.
+      x-scope: meta:read
+      x-permission: none
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: false
+      x-mcp-surface: action
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: The approval id from the 428.
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The approval's status.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [id, action, status, expires_at, decided_at]
+                        properties:
+                          id: { type: string, format: uuid }
+                          action: { type: string, description: The approval action, for example media.delete. }
+                          status: { type: string, enum: [pending, approved, denied, used, expired] }
+                          expires_at: { type: [string, "null"], format: date-time }
+                          decided_at: { type: [string, "null"], format: date-time }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
   # ==========================================================================
   # ARTICLES
   # ==========================================================================
@@ -539,9 +592,14 @@ paths:
     get:
       operationId: listArticles
       tags: [Articles]
-      summary: List articles
+      summary: List and search articles
       description: |
         Cursor paginated, newest updated first.
+
+        **Search with `q`.** `GET /articles?q=meeting notes` matches the words in the title,
+        excerpt and body (with stemming, `"exact phrase"` and `-excluded`), or a part of the title.
+        It is a filter, so it combines with `status`, `category_id`, `tag_id`, `author_id` and
+        pagination, and a headless site can search its blog without downloading every summary.
 
         The default projection deliberately omits `content`. Article bodies are large, and a
         list endpoint that returns every body is the classic way to make a content API slow and
@@ -817,6 +875,12 @@ paths:
         changed the article since then you get `412 PRECONDITION_FAILED` instead of silently
         overwriting their work. `If-Match` is optional in v1 for compatibility, and omitting it
         means last write wins, which is almost never what you want on shared content.
+
+        **A PATCH that changes nothing writes nothing.** When every field you send already
+        matches what is stored, the article is left exactly as it is: no new revision, no
+        `updated_at` change, no `article.updated` webhook and no cache purge. The response is
+        the stored article with `Writavo-Unchanged: true`, so a sync or an import re-run can
+        send whole articles without turning each one into an edit.
       x-scope: articles:write
       x-permission: articles.write
       x-entitlement: none
@@ -833,11 +897,14 @@ paths:
             schema: { $ref: "#/components/schemas/ArticleUpdate" }
       responses:
         "200":
-          description: The updated article.
+          description: The updated article (or, with `Writavo-Unchanged`, the stored one).
           headers:
             ETag:
               description: The new concurrency token.
               schema: { type: string }
+            Writavo-Unchanged:
+              description: Present, as `true`, when the request matched the stored article and nothing was written.
+              schema: { type: string, enum: ["true"] }
           content:
             application/json:
               schema:
@@ -862,6 +929,9 @@ paths:
       tags: [Articles]
       summary: Delete an article
       description: |
+        **Deleting several?** Use `bulkDeleteArticles` (POST .../bulk-delete): up to 100 articles in one
+        call, and an AI agent needs ONE approval for the whole list instead of one per item.
+
         Permanent. The row, its tag assignments and the redirects that point at it are removed,
         and if the article was published its URL starts returning 404 on your blog once the cache
         is purged.
@@ -1442,6 +1512,90 @@ paths:
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/InternalError" }
 
+  /articles/bulk-delete:
+    post:
+      operationId: bulkDeleteArticles
+      tags: [Articles]
+      summary: Delete many articles
+      description: |
+        Deletes up to 100 articles in one call, permanently, exactly as `DELETE /articles/{id}`
+        does for each: the row, its tag assignments and the redirects that point at it go, and a
+        published article's URL starts returning 404 on your blog once the cache is purged. There
+        is no trash and no undo; to take posts off the web and keep them, unpublish them instead.
+
+        Each id is deleted exactly as the single `DELETE` does it, with its own audit entry and
+        webhook. An id that names no article on this Site, whether it never existed, was already
+        deleted or belongs to another Site, is listed in `not_found`. A repeated id counts once. If
+        one article cannot be deleted it is listed in `failed` with the error the single delete
+        would have returned, and the rest of the list still runs.
+
+        `dry_run: true` deletes nothing and returns the same report: `deleted` then lists the ids
+        that would be deleted.
+
+        **When an AI agent asks.** A key approved for an AI assistant (a device or OAuth sign-in),
+        or any request from an MCP client, gets `428 APPROVAL_REQUIRED` on the first try while the
+        organisation requires approvals, with `error.approval.url` for a person to approve or deny
+        in the dashboard. ONE approval covers the whole list: the person sees how many articles and how many of them are published.
+        Retry the same request with `Writavo-Approval: <error.approval.id>` once they have. The
+        approval is for the exact articles that existed on this Site when it was asked: if one of
+        them has since been deleted, the retry is `409 APPROVAL_INVALID` and you ask again. When
+        none of the ids is an article on this Site, or on a dry run, no approval is asked for
+        and the report comes back directly. Other callers are unaffected.
+      x-scope: articles:write
+      x-permission: articles.write
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-writavo-approval: article.delete
+      x-writavo-approval-kind: destructive
+      x-agent-consequence: Permanently deletes every article in the list; each published one disappears from the live blog.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyRequired"
+        - $ref: "#/components/parameters/WritavoApproval"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BulkDeleteInput" }
+            examples:
+              list:
+                summary: Delete two articles
+                value:
+                  ids:
+                    - "4f6b2c1e-8a3d-4e5f-9b7a-1c2d3e4f5a6b"
+                    - "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d"
+      responses:
+        "200":
+          description: What happened to each id. Every id sent appears in exactly one list.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/BulkDeleteResult" }
+              examples:
+                report:
+                  summary: One deleted, one not on this Site
+                  value:
+                    ok: true
+                    data:
+                      deleted: ["4f6b2c1e-8a3d-4e5f-9b7a-1c2d3e4f5a6b"]
+                      not_found: ["9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d"]
+                      failed: []
+                      dry_run: false
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "428": { $ref: "#/components/responses/ApprovalRequired" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
   /articles/{id}/cost-history:
     parameters:
       - $ref: "#/components/parameters/ArticleId"
@@ -1786,6 +1940,90 @@ paths:
         "503": { $ref: "#/components/responses/Maintenance" }
         "500": { $ref: "#/components/responses/InternalError" }
 
+  /categories/bulk-delete:
+    post:
+      operationId: bulkDeleteCategories
+      tags: [Categories]
+      summary: Delete many categories
+      description: |
+        Deletes up to 100 categories in one call, exactly as `DELETE /categories/{id}` does for
+        each. No article is deleted: an article filed under a deleted category keeps its content
+        and loses that category (its next category becomes its primary one, if it has one), and a
+        child category of a deleted one moves to the top level.
+
+        Each id is deleted exactly as the single `DELETE` does it, with its own audit entry and
+        webhook. An id that names no category on this Site, whether it never existed, was already
+        deleted or belongs to another Site, is listed in `not_found`. A repeated id counts once. If
+        one category cannot be deleted it is listed in `failed` with the error the single delete
+        would have returned, and the rest of the list still runs.
+
+        `dry_run: true` deletes nothing and returns the same report: `deleted` then lists the ids
+        that would be deleted.
+
+        **When an AI agent asks.** A key approved for an AI assistant (a device or OAuth sign-in),
+        or any request from an MCP client, gets `428 APPROVAL_REQUIRED` on the first try while the
+        organisation requires approvals, with `error.approval.url` for a person to approve or deny
+        in the dashboard. ONE approval covers the whole list: the person sees how many categories.
+        Retry the same request with `Writavo-Approval: <error.approval.id>` once they have. The
+        approval is for the exact categories that existed on this Site when it was asked: if one of
+        them has since been deleted, the retry is `409 APPROVAL_INVALID` and you ask again. When
+        none of the ids is a category on this Site, or on a dry run, no approval is asked for
+        and the report comes back directly. Other callers are unaffected.
+      x-scope: taxonomy:write
+      x-permission: taxonomy.manage
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-writavo-approval: category.delete
+      x-writavo-approval-kind: destructive
+      x-agent-consequence: Permanently deletes every category in the list; their articles keep their content and lose those categories.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyRequired"
+        - $ref: "#/components/parameters/WritavoApproval"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BulkDeleteInput" }
+            examples:
+              list:
+                summary: Delete two categories
+                value:
+                  ids:
+                    - "4f6b2c1e-8a3d-4e5f-9b7a-1c2d3e4f5a6b"
+                    - "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d"
+      responses:
+        "200":
+          description: What happened to each id. Every id sent appears in exactly one list.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/BulkDeleteResult" }
+              examples:
+                report:
+                  summary: One deleted, one not on this Site
+                  value:
+                    ok: true
+                    data:
+                      deleted: ["4f6b2c1e-8a3d-4e5f-9b7a-1c2d3e4f5a6b"]
+                      not_found: ["9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d"]
+                      failed: []
+                      dry_run: false
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "428": { $ref: "#/components/responses/ApprovalRequired" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
   /categories/{id}:
     parameters:
       - $ref: "#/components/parameters/CategoryId"
@@ -1869,6 +2107,9 @@ paths:
       tags: [Categories]
       summary: Delete a category
       description: |
+        **Deleting several?** Use `bulkDeleteCategories` (POST .../bulk-delete): up to 100 categories in one
+        call, and an AI agent needs ONE approval for the whole list instead of one per item.
+
         Articles in this category are **not** deleted. Their `category_id` becomes `null`, so
         they stay published and simply lose their category. Removing a category never removes
         content.
@@ -1992,6 +2233,88 @@ paths:
         "503": { $ref: "#/components/responses/Maintenance" }
         "500": { $ref: "#/components/responses/InternalError" }
 
+  /tags/bulk-delete:
+    post:
+      operationId: bulkDeleteTags
+      tags: [Tags]
+      summary: Delete many tags
+      description: |
+        Deletes up to 100 tags in one call, exactly as `DELETE /tags/{id}` does for each. Each tag
+        is removed from every article that carried it. No article is deleted.
+
+        Each id is deleted exactly as the single `DELETE` does it, with its own audit entry and
+        webhook. An id that names no tag on this Site, whether it never existed, was already
+        deleted or belongs to another Site, is listed in `not_found`. A repeated id counts once. If
+        one tag cannot be deleted it is listed in `failed` with the error the single delete
+        would have returned, and the rest of the list still runs.
+
+        `dry_run: true` deletes nothing and returns the same report: `deleted` then lists the ids
+        that would be deleted.
+
+        **When an AI agent asks.** A key approved for an AI assistant (a device or OAuth sign-in),
+        or any request from an MCP client, gets `428 APPROVAL_REQUIRED` on the first try while the
+        organisation requires approvals, with `error.approval.url` for a person to approve or deny
+        in the dashboard. ONE approval covers the whole list: the person sees how many tags.
+        Retry the same request with `Writavo-Approval: <error.approval.id>` once they have. The
+        approval is for the exact tags that existed on this Site when it was asked: if one of
+        them has since been deleted, the retry is `409 APPROVAL_INVALID` and you ask again. When
+        none of the ids is a tag on this Site, or on a dry run, no approval is asked for
+        and the report comes back directly. Other callers are unaffected.
+      x-scope: taxonomy:write
+      x-permission: taxonomy.manage
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-writavo-approval: tag.delete
+      x-writavo-approval-kind: destructive
+      x-agent-consequence: Permanently deletes every tag in the list and removes them from every article.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyRequired"
+        - $ref: "#/components/parameters/WritavoApproval"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BulkDeleteInput" }
+            examples:
+              list:
+                summary: Delete two tags
+                value:
+                  ids:
+                    - "4f6b2c1e-8a3d-4e5f-9b7a-1c2d3e4f5a6b"
+                    - "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d"
+      responses:
+        "200":
+          description: What happened to each id. Every id sent appears in exactly one list.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/BulkDeleteResult" }
+              examples:
+                report:
+                  summary: One deleted, one not on this Site
+                  value:
+                    ok: true
+                    data:
+                      deleted: ["4f6b2c1e-8a3d-4e5f-9b7a-1c2d3e4f5a6b"]
+                      not_found: ["9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d"]
+                      failed: []
+                      dry_run: false
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "428": { $ref: "#/components/responses/ApprovalRequired" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
   /tags/{id}:
     parameters:
       - $ref: "#/components/parameters/TagId"
@@ -2071,6 +2394,9 @@ paths:
       tags: [Tags]
       summary: Delete a tag
       description: |
+        **Deleting several?** Use `bulkDeleteTags` (POST .../bulk-delete): up to 100 tags in one
+        call, and an AI agent needs ONE approval for the whole list instead of one per item.
+
         The tag is removed from every article that carried it. No article is deleted.
 
         **When an AI agent asks.** A key approved for an AI assistant (a device or OAuth sign-in),
@@ -2196,6 +2522,89 @@ paths:
         "503": { $ref: "#/components/responses/Maintenance" }
         "500": { $ref: "#/components/responses/InternalError" }
 
+  /authors/bulk-delete:
+    post:
+      operationId: bulkDeleteAuthors
+      tags: [Authors]
+      summary: Delete many authors
+      description: |
+        Deletes up to 100 authors in one call, exactly as `DELETE /authors/{id}` does for each. No
+        article is deleted: articles by a deleted author stay published and lose their byline
+        (`author_id` becomes `null`).
+
+        Each id is deleted exactly as the single `DELETE` does it, with its own audit entry and
+        webhook. An id that names no author on this Site, whether it never existed, was already
+        deleted or belongs to another Site, is listed in `not_found`. A repeated id counts once. If
+        one author cannot be deleted it is listed in `failed` with the error the single delete
+        would have returned, and the rest of the list still runs.
+
+        `dry_run: true` deletes nothing and returns the same report: `deleted` then lists the ids
+        that would be deleted.
+
+        **When an AI agent asks.** A key approved for an AI assistant (a device or OAuth sign-in),
+        or any request from an MCP client, gets `428 APPROVAL_REQUIRED` on the first try while the
+        organisation requires approvals, with `error.approval.url` for a person to approve or deny
+        in the dashboard. ONE approval covers the whole list: the person sees how many authors, and whether the Site's default author is one of them.
+        Retry the same request with `Writavo-Approval: <error.approval.id>` once they have. The
+        approval is for the exact authors that existed on this Site when it was asked: if one of
+        them has since been deleted, the retry is `409 APPROVAL_INVALID` and you ask again. When
+        none of the ids is an author on this Site, or on a dry run, no approval is asked for
+        and the report comes back directly. Other callers are unaffected.
+      x-scope: authors:write
+      x-permission: taxonomy.manage
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-writavo-approval: author.delete
+      x-writavo-approval-kind: destructive
+      x-agent-consequence: Permanently deletes every author in the list; their articles keep their content and lose the byline.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyRequired"
+        - $ref: "#/components/parameters/WritavoApproval"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BulkDeleteInput" }
+            examples:
+              list:
+                summary: Delete two authors
+                value:
+                  ids:
+                    - "4f6b2c1e-8a3d-4e5f-9b7a-1c2d3e4f5a6b"
+                    - "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d"
+      responses:
+        "200":
+          description: What happened to each id. Every id sent appears in exactly one list.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/BulkDeleteResult" }
+              examples:
+                report:
+                  summary: One deleted, one not on this Site
+                  value:
+                    ok: true
+                    data:
+                      deleted: ["4f6b2c1e-8a3d-4e5f-9b7a-1c2d3e4f5a6b"]
+                      not_found: ["9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d"]
+                      failed: []
+                      dry_run: false
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "428": { $ref: "#/components/responses/ApprovalRequired" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
   /authors/{id}:
     parameters:
       - $ref: "#/components/parameters/AuthorId"
@@ -2279,6 +2688,9 @@ paths:
       tags: [Authors]
       summary: Delete an author
       description: |
+        **Deleting several?** Use `bulkDeleteAuthors` (POST .../bulk-delete): up to 100 authors in one
+        call, and an AI agent needs ONE approval for the whole list instead of one per item.
+
         Articles by this author are **not** deleted. Their `author_id` becomes `null`, so they
         stay published and lose their byline.
 
@@ -2319,7 +2731,14 @@ paths:
       operationId: listMedia
       tags: [Media]
       summary: List media assets
-      description: The media library, newest first.
+      description: |
+        The media library, newest first.
+
+        `unused=true` lists only the files nothing on this Site uses: no article (in any status,
+        or any of its saved revisions), author, branding, entry or entry revision references the
+        file by its URL or its id. It is computed live on every page, so a file you just put in an
+        article drops out of the next page. When in doubt a file counts as used, never the other
+        way round. Pass the ids to `POST /media/bulk-delete` to remove them in one call.
       x-scope: media:read
       x-permission: media.manage
       x-entitlement: none
@@ -2333,6 +2752,13 @@ paths:
           in: query
           required: false
           schema: { $ref: "#/components/schemas/MediaBucket" }
+        - name: unused
+          in: query
+          required: false
+          description: |
+            `true`: only files nothing on this Site references. Computed live, and slower than the
+            plain list on a large Site.
+          schema: { type: boolean, default: false }
         - name: fields
           in: query
           description: |
@@ -2361,6 +2787,7 @@ paths:
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/InsufficientScope" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "503": { $ref: "#/components/responses/Maintenance" }
         "500": { $ref: "#/components/responses/InternalError" }
@@ -2871,6 +3298,87 @@ paths:
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/InternalError" }
 
+  /media/bulk-delete:
+    post:
+      operationId: bulkDeleteMedia
+      tags: [Media]
+      summary: Delete many media assets
+      description: |
+        Deletes up to 500 files in one call: the catalog rows and the stored bytes, exactly as
+        `DELETE /media/{id}` does for each (an audit entry and a `media.deleted` webhook per file).
+
+        **Only unused files by default.** With `only_unused` left `true`, a file that anything on
+        this Site still uses (an article in any status or one of its saved revisions, an author,
+        the branding, an entry) is not deleted and is listed in `in_use`. `GET /media?unused=true`
+        lists the candidates. Send `only_unused: false` to delete named files even though they are
+        in use; articles are not rewritten, so each of those becomes a broken image.
+
+        An id that names no file on this Site, whether it never existed or belongs to another Site,
+        is listed in `not_found`. A repeated id counts once.
+
+        **When an AI agent asks.** A key approved for an AI assistant (a device or OAuth sign-in),
+        or any request from an MCP client, gets `428 APPROVAL_REQUIRED` on the first try while the
+        organisation requires approvals, with `error.approval.url` for a person to approve or deny
+        in the dashboard. ONE approval covers the whole list: the person sees how many files and
+        their total size. Retry the same request with `Writavo-Approval: <error.approval.id>` once
+        they have. The approval is for the exact files the call would delete when it was asked: if
+        one of them has since come into use or been deleted, the retry is `409 APPROVAL_INVALID`
+        and you ask again. When none of the ids is a file on this Site, no approval is asked for
+        and the report comes back directly. Other callers are unaffected.
+      x-scope: media:write
+      x-permission: media.manage
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-writavo-approval: media.delete
+      x-writavo-approval-kind: destructive
+      x-agent-consequence: Permanently deletes every file in the list that the call is allowed to delete; with only_unused false, any article or page that shows one of them shows a broken image.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyRequired"
+        - $ref: "#/components/parameters/WritavoApproval"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MediaBulkDeleteInput" }
+            examples:
+              unused:
+                summary: Delete duplicates nothing uses
+                value:
+                  ids:
+                    - "4f6b2c1e-8a3d-4e5f-9b7a-1c2d3e4f5a6b"
+                    - "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d"
+      responses:
+        "200":
+          description: What happened to each id. Every id sent appears in exactly one list.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/MediaBulkDeleteResult" }
+              examples:
+                report:
+                  summary: One deleted, one still in use
+                  value:
+                    ok: true
+                    data:
+                      deleted: ["4f6b2c1e-8a3d-4e5f-9b7a-1c2d3e4f5a6b"]
+                      in_use: ["9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d"]
+                      not_found: []
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "428": { $ref: "#/components/responses/ApprovalRequired" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
   /media/{id}:
     parameters:
       - $ref: "#/components/parameters/MediaId"
@@ -2958,12 +3466,15 @@ paths:
       tags: [Media]
       summary: Delete a media asset
       description: |
+        **Deleting several?** Use `bulkDeleteMedia` (POST .../bulk-delete): up to 500 media files in one
+        call, and an AI agent needs ONE approval for the whole list instead of one per item.
+
         Removes the catalog row and the stored bytes.
 
         **Articles are not rewritten.** If a published article embeds this image, or uses it as
         its `featured_image_url`, that reference becomes a broken image on your live blog. Check
-        before you delete: `GET /articles?fields=id,featured_image_url` finds featured uses, and
-        in body content the URL is plain text you can search for.
+        before you delete: `GET /media?unused=true` lists the files nothing on this Site uses, and
+        `POST /media/bulk-delete` removes many of them under one approval.
 
         **When an AI agent asks.** A key approved for an AI assistant (a device or OAuth sign-in),
         or any request from an MCP client, gets `428 APPROVAL_REQUIRED` on the first try while the
@@ -3459,6 +3970,11 @@ paths:
         than a switch that silently does nothing. Turning it off, or any change while it stays off, is
         never gated and never spends anything.
 
+        The response carries `warnings`. Turning the pipeline on while the AI writing profile has gaps
+        (see `gaps` on `GET /site/knowledge-profile`) still turns it on, and adds a
+        `KNOWLEDGE_PROFILE_INCOMPLETE` warning: until the profile is filled in, articles are written
+        with generic placeholders instead of the brand's details.
+
         **These settings are a shortcut into the article recipe** (see `GET /pipeline/recipe`). Since
         openapi 1.4.0 the recipe is what the pipeline follows: every field here except
         `pipeline_enabled` and `batch_size` is written as a new live recipe version (the equivalent of a
@@ -3518,7 +4034,15 @@ paths:
                   - { $ref: "#/components/schemas/SuccessEnvelope" }
                   - type: object
                     properties:
-                      data: { $ref: "#/components/schemas/PipelineConfig" }
+                      data:
+                        allOf:
+                          - { $ref: "#/components/schemas/PipelineConfig" }
+                          - type: object
+                            required: [warnings]
+                            properties:
+                              warnings:
+                                type: array
+                                items: { $ref: "#/components/schemas/PipelineWarning" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "402": { $ref: "#/components/responses/PaymentRequired" }
@@ -3968,7 +4492,8 @@ paths:
         The draft becomes the live recipe; the previous one is kept in the history and
         `POST /pipeline/recipe/undo` goes back to it. New ideas follow the new recipe at once; articles
         already on their way finish on the version they started on. Returns the recipe as
-        `GET /pipeline/recipe` does.
+        `GET /pipeline/recipe` does, plus `warnings`: a `KNOWLEDGE_PROFILE_INCOMPLETE` entry when the AI
+        writing profile has gaps (the recipe is switched on either way).
 
         **When an AI agent asks.** Always `428 APPROVAL_REQUIRED` on the first try, whatever the
         organisation's approvals switch says: a recipe decides what the pipeline spends. The approval
@@ -3998,7 +4523,15 @@ paths:
                   - { $ref: "#/components/schemas/SuccessEnvelope" }
                   - type: object
                     properties:
-                      data: { $ref: "#/components/schemas/Recipe" }
+                      data:
+                        allOf:
+                          - { $ref: "#/components/schemas/Recipe" }
+                          - type: object
+                            required: [warnings]
+                            properties:
+                              warnings:
+                                type: array
+                                items: { $ref: "#/components/schemas/PipelineWarning" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/InsufficientScope" }
         "409": { $ref: "#/components/responses/Conflict" }
@@ -4297,9 +4830,13 @@ paths:
         `improve`, `classify`, `extract`): the platform default, this Site's override if it has one,
         which of the two is in effect, and the `{{placeholders}}` the default uses.
 
-        Needs `prompts:write`, because the default prompts are shown only to people who may manage them.
-      x-scope: prompts:write
-      x-permission: prompts.manage
+        Needs `pipeline:read`, so a read-only connection can see which prompts the Site uses and
+        whether it overrides any. The template TEXT (the default's and the override's) is included
+        only for a caller that may manage prompts (a key carrying `prompts:write`, or a signed-in
+        member with that permission); for anyone else both are `null` and `templates_included` is
+        `false`.
+      x-scope: pipeline:read
+      x-permission: none
       x-entitlement: none
       x-spends-credits: false
       x-rate-limit-class: read
@@ -4317,11 +4854,14 @@ paths:
                     properties:
                       data:
                         type: object
-                        required: [items]
+                        required: [items, templates_included]
                         properties:
                           items:
                             type: array
                             items: { $ref: "#/components/schemas/Prompt" }
+                          templates_included:
+                            type: boolean
+                            description: Whether the template text is included (the caller may manage prompts).
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/InsufficientScope" }
         "429": { $ref: "#/components/responses/RateLimited" }
@@ -7201,6 +7741,111 @@ paths:
         "409": { $ref: "#/components/responses/Conflict" }
         "422": { $ref: "#/components/responses/ValidationFailed" }
         "428": { $ref: "#/components/responses/ApprovalRequired" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /seo/import:
+    post:
+      operationId: importSeo
+      tags: [SEO]
+      summary: Import keywords, competitors and ranking history
+      description: |
+        Bring a Site's SEO data to Writavo when it migrates from another tool: the keywords it
+        tracks, its competitors, and each keyword's ranking history. Free: nothing is charged and no
+        rank check runs; the history is the data you send.
+
+        **Keywords** are matched on the Site ignoring case, after the same clean-up as
+        `POST /seo/keywords` (trimmed, runs of spaces made one). A keyword already tracked is updated:
+        each field you send replaces that field, and a paused keyword stays paused. A new keyword is
+        tracked, with the Site's locale for location and language unless the row names them.
+
+        **The plan's keyword limit holds.** The organisation tracks at most N keywords across its
+        Sites. New keywords past the room left are skipped, in the order sent, each listed in
+        `problems` ("over the tracked-keyword limit ..."), and the rest of the call is still written.
+        `tracked_keywords` reports the limit and how many were tracked before the call.
+
+        **Competitors** are matched by domain after the same clean-up as `POST /seo/competitors`
+        (`https://www.rival.com/blog` is `rival.com`). One already there is updated (`name`,
+        `blog_url`). At most 25 active competitors per Site; the Site's own domain is refused.
+
+        **Positions** are keyed by keyword and UTC day and SET: a row replaces what an earlier import
+        stored for that keyword and day, so importing the same history twice never duplicates it.
+        `position` is required and is null when the keyword did not rank; an average (as Search
+        Console exports it) is rounded. A position names a keyword tracked on the Site or added by
+        `keywords` in the same call; any finished day from 2000-01-01 to yesterday (UTC). Imported history shows in
+        `GET /seo/keywords/{id}/history` and the dashboard's charts with `source: import`, is never
+        pruned, and sits beside Writavo's own checks without replacing them. A keyword's latest
+        position follows the newest imported day when that is newer than its last check.
+
+        **Dry run first.** `dry_run` defaults to true: every row is checked and matched, `plan`,
+        `tracked_keywords` and `problems` are reported, and nothing is written. Send `dry_run: false`
+        to write. A row with a problem is skipped and listed; the valid rows are still written. Each
+        applied import is recorded in the audit log with its counts.
+      x-scope: seo:write
+      x-permission: seo.manage
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-mcp-surface: action
+      x-agent-consequence: Tracks the keywords and adds the competitors sent, and sets their ranking history for the days sent, replacing what an earlier import stored for those days.
+      parameters:
+        - { $ref: "#/components/parameters/IdempotencyKeyRequired" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SeoImportInput" }
+            examples:
+              dry_run:
+                summary: Check two keywords, a competitor and three days of history, write nothing
+                value:
+                  keywords:
+                    - keyword: best crm for startups
+                      target_url: https://example.com/blog/best-crm
+                    - keyword: crm pricing
+                      is_priority: true
+                  competitors:
+                    - domain: rival.com
+                      name: Rival
+                  positions:
+                    - { keyword: best crm for startups, day: "2026-05-10", position: 8, url: "https://example.com/blog/best-crm" }
+                    - { keyword: best crm for startups, day: "2026-05-17", position: 6 }
+                    - { keyword: crm pricing, day: "2026-05-17", position: null }
+      responses:
+        "200":
+          description: The report. With `dry_run` it describes what would be written.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/SeoImportResult" }
+              examples:
+                applied:
+                  summary: Written, one keyword over the plan's limit
+                  value:
+                    ok: true
+                    data:
+                      dry_run: false
+                      written: { keywords_created: 1, keywords_updated: 0, competitors_created: 1, competitors_updated: 0, positions: 2 }
+                      plan: { keywords_new: 2, keywords_existing: 0, competitors_new: 1, competitors_existing: 0, positions: 3, keywords_with_positions: 2 }
+                      tracked_keywords: { limit: 100, active: 99 }
+                      problems:
+                        - section: keywords
+                          index: 1
+                          error: "over the tracked-keyword limit: your plan tracks up to 100 keywords across the organisation, so this one was not added"
+                        - section: positions
+                          index: 2
+                          error: its keyword was not added (see that row under keywords), so there is nothing to attach it to
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "503": { $ref: "#/components/responses/Maintenance" }
         "500": { $ref: "#/components/responses/InternalError" }
@@ -11698,6 +12343,56 @@ paths:
         "503": { $ref: "#/components/responses/Maintenance" }
         "500": { $ref: "#/components/responses/InternalError" }
 
+  /auth/key/revoke-oauth:
+    post:
+      operationId: revokeOauthKey
+      tags: [Device sign-in]
+      summary: "Internal: revoke the key behind a revoked MCP sign-in"
+      description: |
+        **Internal. Only the Writavo MCP service can call this; anyone else gets `403`.** When an AI
+        client signs out of the hosted MCP server (it revokes its OAuth refresh token, RFC 7009),
+        the MCP service calls this so the Writavo key behind that connection is revoked too and
+        disappears from Settings > AI agents. It acts on OAuth-origin keys only, is idempotent, and
+        can only ever end access, never grant it. To sign a key out yourself, use
+        `POST /auth/key/revoke` with that key.
+      security: []
+      x-scope: none
+      x-permission: none
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: auth
+      x-publishable: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [key_id]
+              properties:
+                key_id: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Done. `revoked` is false when there was nothing live to revoke.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [revoked]
+                        properties:
+                          revoked: { type: boolean }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
 # ============================================================================
 # COMPONENTS
 # ============================================================================
@@ -13615,6 +14310,90 @@ components:
         alt_text: { type: [string, "null"], maxLength: 500 }
         created_at: { type: string, format: date-time, readOnly: true }
 
+    MediaBulkDeleteInput:
+      type: object
+      required: [ids]
+      additionalProperties: false
+      properties:
+        ids:
+          type: array
+          minItems: 1
+          maxItems: 500
+          items: { type: string, format: uuid }
+          description: The media ids to delete. A repeated id counts once.
+        only_unused:
+          type: boolean
+          default: true
+          description: |
+            `true` (the default): delete only the files nothing on this Site uses, and list the
+            rest in `in_use`. `false`: delete every named file, even one an article still shows.
+
+    MediaBulkDeleteResult:
+      type: object
+      required: [deleted, in_use, not_found]
+      description: Every id you sent appears in exactly one of the three lists.
+      properties:
+        deleted:
+          type: array
+          items: { type: string, format: uuid }
+          description: Deleted, with their stored files.
+        in_use:
+          type: array
+          items: { type: string, format: uuid }
+          description: Kept, because something on this Site uses them (only with `only_unused` true).
+        not_found:
+          type: array
+          items: { type: string, format: uuid }
+          description: No such file on this Site.
+
+    BulkDeleteInput:
+      type: object
+      required: [ids]
+      additionalProperties: false
+      description: The body of every `POST /{resource}/bulk-delete` except media's.
+      properties:
+        ids:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items: { type: string, format: uuid }
+          description: The ids to delete. A repeated id counts once.
+        dry_run:
+          type: boolean
+          default: false
+          description: "`true`: delete nothing, and report what the call would do."
+
+    BulkDeleteResult:
+      type: object
+      required: [deleted, not_found, failed, dry_run]
+      description: Every id you sent appears in exactly one of `deleted`, `not_found` and `failed`.
+      properties:
+        deleted:
+          type: array
+          items: { type: string, format: uuid }
+          description: Deleted (on a dry run, the ones that would be).
+        not_found:
+          type: array
+          items: { type: string, format: uuid }
+          description: No such object on this Site.
+        failed:
+          type: array
+          description: Could not be deleted. The rest of the list was not affected; retry these on their own.
+          items:
+            type: object
+            required: [id, error]
+            properties:
+              id: { type: string, format: uuid }
+              error:
+                type: object
+                required: [code, message]
+                properties:
+                  code: { type: string, description: "The error code the single delete would have returned." }
+                  message: { type: string }
+        dry_run:
+          type: boolean
+          description: Whether this was a dry run, so nothing was deleted.
+
     Site:
       type: object
       required: [id, name]
@@ -14251,6 +15030,35 @@ components:
           description: True until a person (or this API) edits the profile.
           readOnly: true
         updated_at: {type: [string, "null"], format: date-time, readOnly: true}
+        gaps:
+          $ref: "#/components/schemas/KnowledgeProfileGaps"
+
+    KnowledgeProfileGaps:
+      type: object
+      readOnly: true
+      description: |
+        What the AI pipeline would fill with a generic placeholder: the prompt variables with no value
+        of the Site's own, and whether the product knowledge and the niche keywords are empty. Nothing
+        is blocked by a gap; turning the pipeline on while any remain returns a
+        `KNOWLEDGE_PROFILE_INCOMPLETE` warning. The same definition drives the dashboard's banner.
+      required: [complete, product_knowledge, niche_keywords, prompt_vars]
+      properties:
+        complete: {type: boolean, description: True when nothing below is missing.}
+        product_knowledge: {type: boolean, description: True when the product knowledge is empty.}
+        niche_keywords: {type: boolean, description: True when there are no niche keywords.}
+        prompt_vars:
+          type: array
+          items: {type: string}
+          description: The `prompt_vars` names that are unset, in the order `PromptVars` lists them.
+
+    PipelineWarning:
+      type: object
+      description: Advice about a pipeline switch that went through. Never a refusal.
+      required: [code, path, message]
+      properties:
+        code: {type: string, enum: [KNOWLEDGE_PROFILE_INCOMPLETE]}
+        path: {type: string, description: What the warning is about, e.g. `knowledge_profile`.}
+        message: {type: string}
 
     KnowledgeProfileUpdate:
       type: object
@@ -14761,13 +15569,13 @@ components:
       required: [stage, default_template, override, effective, placeholders]
       properties:
         stage: { $ref: "#/components/schemas/PromptStage" }
-        default_template: {type: string, description: The platform default prompt.}
+        default_template: {type: [string, "null"], description: "The platform default prompt. Null when the caller may not manage prompts (listPrompts without prompts:write)."}
         override:
           type: [object, "null"]
           description: This Site's override, or null.
           required: [template, version, created_at]
           properties:
-            template: {type: string}
+            template: {type: [string, "null"], description: Null when the caller may not manage prompts.}
             version: {type: integer}
             created_at: {type: string, format: date-time}
         effective: {type: string, enum: [default, override], description: Which of the two the stage uses.}
@@ -15390,6 +16198,116 @@ components:
         target_url: {type: [string, "null"], format: uri}
         is_active: {type: boolean}
 
+    SeoImportInput:
+      type: object
+      additionalProperties: false
+      description: |
+        At most 2,000 `keywords`, 100 `competitors` and 10,000 `positions` rows per call; split a
+        larger history into several calls (positions SET, so the order of calls does not matter,
+        but send a keyword before or with its positions). A body that is not this shape, or is over
+        a cap, is refused whole with 422; a bad ROW is only skipped and reported in `problems`.
+      properties:
+        dry_run:
+          type: boolean
+          default: true
+          description: Check and report without writing. Defaults to true; send false to write.
+        keywords:
+          type: array
+          maxItems: 2000
+          description: Keywords to track. One already tracked (ignoring case) is updated.
+          items: { $ref: "#/components/schemas/SeoImportKeyword" }
+        competitors:
+          type: array
+          maxItems: 100
+          description: Competitors to add. One already there (same domain) is updated.
+          items: { $ref: "#/components/schemas/SeoImportCompetitor" }
+        positions:
+          type: array
+          maxItems: 10000
+          description: Ranking history, one row per keyword per UTC day.
+          items: { $ref: "#/components/schemas/SeoImportPosition" }
+
+    SeoImportKeyword:
+      type: object
+      additionalProperties: false
+      required: [keyword]
+      properties:
+        keyword: {type: string, minLength: 1, maxLength: 200}
+        target_url: {type: [string, "null"], format: uri, description: An https URL on the Site. Null clears it.}
+        is_priority: {type: boolean, description: Checked daily rather than weekly. Default false on a new keyword.}
+        location_code: {type: integer, minimum: 1, maximum: 99999999, description: A search location code. Defaults from the Site locale.}
+        language_code: {type: string, pattern: '^[a-z]{2}$', description: Defaults from the Site locale.}
+
+    SeoImportCompetitor:
+      type: object
+      additionalProperties: false
+      required: [domain]
+      properties:
+        domain: {type: string, maxLength: 300, description: "A public hostname; a pasted URL is reduced to it (https://www.rival.com/blog is rival.com). A non-ASCII name in its xn-- form."}
+        name: {type: [string, "null"], maxLength: 120}
+        blog_url: {type: [string, "null"], maxLength: 2048, description: The competitor's blog listing page (http or https, public hostname, no port). Null clears it.}
+
+    SeoImportPosition:
+      type: object
+      additionalProperties: false
+      required: [keyword, day, position]
+      properties:
+        keyword: {type: string, minLength: 1, maxLength: 200, description: A keyword tracked on the Site or in this call's keywords (ignoring case).}
+        day: {type: string, format: date, description: "The UTC day, from 2000-01-01 to yesterday (a finished day)."}
+        position:
+          type: [number, "null"]
+          minimum: 1
+          maximum: 1000
+          description: The Google position that day, or null when the keyword did not rank. Decimals (an average) are rounded.
+        url: {type: [string, "null"], maxLength: 2048, description: The page that ranked (http or https).}
+        search_volume: {type: [integer, "null"], minimum: 0, maximum: 2000000000}
+        impressions: {type: [integer, "null"], minimum: 0, maximum: 2000000000}
+        clicks: {type: [integer, "null"], minimum: 0, maximum: 2000000000}
+
+    SeoImportResult:
+      type: object
+      required: [dry_run, written, plan, tracked_keywords, problems]
+      properties:
+        dry_run: {type: boolean}
+        written:
+          type: object
+          description: What this call wrote. All zeros on a dry run.
+          required: [keywords_created, keywords_updated, competitors_created, competitors_updated, positions]
+          properties:
+            keywords_created: {type: integer}
+            keywords_updated: {type: integer, description: Keywords a sent field changed. An identical row is not rewritten, so a repeat reports 0.}
+            competitors_created: {type: integer}
+            competitors_updated: {type: integer, description: Competitors a sent field changed.}
+            positions: {type: integer, description: Days of history set (one per valid positions row; a repeat sets them again).}
+        plan:
+          type: object
+          description: What the valid rows carry (the same on a dry run).
+          required: [keywords_new, keywords_existing, competitors_new, competitors_existing, positions, keywords_with_positions]
+          properties:
+            keywords_new: {type: integer}
+            keywords_existing: {type: integer}
+            competitors_new: {type: integer}
+            competitors_existing: {type: integer}
+            positions: {type: integer}
+            keywords_with_positions: {type: integer}
+        tracked_keywords:
+          type: object
+          required: [limit, active]
+          description: The organisation's keyword limit and how many it tracked across its Sites before this call.
+          properties:
+            limit: {type: [integer, "null"], description: Null when the plan sets no limit.}
+            active: {type: integer}
+        problems:
+          type: array
+          description: The rows that were skipped, and why.
+          items:
+            type: object
+            required: [section, index, error]
+            properties:
+              section: {type: string, enum: [keywords, competitors, positions]}
+              index: {type: integer, description: The row's position in its array, from 0.}
+              error: {type: string}
+
     KeywordPosition:
       type: object
       required: [checked_at, position]
@@ -15400,7 +16318,7 @@ components:
         search_volume: {type: [integer, "null"]}
         impressions: {type: [integer, "null"]}
         clicks: {type: [integer, "null"]}
-        source: {type: string}
+        source: {type: string, description: "dataforseo (a rank check), gsc (Search Console) or import (POST /seo/import)."}
 
     KeywordAlert:
       type: object

@@ -20,7 +20,7 @@ export { redact } from "./redact.js";
 export { friendlyClientName, FALLBACK_CLIENT_NAME } from "./client-name.js";
 export { VERSION } from "./version.js";
 export { DEFAULT_API_BASE, REMOTE_MCP_URL } from "./constants.js";
-export { OPERATIONS, REFUSALS, ACTIONS, ACTION_AREAS } from "../generated/operations.js";
+export { OPERATIONS, REFUSALS, ACTIONS, ACTION_AREAS, TOOL_SURFACE_VERSION } from "../generated/operations.js";
 export {
   IMPORT_ID_RE,
   JOB_TTL_DAYS,

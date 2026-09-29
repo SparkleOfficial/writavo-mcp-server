@@ -23,6 +23,7 @@
 // page is generated from the same function. This file is the part that writes to disk.
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { dirname, join, relative } from "node:path";
 import { parse } from "yaml";
@@ -302,6 +303,13 @@ export interface McpRefusal {
 
 export const API_BASE_URL = ${json(baseUrl)};
 export const API_VERSION = ${json(String(spec.info?.version ?? ""))};
+
+/**
+ * A fingerprint of the tool surface: every generated operation (name, description, arguments) and
+ * the local tools' names. It changes exactly when what a client's tool list would show changes, so
+ * the hosted server can tell a session that listed its tools before a deploy that they moved on.
+ */
+export const TOOL_SURFACE_VERSION = ${json(createHash("sha256").update(JSON.stringify({ operations, local: LOCAL_TOOLS.map((t) => t.name) })).digest("hex").slice(0, 16))};
 
 export const OPERATIONS: McpOperation[] = ${json(operations)};
 

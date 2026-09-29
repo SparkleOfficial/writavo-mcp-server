@@ -68,7 +68,7 @@ function description(can: Capabilities): string {
       : "Runs as a dry run by default, which checks the whole document against the Site, reports every problem in one pass, and writes nothing. An apply imports as much as fits in one call (about 20 seconds) and says what is left.",
     "Articles are matched by external_id, so running it again updates rather than duplicates. It never deletes or unpublishes anything.",
     "Applying with publish true makes articles publicly visible on the customer's own live site, so it needs confirm: true, which you pass only after the user has agreed.",
-    "Call it with no document to get the format's guide and a sample (short); pass section (schema, engagement, cost_history, redirects, content_types, entries, articles...) for the JSON Schema or one part of the format.",
+    "Call it with no document to get the format's guide and a sample (short); pass section (schema, engagement, seo, cost_history, redirects, content_types, entries, articles...) for the JSON Schema or one part of the format.",
     "Needs a secret key (wv_sk_) with articles, taxonomy, authors and media write scopes.",
   ].join(" ");
 }
@@ -120,7 +120,7 @@ function inputSchema(can: Capabilities): Record<string, z.ZodTypeAny> {
     section: z
       .enum(IMPORT_FORMAT_SECTIONS)
       .optional()
-      .describe("With no document: which part of the format to return. Defaults to guide (the format guide and a sample, about 12 KB). schema is the whole JSON Schema (about 90 KB); the others (engagement, cost_history, redirects, content_types, entries, authors, categories, tags, articles) are that part of it with its guide text."),
+      .describe("With no document: which part of the format to return. Defaults to guide (the format guide and a sample, about 12 KB). schema is the whole JSON Schema (about 90 KB); the others (engagement, seo, cost_history, redirects, content_types, entries, authors, categories, tags, articles) are that part of it with its guide text."),
     dry_run: z
       .boolean()
       .optional()
@@ -372,6 +372,11 @@ export function backgroundStatusText(importId: string, st: BackgroundStatus): st
       ? [p.engagement.error
           ? `Engagement history: NOT imported, because ${p.engagement.error}.`
           : `Engagement history: ${p.engagement.done ? "delivered" : "being sent"}. Days written ${p.engagement.daily}, share rows ${p.engagement.share_rows}, visitor reactions ${p.engagement.picks}.`]
+      : []),
+    ...(p.seo
+      ? [p.seo.error
+          ? `SEO data: NOT imported, because ${p.seo.error}.`
+          : `SEO data: ${p.seo.done ? "delivered" : "being sent"}. Keywords tracked ${p.seo.keywords_created}, updated ${p.seo.keywords_updated}; competitors added ${p.seo.competitors_created}, updated ${p.seo.competitors_updated}; days of ranking history set ${p.seo.positions}.`]
       : []),
     ...(p.redirects
       ? [p.redirects.error

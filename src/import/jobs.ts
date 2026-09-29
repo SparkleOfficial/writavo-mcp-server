@@ -231,6 +231,29 @@ export function mergeImportDocuments(stored: unknown, part: unknown): Json | str
     if (reactions !== undefined) engagement.reactions = reactions;
     merged.engagement = engagement;
   }
+  // SEO rows merge on their natural keys: keywords ignoring case and spacing, competitors on the
+  // domain as written, positions on keyword and day.
+  if (isObject(part.seo)) {
+    const stored = isObject(merged.seo) ? (merged.seo as Json) : {};
+    const kw = (v: unknown) => (typeof v === "string" ? v.trim().replace(/\s+/g, " ").toLowerCase() : undefined);
+    const seo: Json = { ...stored };
+    const keywords = mergeOn(stored.keywords, part.seo.keywords, (e) => kw(e.keyword));
+    const competitors = mergeOn(stored.competitors, part.seo.competitors, (e) => (typeof e.domain === "string" ? e.domain.trim().toLowerCase() : undefined));
+    const positions = mergeOn(stored.positions, part.seo.positions, (e) => (kw(e.keyword) && typeof e.day === "string" ? `${kw(e.keyword)}|${e.day}` : undefined));
+    if (keywords !== undefined) seo.keywords = keywords;
+    if (competitors !== undefined) seo.competitors = competitors;
+    if (positions !== undefined) seo.positions = positions;
+    merged.seo = seo;
+  }
+  // The AI writing profile: a part's fields replace the stored ones, prompt_vars name by name.
+  if (isObject(part.profile)) {
+    const stored = isObject(merged.profile) ? (merged.profile as Json) : {};
+    const profile: Json = { ...stored, ...part.profile };
+    if (isObject(stored.prompt_vars) && isObject(part.profile.prompt_vars)) {
+      profile.prompt_vars = { ...(stored.prompt_vars as Json), ...(part.profile.prompt_vars as Json) };
+    }
+    merged.profile = profile;
+  }
   // A second converted export: its summary replaces the first's, its per-article notes join them.
   if (isObject(part.conversion)) {
     const before = isObject(merged.conversion) && isObject((merged.conversion as Json).items) ? ((merged.conversion as Json).items as Json) : {};

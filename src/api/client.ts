@@ -60,6 +60,8 @@ export interface ApiResponse<T> {
   status: number;
   data: T;
   etag: string | null;
+  /** The API matched a write to what is stored and wrote nothing (the Writavo-Unchanged header). */
+  unchanged?: boolean;
 }
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -220,7 +222,8 @@ async function sendApiRequest<T>(ctx: ToolContext, request: ApiRequest): Promise
   }
 
   const envelope = payload as { ok?: boolean; data?: T };
-  return { status: response.status, data: (envelope?.data ?? (payload as T)), etag };
+  const unchanged = response.headers.get("Writavo-Unchanged") === "true";
+  return { status: response.status, data: (envelope?.data ?? (payload as T)), etag, ...(unchanged ? { unchanged } : {}) };
 }
 
 /** The one place an approval link may point: the dashboard's approval page for that id. */

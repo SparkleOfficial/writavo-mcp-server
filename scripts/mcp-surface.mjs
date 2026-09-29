@@ -246,6 +246,12 @@ export const LOCAL_TOOLS = [
     confirm: true,
   },
   {
+    name: "wait_for_approval",
+    scope: "meta:read",
+    summary: "Wait for a person to approve or deny an action that needs approval; returns as soon as they decide. Never approves anything itself.",
+    confirm: false,
+  },
+  {
     name: "search_writavo_actions",
     scope: "none",
     summary: "Find the operation for a settings, delivery, SEO, team, billing or insights task, with its input schema and whether it needs approval or costs money.",

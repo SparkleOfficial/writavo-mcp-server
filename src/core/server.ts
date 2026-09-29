@@ -6,6 +6,7 @@ import { inputShapeFor } from "../tools/schema.js";
 import { GET_API_DOCS, handleGetApiDocs } from "../tools/api-docs.js";
 import { UPLOAD_MEDIA, handleUploadMedia } from "../tools/upload-media.js";
 import { START_PLAN_PURCHASE, handleStartPlanPurchase } from "../tools/plan-purchase.js";
+import { WAIT_FOR_APPROVAL, handleWaitForApproval } from "../tools/wait-approval.js";
 import { handleImportContent, importContentTool } from "../tools/import-content.js";
 import type { ImportJobStore } from "../import/jobs.js";
 import type { ImportBudget } from "../import/engine.js";
@@ -89,7 +90,7 @@ const INSTRUCTIONS_START = [
 const INSTRUCTIONS_END = [
   "DOCS: get_api_docs, and the resources writavo://api-reference, writavo://error-codes and writavo://import-format. Online: https://writavo.com/docs/mcp.md (setup, permissions, approvals, troubleshooting), https://writavo.com/docs/migrate.md (moving a blog in), https://writavo.com/llms.txt.",
   "SAFETY: create_article always makes a private draft. Publishing, scheduling, unpublishing, deleting, importing and pipeline runs are separate explicit calls. When a tool answers \"Nothing has been done\" and asks for confirmation, ask the person and call again with confirm: true only if they agree. trigger_pipeline_run, and every action whose search result says it spends credits or money, costs the organisation money: run them only when the person asks.",
-  "APPROVALS: some calls need a person's approval in the Writavo dashboard. Deleting and unpublishing content may, when the organisation requires it; team changes, paid scans, pipeline runs and turning the pipeline up, custom domains, publishing the hosted site, CMS connections and pushes, auto-refill, raising a credit cap and keeping the plan always do. The call then returns a link on https://app.writavo.com/approvals/ and an approval id, and nothing has happened yet. Give the person the link exactly as returned, wait until they say they approved it, then call again with the same arguments plus approval_id. An approval works once and lapses after 24 hours. APPROVAL_PENDING: not decided yet, ask them. APPROVAL_DENIED: stop, tell them, ask what they want instead; never rephrase the request to get around it. APPROVAL_INVALID: call again without approval_id for a new link.",
+  "APPROVALS: some calls need a person's approval in the Writavo dashboard. Deleting and unpublishing content may, when the organisation requires it; team changes, paid scans, pipeline runs and turning the pipeline up, custom domains, publishing the hosted site, CMS connections and pushes, auto-refill, raising a credit cap and keeping the plan always do. The call then returns a link on https://app.writavo.com/approvals/ and an approval id, and nothing has happened yet. Give the person the link as returned, then call wait_for_approval (it returns when they decide); on approved, call again with the same arguments plus approval_id. Many deletes: one bulk-delete action, one approval. An approval works once and lapses after 24 hours. APPROVAL_PENDING: not decided yet. APPROVAL_DENIED: stop, tell them, ask what they want instead; never rephrase the request to get around it. APPROVAL_INVALID: call again without approval_id for a new link.",
   "MOVING A BLOG IN: follow the migrate-content prompt or https://writavo.com/docs/migrate.md. Only read the source system. Copy text verbatim. Keep every slug exactly and use each post's ORIGINAL first publication date; never guess a slug, a date or missing text: ask the person. import_content is a dry run by default: show the person its report, fix problems in the document, and import (dry_run false, confirm true) only after they agree. Then verify counts, slugs and dates against the source.",
   "ERRORS: every error reply says what to do next; follow it and do not retry in a loop. AGENT_ACCESS_DISABLED: the organisation turned AI agent access off; tell the person (an owner or admin turns it on in Settings > AI agents). INSUFFICIENT_SCOPE: this connection lacks that permission; tell the person which area needs Read or Read and write; they add it in Settings > AI agents (Permissions on this connection) without signing in again. API_KEY_REVOKED, API_KEY_EXPIRED, INVALID_API_KEY: the person signs in again. PAYMENT_METHOD_REQUIRED, NOT_ENTITLED, INSUFFICIENT_CREDITS, SPEND_CAP_REACHED: report it; only the person can fix it, in Billing. PREREQUISITE_MISSING: do the setup step the message names, then retry. FEATURE_UNAVAILABLE: switched off by Writavo; use the free alternative named. RATE_LIMIT_EXCEEDED: wait for Retry-After. NOT_FOUND: no such item on this Site.",
   "NEVER through these tools (a person does them in the dashboard; give them the link, which get_api_docs section tools lists for each): AI agent settings, approving or widening your own access (including the access of the person you act for), deleting a Site or the organisation, card details, plan changes (use start_plan_purchase), ownership, the outreach policy and mailbox, CMS and Bing credentials, API keys and webhooks.",
@@ -111,6 +112,7 @@ export const CORE_LOCAL_TOOL_NAMES = [
   "get_api_docs",
   "start_plan_purchase",
   "import_content",
+  "wait_for_approval",
   "search_writavo_actions",
   "read_writavo_action",
   "run_writavo_action",
@@ -197,6 +199,19 @@ export function createWritavoMcpServer(opts: CoreOptions): McpServer {
       annotations: { title: "Import a blog", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
     async (args: unknown) => handleImportContent(ctx, (args ?? {}) as ToolArgs, opts.importJobs ?? null, opts.importBudget),
+  );
+
+  // 0146: waits for a person to decide an approval, so the assistant carries on by itself.
+  server.registerTool(
+    WAIT_FOR_APPROVAL.name,
+    {
+      title: "Wait for an approval",
+      description: WAIT_FOR_APPROVAL.description,
+      inputSchema: WAIT_FOR_APPROVAL.inputSchema,
+      // Reads the approval's status only; it never decides it.
+      annotations: { title: "Wait for an approval", ...READ_ONLY },
+    },
+    async (args: unknown) => handleWaitForApproval(ctx, (args ?? {}) as ToolArgs),
   );
 
   // --- Actions (MCP-3 decision 5) -----------------------------------------

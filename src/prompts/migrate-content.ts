@@ -1,3 +1,5 @@
+import { MIGRATION_SCOPES } from "../import/engine.js";
+
 export interface MigrateContentArgs {
   source?: string;
 }
@@ -15,7 +17,11 @@ export function migrateContentPrompt(args: MigrateContentArgs) {
    an account and finish onboarding first, choosing "Bring my existing articles"). This server
    does not read files from my machine, but it keeps the import document and its progress on the
    server as an import, so you send it once and continue by its import_id. Images are copied from
-   https URLs only.`;
+   https URLs only.
+   Then call verify_api_key and check the connection carries every permission a full move needs,
+   before any work starts: ${MIGRATION_SCOPES.join(", ")}. If any is missing, tell me which, and
+   ask me to add them in one step: Settings > AI agents, this connection, Permissions, "Migrate a
+   blog" (or reconnect and choose "Migrate a blog" on the sign-in screen).`;
   const dryRun = `7. Dry run. Write the JSON document to the export folder and get it to the server, best first:
    if you can run shell commands, call import_content with upload: true and run the curl command
    it returns (up to 10 MB; the file never passes through our conversation); if it is at an https

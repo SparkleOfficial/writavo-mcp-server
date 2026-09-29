@@ -108,6 +108,13 @@ export interface McpRefusal {
 export const API_BASE_URL = "https://api.writavo.com/v1";
 export const API_VERSION = "1.5.0";
 
+/**
+ * A fingerprint of the tool surface: every generated operation (name, description, arguments) and
+ * the local tools' names. It changes exactly when what a client's tool list would show changes, so
+ * the hosted server can tell a session that listed its tools before a deploy that they moved on.
+ */
+export const TOOL_SURFACE_VERSION = "006df5eff36b64e5";
+
 export const OPERATIONS: McpOperation[] = [
   {
     "tool": "verify_api_key",
@@ -228,9 +235,9 @@ export const OPERATIONS: McpOperation[] = [
     "tag": "Articles",
     "surface": "tool",
     "area": "articles",
-    "summary": "List articles",
+    "summary": "List and search articles",
     "brief": "Cursor paginated, newest updated first.",
-    "description": "List articles. Cursor paginated, newest updated first. Read only. Nothing is changed. Needs a key carrying the articles:read scope.",
+    "description": "List and search articles. Cursor paginated, newest updated first. Read only. Nothing is changed. Needs a key carrying the articles:read scope.",
     "scope": "articles:read",
     "alsoScopes": [],
     "entitlement": "none",
@@ -400,7 +407,7 @@ export const OPERATIONS: McpOperation[] = [
     "approvalKind": null,
     "approvalWhen": null,
     "annotations": {
-      "title": "List articles",
+      "title": "List and search articles",
       "readOnlyHint": true,
       "destructiveHint": false,
       "idempotentHint": true,
@@ -1133,8 +1140,8 @@ export const OPERATIONS: McpOperation[] = [
     "surface": "tool",
     "area": "articles",
     "summary": "Delete an article",
-    "brief": "Permanent. The row, its tag assignments and the redirects that point at it are removed, and if the article was published its URL starts returning 404 on your blog once the cache is purged.",
-    "description": "Delete an article. Permanent. The row, its tag assignments and the redirects that point at it are removed, and if the article was published its URL starts returning 404 on your blog once the cache is purged. PERMANENT: Permanently deletes the article; a published one disappears from the live blog. Ask the user before calling this, and pass confirm: true only once they have agreed. Needs a secret key (wv_sk_) carrying the articles:write scope. APPROVAL: when the organisation requires it, the first call returns a link for a person to approve instead of acting; after they approve, call again with the same arguments plus approval_id.",
+    "brief": "Deleting several? Use `bulkDeleteArticles` (POST .../bulk-delete): up to 100 articles in one call, and an AI agent needs ONE approval for the whole list instead of one per item.",
+    "description": "Delete an article. Deleting several? Use `bulkDeleteArticles` (POST .../bulk-delete): up to 100 articles in one call, and an AI agent needs ONE approval for the whole list instead of one per item. PERMANENT: Permanently deletes the article; a published one disappears from the live blog. Ask the user before calling this, and pass confirm: true only once they have agreed. Needs a secret key (wv_sk_) carrying the articles:write scope. APPROVAL: when the organisation requires it, the first call returns a link for a person to approve instead of acting; after they approve, call again with the same arguments plus approval_id.",
     "scope": "articles:write",
     "alsoScopes": [],
     "entitlement": "none",
@@ -1694,8 +1701,8 @@ export const OPERATIONS: McpOperation[] = [
     "surface": "tool",
     "area": "categories",
     "summary": "Delete a category",
-    "brief": "Articles in this category are not deleted. Their `category_id` becomes `null`, so they stay published and simply lose their category. Removing a category never removes content.",
-    "description": "Delete a category. Articles in this category are not deleted. Their `category_id` becomes `null`, so they stay published and simply lose their category. Removing a category never removes content. PERMANENT: Permanently deletes the category; its articles keep their content and lose the category. Ask the user before calling this, and pass confirm: true only once they have agreed. Needs a secret key (wv_sk_) carrying the taxonomy:write scope. APPROVAL: when the organisation requires it, the first call returns a link for a person to approve instead of acting; after they approve, call again with the same arguments plus approval_id.",
+    "brief": "Deleting several? Use `bulkDeleteCategories` (POST .../bulk-delete): up to 100 categories in one call, and an AI agent needs ONE approval for the whole list instead of one per item.",
+    "description": "Delete a category. Deleting several? Use `bulkDeleteCategories` (POST .../bulk-delete): up to 100 categories in one call, and an AI agent needs ONE approval for the whole list instead of one per item. PERMANENT: Permanently deletes the category; its articles keep their content and lose the category. Ask the user before calling this, and pass confirm: true only once they have agreed. Needs a secret key (wv_sk_) carrying the taxonomy:write scope. APPROVAL: when the organisation requires it, the first call returns a link for a person to approve instead of acting; after they approve, call again with the same arguments plus approval_id.",
     "scope": "taxonomy:write",
     "alsoScopes": [],
     "entitlement": "none",
@@ -2031,8 +2038,8 @@ export const OPERATIONS: McpOperation[] = [
     "surface": "tool",
     "area": "tags",
     "summary": "Delete a tag",
-    "brief": "The tag is removed from every article that carried it. No article is deleted.",
-    "description": "Delete a tag. The tag is removed from every article that carried it. No article is deleted. PERMANENT: Permanently deletes the tag and removes it from every article. Ask the user before calling this, and pass confirm: true only once they have agreed. Needs a secret key (wv_sk_) carrying the taxonomy:write scope. APPROVAL: when the organisation requires it, the first call returns a link for a person to approve instead of acting; after they approve, call again with the same arguments plus approval_id.",
+    "brief": "Deleting several? Use `bulkDeleteTags` (POST .../bulk-delete): up to 100 tags in one call, and an AI agent needs ONE approval for the whole list instead of one per item.",
+    "description": "Delete a tag. Deleting several? Use `bulkDeleteTags` (POST .../bulk-delete): up to 100 tags in one call, and an AI agent needs ONE approval for the whole list instead of one per item. PERMANENT: Permanently deletes the tag and removes it from every article. Ask the user before calling this, and pass confirm: true only once they have agreed. Needs a secret key (wv_sk_) carrying the taxonomy:write scope. APPROVAL: when the organisation requires it, the first call returns a link for a person to approve instead of acting; after they approve, call again with the same arguments plus approval_id.",
     "scope": "taxonomy:write",
     "alsoScopes": [],
     "entitlement": "none",
@@ -2452,8 +2459,8 @@ export const OPERATIONS: McpOperation[] = [
     "surface": "tool",
     "area": "authors",
     "summary": "Delete an author",
-    "brief": "Articles by this author are not deleted. Their `author_id` becomes `null`, so they stay published and lose their byline.",
-    "description": "Delete an author. Articles by this author are not deleted. Their `author_id` becomes `null`, so they stay published and lose their byline. PERMANENT: Permanently deletes the author; their articles keep their content and lose the byline. Ask the user before calling this, and pass confirm: true only once they have agreed. Needs a secret key (wv_sk_) carrying the authors:write scope. APPROVAL: when the organisation requires it, the first call returns a link for a person to approve instead of acting; after they approve, call again with the same arguments plus approval_id.",
+    "brief": "Deleting several? Use `bulkDeleteAuthors` (POST .../bulk-delete): up to 100 authors in one call, and an AI agent needs ONE approval for the whole list instead of one per item.",
+    "description": "Delete an author. Deleting several? Use `bulkDeleteAuthors` (POST .../bulk-delete): up to 100 authors in one call, and an AI agent needs ONE approval for the whole list instead of one per item. PERMANENT: Permanently deletes the author; their articles keep their content and lose the byline. Ask the user before calling this, and pass confirm: true only once they have agreed. Needs a secret key (wv_sk_) carrying the authors:write scope. APPROVAL: when the organisation requires it, the first call returns a link for a person to approve instead of acting; after they approve, call again with the same arguments plus approval_id.",
     "scope": "authors:write",
     "alsoScopes": [],
     "entitlement": "none",
@@ -2546,6 +2553,15 @@ export const OPERATIONS: McpOperation[] = [
           "blog-images",
           "author-avatars"
         ]
+      },
+      {
+        "name": "unused",
+        "in": "query",
+        "required": false,
+        "description": "`true`: only files nothing on this Site references. Computed live, and slower than the plain list on a large Site.",
+        "explode": false,
+        "kind": "boolean",
+        "nullable": false
       },
       {
         "name": "fields",
@@ -2683,8 +2699,8 @@ export const OPERATIONS: McpOperation[] = [
     "surface": "tool",
     "area": "media",
     "summary": "Delete a media asset",
-    "brief": "Removes the catalog row and the stored bytes.",
-    "description": "Delete a media asset. Removes the catalog row and the stored bytes. PERMANENT: Permanently deletes the file; any article or page that shows it shows a broken image. Ask the user before calling this, and pass confirm: true only once they have agreed. Needs a secret key (wv_sk_) carrying the media:write scope. APPROVAL: when the organisation requires it, the first call returns a link for a person to approve instead of acting; after they approve, call again with the same arguments plus approval_id.",
+    "brief": "Deleting several? Use `bulkDeleteMedia` (POST .../bulk-delete): up to 500 media files in one call, and an AI agent needs ONE approval for the whole list instead of one per item.",
+    "description": "Delete a media asset. Deleting several? Use `bulkDeleteMedia` (POST .../bulk-delete): up to 500 media files in one call, and an AI agent needs ONE approval for the whole list instead of one per item. PERMANENT: Permanently deletes the file; any article or page that shows it shows a broken image. Ask the user before calling this, and pass confirm: true only once they have agreed. Needs a secret key (wv_sk_) carrying the media:write scope. APPROVAL: when the organisation requires it, the first call returns a link for a person to approve instead of acting; after they approve, call again with the same arguments plus approval_id.",
     "scope": "media:write",
     "alsoScopes": [],
     "entitlement": "none",
@@ -3893,6 +3909,13 @@ export const REFUSALS: McpRefusal[] = [
     "path": "/auth/key/revoke",
     "tag": "API keys",
     "reason": "Used by the MCP server itself, never by an assistant: the hosted server extends and revokes a connection's key when it refreshes the connection."
+  },
+  {
+    "operationId": "revokeOauthKey",
+    "method": "POST",
+    "path": "/auth/key/revoke-oauth",
+    "tag": "Device sign-in",
+    "reason": "Used by the MCP server itself, never by an assistant: the hosted server extends and revokes a connection's key when it refreshes the connection."
   }
 ];
 
@@ -4029,6 +4052,54 @@ export const ACTIONS: McpOperation[] = [
       "readOnlyHint": false,
       "destructiveHint": false,
       "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "tool": "get_approval_status",
+    "operationId": "getApprovalStatus",
+    "method": "GET",
+    "path": "/approvals/{id}",
+    "tag": "Meta",
+    "surface": "action",
+    "area": "meta",
+    "summary": "Check an approval you are waiting on",
+    "brief": "Whether a person has decided an approval THIS key asked for (a `428 APPROVAL_REQUIRED` gave you its id): `pending`, `approved`, `denied`, `used` or `expired`. Only the key that asked can read it; any other id is `404`.",
+    "description": "Check an approval you are waiting on. Whether a person has decided an approval THIS key asked for (a `428 APPROVAL_REQUIRED` gave you its id): `pending`, `approved`, `denied`, `used` or `expired`. Only the key that asked can read it; any other id is `404`. Cheap and meant to be polled every few seconds while you wait, and it is not written to the Site's agent call log. Read only. Nothing is changed. Needs a secret key (wv_sk_) carrying the meta:read scope.",
+    "scope": "meta:read",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": false,
+    "spendsCredits": false,
+    "spendsMoney": false,
+    "consequence": null,
+    "makesPublic": false,
+    "readOnly": true,
+    "confirm": false,
+    "confirmReason": null,
+    "idempotency": false,
+    "ifMatch": false,
+    "params": [
+      {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "description": "The approval id from the 428.",
+        "explode": false,
+        "kind": "string",
+        "nullable": false,
+        "format": "uuid"
+      }
+    ],
+    "approval": null,
+    "approvalMode": null,
+    "approvalKind": null,
+    "approvalWhen": null,
+    "annotations": {
+      "title": "Check an approval you are waiting on",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
       "openWorldHint": false
     }
   },
@@ -4541,6 +4612,63 @@ export const ACTIONS: McpOperation[] = [
     }
   },
   {
+    "tool": "bulk_delete_articles",
+    "operationId": "bulkDeleteArticles",
+    "method": "POST",
+    "path": "/articles/bulk-delete",
+    "tag": "Articles",
+    "surface": "action",
+    "area": "articles",
+    "summary": "Delete many articles",
+    "brief": "Deletes up to 100 articles in one call, permanently, exactly as `DELETE /articles/{id}` does for each: the row, its tag assignments and the redirects that point at it go, and a published article's URL starts returning 404 on your blog once...",
+    "description": "Delete many articles. Deletes up to 100 articles in one call, permanently, exactly as `DELETE /articles/{id}` does for each: the row, its tag assignments and the redirects that point at it go, and a published article's URL starts returning 404 on your blog once the cache is purged. There is no trash and no undo; to take posts off the web and keep them, unpublish them instead. Changes content on the customer's Site. Nothing becomes public: publishing is always a separate call. CONSEQUENCE: Permanently deletes every article in the list; each published one disappears from the live blog. Ask the user before calling this, and pass confirm: true only once they have agreed. Needs a secret key (wv_sk_) carrying the articles:write scope. APPROVAL: when the organisation requires it, the first call returns a link for a person to approve instead of acting; after they approve, call run_writavo_action again with the same operation_id and arguments plus approval_id.",
+    "scope": "articles:write",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": false,
+    "spendsCredits": false,
+    "spendsMoney": false,
+    "consequence": "Permanently deletes every article in the list; each published one disappears from the live blog.",
+    "makesPublic": false,
+    "readOnly": false,
+    "confirm": true,
+    "confirmReason": "approval",
+    "idempotency": true,
+    "ifMatch": false,
+    "params": [
+      {
+        "name": "ids",
+        "in": "body",
+        "required": true,
+        "description": "The ids to delete. A repeated id counts once.",
+        "explode": false,
+        "kind": "array",
+        "nullable": false,
+        "itemKind": "string"
+      },
+      {
+        "name": "dry_run",
+        "in": "body",
+        "required": false,
+        "description": "`true`: delete nothing, and report what the call would do.",
+        "explode": false,
+        "kind": "boolean",
+        "nullable": false
+      }
+    ],
+    "approval": "article.delete",
+    "approvalMode": "switchable",
+    "approvalKind": "destructive",
+    "approvalWhen": null,
+    "annotations": {
+      "title": "Delete many articles",
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
     "tool": "set_article_cost_history",
     "operationId": "setArticleCostHistory",
     "method": "POST",
@@ -4594,6 +4722,234 @@ export const ACTIONS: McpOperation[] = [
       "title": "Set an article's imported cost history",
       "readOnlyHint": false,
       "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "tool": "bulk_delete_categories",
+    "operationId": "bulkDeleteCategories",
+    "method": "POST",
+    "path": "/categories/bulk-delete",
+    "tag": "Categories",
+    "surface": "action",
+    "area": "categories",
+    "summary": "Delete many categories",
+    "brief": "Deletes up to 100 categories in one call, exactly as `DELETE /categories/{id}` does for each. No article is deleted: an article filed under a deleted category keeps its content and loses that category (its next category becomes its primary...",
+    "description": "Delete many categories. Deletes up to 100 categories in one call, exactly as `DELETE /categories/{id}` does for each. No article is deleted: an article filed under a deleted category keeps its content and loses that category (its next category becomes its primary one, if it has one), and a child category of a deleted one moves to the top level. Changes content on the customer's Site. Nothing becomes public: publishing is always a separate call. CONSEQUENCE: Permanently deletes every category in the list; their articles keep their content and lose those categories. Ask the user before calling this, and pass confirm: true only once they have agreed. Needs a secret key (wv_sk_) carrying the taxonomy:write scope. APPROVAL: when the organisation requires it, the first call returns a link for a person to approve instead of acting; after they approve, call run_writavo_action again with the same operation_id and arguments plus approval_id.",
+    "scope": "taxonomy:write",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": false,
+    "spendsCredits": false,
+    "spendsMoney": false,
+    "consequence": "Permanently deletes every category in the list; their articles keep their content and lose those categories.",
+    "makesPublic": false,
+    "readOnly": false,
+    "confirm": true,
+    "confirmReason": "approval",
+    "idempotency": true,
+    "ifMatch": false,
+    "params": [
+      {
+        "name": "ids",
+        "in": "body",
+        "required": true,
+        "description": "The ids to delete. A repeated id counts once.",
+        "explode": false,
+        "kind": "array",
+        "nullable": false,
+        "itemKind": "string"
+      },
+      {
+        "name": "dry_run",
+        "in": "body",
+        "required": false,
+        "description": "`true`: delete nothing, and report what the call would do.",
+        "explode": false,
+        "kind": "boolean",
+        "nullable": false
+      }
+    ],
+    "approval": "category.delete",
+    "approvalMode": "switchable",
+    "approvalKind": "destructive",
+    "approvalWhen": null,
+    "annotations": {
+      "title": "Delete many categories",
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "tool": "bulk_delete_tags",
+    "operationId": "bulkDeleteTags",
+    "method": "POST",
+    "path": "/tags/bulk-delete",
+    "tag": "Tags",
+    "surface": "action",
+    "area": "tags",
+    "summary": "Delete many tags",
+    "brief": "Deletes up to 100 tags in one call, exactly as `DELETE /tags/{id}` does for each. Each tag is removed from every article that carried it. No article is deleted.",
+    "description": "Delete many tags. Deletes up to 100 tags in one call, exactly as `DELETE /tags/{id}` does for each. Each tag is removed from every article that carried it. No article is deleted. Changes content on the customer's Site. Nothing becomes public: publishing is always a separate call. CONSEQUENCE: Permanently deletes every tag in the list and removes them from every article. Ask the user before calling this, and pass confirm: true only once they have agreed. Needs a secret key (wv_sk_) carrying the taxonomy:write scope. APPROVAL: when the organisation requires it, the first call returns a link for a person to approve instead of acting; after they approve, call run_writavo_action again with the same operation_id and arguments plus approval_id.",
+    "scope": "taxonomy:write",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": false,
+    "spendsCredits": false,
+    "spendsMoney": false,
+    "consequence": "Permanently deletes every tag in the list and removes them from every article.",
+    "makesPublic": false,
+    "readOnly": false,
+    "confirm": true,
+    "confirmReason": "approval",
+    "idempotency": true,
+    "ifMatch": false,
+    "params": [
+      {
+        "name": "ids",
+        "in": "body",
+        "required": true,
+        "description": "The ids to delete. A repeated id counts once.",
+        "explode": false,
+        "kind": "array",
+        "nullable": false,
+        "itemKind": "string"
+      },
+      {
+        "name": "dry_run",
+        "in": "body",
+        "required": false,
+        "description": "`true`: delete nothing, and report what the call would do.",
+        "explode": false,
+        "kind": "boolean",
+        "nullable": false
+      }
+    ],
+    "approval": "tag.delete",
+    "approvalMode": "switchable",
+    "approvalKind": "destructive",
+    "approvalWhen": null,
+    "annotations": {
+      "title": "Delete many tags",
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "tool": "bulk_delete_authors",
+    "operationId": "bulkDeleteAuthors",
+    "method": "POST",
+    "path": "/authors/bulk-delete",
+    "tag": "Authors",
+    "surface": "action",
+    "area": "authors",
+    "summary": "Delete many authors",
+    "brief": "Deletes up to 100 authors in one call, exactly as `DELETE /authors/{id}` does for each. No article is deleted: articles by a deleted author stay published and lose their byline (`author_id` becomes `null`).",
+    "description": "Delete many authors. Deletes up to 100 authors in one call, exactly as `DELETE /authors/{id}` does for each. No article is deleted: articles by a deleted author stay published and lose their byline (`author_id` becomes `null`). Changes content on the customer's Site. Nothing becomes public: publishing is always a separate call. CONSEQUENCE: Permanently deletes every author in the list; their articles keep their content and lose the byline. Ask the user before calling this, and pass confirm: true only once they have agreed. Needs a secret key (wv_sk_) carrying the authors:write scope. APPROVAL: when the organisation requires it, the first call returns a link for a person to approve instead of acting; after they approve, call run_writavo_action again with the same operation_id and arguments plus approval_id.",
+    "scope": "authors:write",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": false,
+    "spendsCredits": false,
+    "spendsMoney": false,
+    "consequence": "Permanently deletes every author in the list; their articles keep their content and lose the byline.",
+    "makesPublic": false,
+    "readOnly": false,
+    "confirm": true,
+    "confirmReason": "approval",
+    "idempotency": true,
+    "ifMatch": false,
+    "params": [
+      {
+        "name": "ids",
+        "in": "body",
+        "required": true,
+        "description": "The ids to delete. A repeated id counts once.",
+        "explode": false,
+        "kind": "array",
+        "nullable": false,
+        "itemKind": "string"
+      },
+      {
+        "name": "dry_run",
+        "in": "body",
+        "required": false,
+        "description": "`true`: delete nothing, and report what the call would do.",
+        "explode": false,
+        "kind": "boolean",
+        "nullable": false
+      }
+    ],
+    "approval": "author.delete",
+    "approvalMode": "switchable",
+    "approvalKind": "destructive",
+    "approvalWhen": null,
+    "annotations": {
+      "title": "Delete many authors",
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "tool": "bulk_delete_media",
+    "operationId": "bulkDeleteMedia",
+    "method": "POST",
+    "path": "/media/bulk-delete",
+    "tag": "Media",
+    "surface": "action",
+    "area": "media",
+    "summary": "Delete many media assets",
+    "brief": "Deletes up to 500 files in one call: the catalog rows and the stored bytes, exactly as `DELETE /media/{id}` does for each (an audit entry and a `media.deleted` webhook per file).",
+    "description": "Delete many media assets. Deletes up to 500 files in one call: the catalog rows and the stored bytes, exactly as `DELETE /media/{id}` does for each (an audit entry and a `media.deleted` webhook per file). Changes content on the customer's Site. Nothing becomes public: publishing is always a separate call. CONSEQUENCE: Permanently deletes every file in the list that the call is allowed to delete; with only_unused false, any article or page that shows one of them shows a broken image. Ask the user before calling this, and pass confirm: true only once they have agreed. Needs a secret key (wv_sk_) carrying the media:write scope. APPROVAL: when the organisation requires it, the first call returns a link for a person to approve instead of acting; after they approve, call run_writavo_action again with the same operation_id and arguments plus approval_id.",
+    "scope": "media:write",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": false,
+    "spendsCredits": false,
+    "spendsMoney": false,
+    "consequence": "Permanently deletes every file in the list that the call is allowed to delete; with only_unused false, any article or page that shows one of them shows a broken image.",
+    "makesPublic": false,
+    "readOnly": false,
+    "confirm": true,
+    "confirmReason": "approval",
+    "idempotency": true,
+    "ifMatch": false,
+    "params": [
+      {
+        "name": "ids",
+        "in": "body",
+        "required": true,
+        "description": "The media ids to delete. A repeated id counts once.",
+        "explode": false,
+        "kind": "array",
+        "nullable": false,
+        "itemKind": "string"
+      },
+      {
+        "name": "only_unused",
+        "in": "body",
+        "required": false,
+        "description": "`true` (the default): delete only the files nothing on this Site uses, and list the rest in `in_use`. `false`: delete every named file, even one an article still shows.",
+        "explode": false,
+        "kind": "boolean",
+        "nullable": false
+      }
+    ],
+    "approval": "media.delete",
+    "approvalMode": "switchable",
+    "approvalKind": "destructive",
+    "approvalWhen": null,
+    "annotations": {
+      "title": "Delete many media assets",
+      "readOnlyHint": false,
+      "destructiveHint": true,
       "idempotentHint": false,
       "openWorldHint": false
     }
@@ -5432,7 +5788,7 @@ export const ACTIONS: McpOperation[] = [
     "area": "pipeline",
     "summary": "Switch the draft recipe on",
     "brief": "The draft becomes the live recipe; the previous one is kept in the history and `POST /pipeline/recipe/undo` goes back to it. New ideas follow the new recipe at once; articles already on their way finish on the version they started on.",
-    "description": "Switch the draft recipe on. The draft becomes the live recipe; the previous one is kept in the history and `POST /pipeline/recipe/undo` goes back to it. New ideas follow the new recipe at once; articles already on their way finish on the version they started on. Returns the recipe as `GET /pipeline/recipe` does. COSTS MONEY: this spends the organisation's credit balance, charged per unit of work completed. Replaces the recipe the AI pipeline follows, which changes what every new article costs and whether it publishes without review. Ask the user before calling this, and pass confirm: true only once they have agreed. Needs a secret key (wv_sk_) carrying the pipeline:config scope. APPROVAL: when an AI assistant calls this it always needs a person's approval first: the first call returns a link for them instead of acting; after they approve, call run_writavo_action again with the same operation_id and arguments plus approval_id.",
+    "description": "Switch the draft recipe on. The draft becomes the live recipe; the previous one is kept in the history and `POST /pipeline/recipe/undo` goes back to it. New ideas follow the new recipe at once; articles already on their way finish on the version they started on. Returns the recipe as `GET /pipeline/recipe` does, plus `warnings`: a `KNOWLEDGE_PROFILE_INCOMPLETE` entry when the AI writing profile has gaps (the recipe is switched on either way). COSTS MONEY: this spends the organisation's credit balance, charged per unit of work completed. Replaces the recipe the AI pipeline follows, which changes what every new article costs and whether it publishes without review. Ask the user before calling this, and pass confirm: true only once they have agreed. Needs a secret key (wv_sk_) carrying the pipeline:config scope. APPROVAL: when an AI assistant calls this it always needs a person's approval first: the first call returns a link for them instead of acting; after they approve, call run_writavo_action again with the same operation_id and arguments plus approval_id.",
     "scope": "pipeline:config",
     "alsoScopes": [],
     "entitlement": "none",
@@ -5810,8 +6166,8 @@ export const ACTIONS: McpOperation[] = [
     "area": "formats_and_prompts",
     "summary": "Read the AI prompts",
     "brief": "The prompt used at each of the five pipeline stages that read one (`plan`, `generate`, `improve`, `classify`, `extract`): the platform default, this Site's override if it has one, which of the two is in effect, and the `{{placeholders}}` th...",
-    "description": "Read the AI prompts. The prompt used at each of the five pipeline stages that read one (`plan`, `generate`, `improve`, `classify`, `extract`): the platform default, this Site's override if it has one, which of the two is in effect, and the `{{placeholders}}` the default uses. Read only. Nothing is changed. Needs a secret key (wv_sk_) carrying the prompts:write scope.",
-    "scope": "prompts:write",
+    "description": "Read the AI prompts. The prompt used at each of the five pipeline stages that read one (`plan`, `generate`, `improve`, `classify`, `extract`): the platform default, this Site's override if it has one, which of the two is in effect, and the `{{placeholders}}` the default uses. Read only. Nothing is changed. Needs a secret key (wv_sk_) carrying the pipeline:read scope.",
+    "scope": "pipeline:read",
     "alsoScopes": [],
     "entitlement": "none",
     "publishable": false,
@@ -8815,6 +9171,83 @@ export const ACTIONS: McpOperation[] = [
     "approvalWhen": null,
     "annotations": {
       "title": "Check keyword positions now",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "tool": "import_seo",
+    "operationId": "importSeo",
+    "method": "POST",
+    "path": "/seo/import",
+    "tag": "SEO",
+    "surface": "action",
+    "area": "seo",
+    "summary": "Import keywords, competitors and ranking history",
+    "brief": "Bring a Site's SEO data to Writavo when it migrates from another tool: the keywords it tracks, its competitors, and each keyword's ranking history. Free: nothing is charged and no rank check runs; the history is the data you send.",
+    "description": "Import keywords, competitors and ranking history. Bring a Site's SEO data to Writavo when it migrates from another tool: the keywords it tracks, its competitors, and each keyword's ranking history. Free: nothing is charged and no rank check runs; the history is the data you send. Changes SEO settings. CONSEQUENCE: Tracks the keywords and adds the competitors sent, and sets their ranking history for the days sent, replacing what an earlier import stored for those days. Needs a secret key (wv_sk_) carrying the seo:write scope.",
+    "scope": "seo:write",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": false,
+    "spendsCredits": false,
+    "spendsMoney": false,
+    "consequence": "Tracks the keywords and adds the competitors sent, and sets their ranking history for the days sent, replacing what an earlier import stored for those days.",
+    "makesPublic": false,
+    "readOnly": false,
+    "confirm": false,
+    "confirmReason": null,
+    "idempotency": true,
+    "ifMatch": false,
+    "params": [
+      {
+        "name": "dry_run",
+        "in": "body",
+        "required": false,
+        "description": "Check and report without writing. Defaults to true; send false to write.",
+        "explode": false,
+        "kind": "boolean",
+        "nullable": false
+      },
+      {
+        "name": "keywords",
+        "in": "body",
+        "required": false,
+        "description": "Keywords to track. One already tracked (ignoring case) is updated.",
+        "explode": false,
+        "kind": "array",
+        "nullable": false,
+        "itemKind": "object"
+      },
+      {
+        "name": "competitors",
+        "in": "body",
+        "required": false,
+        "description": "Competitors to add. One already there (same domain) is updated.",
+        "explode": false,
+        "kind": "array",
+        "nullable": false,
+        "itemKind": "object"
+      },
+      {
+        "name": "positions",
+        "in": "body",
+        "required": false,
+        "description": "Ranking history, one row per keyword per UTC day.",
+        "explode": false,
+        "kind": "array",
+        "nullable": false,
+        "itemKind": "object"
+      }
+    ],
+    "approval": null,
+    "approvalMode": null,
+    "approvalKind": null,
+    "approvalWhen": null,
+    "annotations": {
+      "title": "Import keywords, competitors and ranking history",
       "readOnlyHint": false,
       "destructiveHint": false,
       "idempotentHint": false,
@@ -12880,6 +13313,10 @@ export const ACTION_AREAS = [
   "insights",
   "meta",
   "articles",
+  "categories",
+  "tags",
+  "authors",
+  "media",
   "pipeline",
   "content_types",
   "entries",

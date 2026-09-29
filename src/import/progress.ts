@@ -62,6 +62,8 @@ export interface ImportProgress {
   items: Record<string, ProgressItem>;
   /** The engagement section's delivery, when the document has one (sent after every article). */
   engagement?: EngagementProgress;
+  /** The SEO section's delivery (keywords, competitors, ranking history), after the engagement. */
+  seo?: SeoProgress;
   /** The redirects (articles' old_urls + the redirects section), sent after every article. */
   redirects?: RedirectsProgress;
   /**
@@ -79,6 +81,18 @@ export interface ImportProgress {
   entries?: Record<string, EntryProgress>;
   /** Articles' custom_fields by article external_id (0136), applied after every entry exists. */
   custom_fields?: Record<string, { hash: string; done: boolean; error?: string }>;
+  /** The AI writing profile section (PATCH /site/knowledge-profile), written before the articles. */
+  profile?: ProfileProgress;
+}
+
+export interface ProfileProgress {
+  /** Hash of the section as sent: a changed section is sent again. */
+  hash: string;
+  done: boolean;
+  /** The fields set ("product_knowledge", "prompt_vars.brand_topic"), for the report. */
+  set?: string[];
+  /** Why the Site refused it (the next apply tries again). */
+  error?: string;
 }
 
 export interface ContentTypesProgress {
@@ -124,6 +138,23 @@ export interface EngagementProgress {
   reactions_sent: number;
   done: boolean;
   written: { daily: number; share_rows: number; picks: number };
+  /** What the API skipped, first ones only. */
+  problems: string[];
+  /** Why the last attempt could not deliver it (the next apply tries again). */
+  error?: string;
+}
+
+export interface SeoProgress {
+  /** Hash of the section as sent (versioned): a changed section is sent again from the start. */
+  hash: string;
+  /** When this delivery started. In every Idempotency-Key, so a resumed chunk is a retry and a
+   *  section sent again from the start (retry_failed) is new work, not a replay. */
+  started: string;
+  competitors_sent: number;
+  keywords_sent: number;
+  positions_sent: number;
+  done: boolean;
+  written: { keywords_created: number; keywords_updated: number; competitors_created: number; competitors_updated: number; positions: number };
   /** What the API skipped, first ones only. */
   problems: string[];
   /** Why the last attempt could not deliver it (the next apply tries again). */

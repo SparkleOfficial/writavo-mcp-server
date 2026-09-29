@@ -322,6 +322,61 @@ export const EngagementEnvelopeSchema = z.strictObject({
 export type EngagementDaily = z.infer<typeof EngagementDailySchema>;
 export type EngagementReaction = z.infer<typeof EngagementReactionSchema>;
 
+// ---------------------------------------------------------------------------
+// SEO data (optional): the keywords a Site tracks, its competitors and its ranking history
+// ---------------------------------------------------------------------------
+
+/** POST /seo/import's per-row limits (0143 api_import_seo); the API is the judge of the rest. */
+const seoKeyword = z.string().min(1).max(200);
+const seoCount = z.number().int().min(0).max(2_000_000_000).nullable().optional();
+
+export const SeoKeywordSchema = z.strictObject({
+  keyword: seoKeyword.describe("The keyword. Matched on the Site ignoring case and extra spaces; one already tracked is updated."),
+  target_url: z.string().max(LIMITS.url).regex(/^https:\/\/\S+$/i, "must be a full URL starting with https://").nullable().optional().describe("The page meant to rank for it."),
+  is_priority: z.boolean().optional().describe("Checked daily rather than weekly."),
+  location_code: z.number().int().min(1).max(99_999_999).optional().describe("A search location code. Defaults to the Site's locale."),
+  language_code: z.string().regex(/^[a-z]{2}$/, "must be a two-letter lowercase language code such as en").optional().describe("Defaults to the Site's locale."),
+});
+
+export const SeoCompetitorSchema = z.strictObject({
+  domain: z.string().min(1).max(300).describe("The competitor's domain. A pasted URL is reduced to it (https://www.rival.com/blog is rival.com)."),
+  name: z.string().max(120).nullable().optional(),
+  blog_url: z.string().max(LIMITS.url).regex(/^https?:\/\/\S+$/i, "must be a full URL starting with http:// or https://").nullable().optional().describe("The competitor's blog listing page."),
+});
+
+export const SeoPositionSchema = z.strictObject({
+  keyword: seoKeyword.describe("A keyword in keywords[] or already tracked on the Site."),
+  day: z.iso.date({ error: "must be a date, YYYY-MM-DD (UTC)" }).describe("The UTC day, from 2000-01-01 to yesterday (a finished day)."),
+  position: z.number().min(1).max(1000).nullable().describe("The Google position that day, or null when it did not rank. An average is rounded."),
+  url: z.string().max(LIMITS.url).regex(/^https?:\/\/\S+$/i, "must be a full URL starting with http:// or https://").nullable().optional().describe("The page that ranked."),
+  search_volume: seoCount,
+  impressions: seoCount,
+  clicks: seoCount,
+});
+
+const SEO_DESCRIPTION =
+  "Optional SEO data from the old tool: tracked keywords, competitors and each keyword's ranking history. Sent after every article; keywords and competitors already on the Site are updated, never duplicated, and each position SETS its keyword and day, so re-running never duplicates. The plan's tracked-keyword limit holds. Free: no rank check runs.";
+
+/** The section as documented (the JSON Schema): every row typed. */
+export const SeoSchema = z
+  .strictObject({
+    keywords: z.array(SeoKeywordSchema).optional().describe("Keywords to track."),
+    competitors: z.array(SeoCompetitorSchema).optional().describe("Competitors to add."),
+    positions: z.array(SeoPositionSchema).optional().describe("Ranking history: one row per keyword per UTC day."),
+  })
+  .describe(SEO_DESCRIPTION);
+
+/** The section as parsed: rows left unparsed, so each is checked (and reported) on its own. */
+export const SeoEnvelopeSchema = z.strictObject({
+  keywords: z.array(z.unknown()).optional(),
+  competitors: z.array(z.unknown()).optional(),
+  positions: z.array(z.unknown()).optional(),
+});
+
+export type SeoKeyword = z.infer<typeof SeoKeywordSchema>;
+export type SeoCompetitor = z.infer<typeof SeoCompetitorSchema>;
+export type SeoPosition = z.infer<typeof SeoPositionSchema>;
+
 /**
  * Written by Writavo, not by hand: what a native conversion (a WordPress export) decided, shown in
  * the dry run beside the articles it concerns. Informational; nothing is imported from it.
@@ -404,6 +459,37 @@ export const ImportEntrySchema = z
 export type ImportEntry = z.infer<typeof ImportEntrySchema>;
 export type ContentTypeDef = z.infer<typeof ContentTypeDefSchema>;
 
+const profileText = (max: number) => z.string().trim().min(1, "must not be empty").max(max);
+
+/**
+ * The AI writing profile, the writable fields of PATCH /site/knowledge-profile. Only sets: an
+ * import never clears a field, and a field the document leaves out keeps what the Site has. The
+ * prompt_vars keys are the Site's to judge (the dry run checks them against GET
+ * /site/knowledge-profile), so this list never drifts from the API's.
+ */
+export const ProfileSchema = z
+  .strictObject({
+    brand_voice: profileText(4000).optional().describe("How the articles should sound."),
+    product_description: profileText(4000).optional().describe("What the business sells or does, in a sentence or two."),
+    target_audience: profileText(4000).optional().describe("Who the articles are for."),
+    product_knowledge: profileText(20_000)
+      .optional()
+      .describe("The facts the writer may cite: features, pricing, differentiators. The writer never invents a feature that is not in here."),
+    niche_keywords: z
+      .array(z.string().trim().min(1).max(60))
+      .min(1)
+      .max(60)
+      .optional()
+      .describe("The niche gate: a competitor article needs two of these words before it is written. Replaces the Site's list."),
+    prompt_vars: z
+      .record(z.string().regex(/^[a-z][a-z0-9_]{0,63}$/, "must be a prompt variable name"), profileText(600))
+      .optional()
+      .describe("The Site's values for the brand phrases in the writing prompts, by name. Merged: names left out keep the Site's value."),
+  })
+  .describe("The AI writing profile: what the AI pipeline knows about the brand it writes for.");
+
+export type ImportProfile = z.infer<typeof ProfileSchema>;
+
 const documentFields = {
   format: z.literal(IMPORT_FORMAT_NAME),
   version: z.literal(IMPORT_FORMAT_VERSION),
@@ -426,6 +512,8 @@ const documentFields = {
   categories: z.array(CategorySchema).optional(),
   tags: z.array(TagSchema).optional(),
   engagement: EngagementSchema.optional(),
+  seo: SeoSchema.optional(),
+  profile: ProfileSchema.optional(),
   redirects: z
     .array(RedirectEntrySchema)
     .max(50_000)
@@ -462,9 +550,13 @@ export const ImportEnvelopeSchema = z.strictObject({
   // Rows are checked one by one (validate.ts), so one bad row is reported and skipped rather than
   // failing the document or the articles.
   engagement: EngagementEnvelopeSchema.optional(),
+  seo: SeoEnvelopeSchema.optional(),
   redirects: z.array(z.unknown()).max(50_000).optional(),
   content_types: z.array(z.unknown()).max(100).optional(),
   entries: z.array(z.unknown()).max(50_000).optional(),
+  // Checked on its own (validate.ts checkProfile): a bad profile is reported, never a reason to
+  // refuse the articles.
+  profile: z.unknown().optional(),
   articles: z.array(z.unknown()),
 });
 
@@ -533,7 +625,10 @@ export const IMPORT_FORMAT_GUIDE = `# Writavo Import Format v1
 
 A single JSON file describing a blog's articles, authors, categories and tags. import_content reads
 it, checks it against the Site in a dry run, and then imports it in batches. Re-running an import
-is safe: articles are matched by external_id, so a second run updates rather than duplicates.
+is safe: articles are matched by external_id, so a second run updates rather than duplicates, and
+an article whose content already matches the file is left exactly as it is (no new revision, no
+webhook, no change to its dates). A live article is only ever changed with publish: true and
+confirm: true; with publish: false it is left as it is, but its cost_history is still written.
 
 Top level:
 - format: always "writavo-import". version: always 1.
@@ -614,6 +709,24 @@ in this document or already on the Site) or slug:
 It is sent after every article is imported; a bad row is reported and skipped, never a reason to
 refuse the articles.
 
+SEO data (optional, top level): what the old SEO tool tracked, so a moved Site keeps its ranking
+history. { keywords: [...], competitors: [...], positions: [...] }:
+- keywords: [{ keyword, target_url? (https), is_priority?, location_code?, language_code? }]. Matched
+  on the Site ignoring case and extra spaces; one already tracked is updated (each field sent
+  replaces that field), a new one is tracked with the Site's locale unless the row names one. The
+  plan limits how many keywords the organisation tracks: new ones past the limit are reported and
+  skipped, in file order, and the dry run says how many fit.
+- competitors: [{ domain, name?, blog_url? }]. A pasted URL is reduced to its domain, without www.
+  One already on the Site is updated. At most 25 active per Site; the Site's own domain is refused.
+- positions: [{ keyword, day (YYYY-MM-DD, UTC, from 2000-01-01 to yesterday), position (1 to 1000, or
+  null when it did not rank), url?, search_volume?, impressions?, clicks? }]: the ranking history.
+  keyword is one in keywords[] or already tracked on the Site. Each row SETS that keyword's day, so
+  re-running never duplicates. Imported history shows in the keyword's position chart beside
+  Writavo's own checks and is kept however old it is.
+It is sent after every article (competitors, then keywords, then positions) and needs the seo:write
+permission. It is free: no rank check runs and nothing is charged. A bad row is reported and
+skipped, never a reason to refuse the articles.
+
 Redirects (optional, top level): old URLs that belong to no article, such as category and tag
 archives, pages and feeds: [{ from, to | to_external_id, status?, note? }]. from is the old URL
 (best in full); to is a path under the new blog (/category/guides) or a full https URL, or
@@ -638,12 +751,23 @@ written after every article (matched by external_id, new ones created as drafts)
 references and media are resolved and their status set. A reference to something neither in the
 document nor on the Site is left out with a warning; importing again later fills it in.
 
+AI writing profile (optional, top level): what the AI pipeline knows about the brand, the fields
+of PATCH /site/knowledge-profile: { brand_voice?, product_description?, target_audience?,
+product_knowledge? (up to 20,000 characters), niche_keywords? (up to 60), prompt_vars? }.
+prompt_vars holds the Site's values for the brand phrases in the writing prompts (brand_category,
+brand_topic, named_competitors and the rest; GET /site/knowledge-profile lists them). A blog moved
+from another AI writer should carry its brand settings here, or the pipeline writes with generic
+placeholders. Only fields present are set: a field left out keeps what the Site has, prompt_vars
+merge name by name, and niche_keywords replaces the list. Nothing is ever cleared. It is written
+before the articles; the dry run lists what would be set and what stays empty.
+
 Articles may carry custom_fields: the values of the Site's custom article fields (the content type
 "article"), written the same portable way, and set after every entry exists.
 
 A Writavo export (GET /export) is this format, in volumes of at most about 8 MB: import them in
 order, and run a volume again if its report lists references it could not resolve yet. articles may
-be empty when a document carries entries, content types, redirects or engagement.
+be empty when a document carries entries, content types, redirects, engagement, SEO data or a
+profile.
 
 Images: inline markdown images ![alt](https://...), featured images, how-to step images and
 author avatars are copied into the Site's media library and the URLs rewritten, unless
@@ -688,9 +812,11 @@ export const IMPORT_FORMAT_SECTIONS = [
   "articles",
   "cost_history",
   "engagement",
+  "seo",
   "redirects",
   "content_types",
   "entries",
+  "profile",
 ] as const;
 export type ImportFormatSection = (typeof IMPORT_FORMAT_SECTIONS)[number];
 
@@ -703,9 +829,11 @@ function guideParagraph(heading: string): string | null {
 
 const GUIDE_PARAGRAPH: Partial<Record<ImportFormatSection, string>> = {
   engagement: "Engagement (optional, top level)",
+  seo: "SEO data (optional, top level)",
   redirects: "Redirects (optional, top level)",
   content_types: "Content types (optional, top level)",
   entries: "Entries (optional, top level)",
+  profile: "AI writing profile (optional, top level)",
 };
 
 function jsonBlock(value: unknown): string[] {
