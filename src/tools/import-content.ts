@@ -3,6 +3,7 @@ import { hasKey, keyKindOf, forTool, type ToolContext } from "../core/context.js
 import { publishableKeyRefusal, text, toolError, type ToolResult } from "../errors.js";
 import { importFormatDocument } from "../import/format.js";
 import { runImport, type ImportBudget, type ImportSource } from "../import/engine.js";
+import { convertWxr, looksLikeWxr, MAX_WXR_BYTES } from "../import/wordpress/index.js";
 import {
   IMPORT_ID_RE,
   JOB_TTL_DAYS,
@@ -53,7 +54,7 @@ const MB = (bytes: number) => `${bytes / 1024 / 1024} MB`;
 function description(can: Capabilities): string {
   const ways = can.jobs
     ? [
-        `Give the document one of three ways, and it is kept on the server as an import job with its own progress. Best: if you can run a shell command, call with upload: true for a one-time link and curl the file to it (up to ${MB(MAX_JOB_BYTES)}, never through this conversation). Or an https url the server fetches (a signed storage URL, for example; up to ${MB(MAX_JOB_BYTES)}). Inline data only for a small document: at most ${MAX_INLINE_ARTICLES} articles and ${INLINE_LIMIT} per call (parts after the first carry the import_id the first call returned); anything bigger by upload or url.`,
+        `Give the document one of three ways, and it is kept on the server as an import job with its own progress. Best: if you can run a shell command, call with upload: true for a one-time link and curl the file to it (up to ${MB(MAX_JOB_BYTES)}, never through this conversation). Or an https url the server fetches (a signed storage URL, for example; up to ${MB(MAX_JOB_BYTES)}). Inline data only for a small document: at most ${MAX_INLINE_ARTICLES} articles and ${INLINE_LIMIT} per call (parts after the first carry the import_id the first call returned); anything bigger by upload or url. A WordPress export file (the .xml from Tools > Export) needs no conversion: send it as it is, by upload or url (up to ${MB(MAX_WXR_BYTES)}), and Writavo converts it itself (posts, categories, tags, authors, images, SEO fields, old URLs as redirects).`,
         can.background
           ? "Every call after that is just import_id. An apply (dry_run false) runs IN THE BACKGROUND on the server until it is done, with nobody connected: it returns at once, and import_id with status: true says how far it has got. Check every minute or two; do not call apply again while it runs."
           : "Every call after that is just import_id (plus dry_run, confirm): nothing is sent again.",
@@ -87,6 +88,15 @@ function inputSchema(can: Capabilities): Record<string, z.ZodTypeAny> {
             .string()
             .optional()
             .describe(`An https URL the server fetches the whole document from, anonymously (a signed storage URL, a raw gist URL). Up to ${MB(MAX_JOB_BYTES)}. With import_id, the fetched document is added to that import.`),
+          wordpress_url: z
+            .string()
+            .optional()
+            .describe("A live WordPress site's address (https://example.com): the server reads its posts, categories, tags, authors and SEO fields over the WordPress REST API, read only, and converts them. Published posts only, unless wordpress_username and wordpress_application_password are given. If the site blocks its REST API, use its export file (Tools > Export) by upload instead."),
+          wordpress_username: z.string().optional().describe("With wordpress_url: a WordPress user name, to also read drafts, scheduled, pending and private posts."),
+          wordpress_application_password: z
+            .string()
+            .optional()
+            .describe("With wordpress_username: an Application Password (WordPress Users > Profile > Application Passwords), never the account password. Held encrypted only while the site is read, then erased. The person should revoke it in WordPress afterwards."),
           upload: z
             .boolean()
             .optional()
@@ -168,6 +178,20 @@ export const IMPORT_CONTENT = importContentTool();
 export function readInlinePart(data: unknown): { document: unknown; serialised: string } | { error: string } {
   let serialised: string;
   let document: unknown;
+  if (typeof data === "string" && looksLikeWxr(data)) {
+    // A small WordPress export sent inline: converted here, then held to the same limits.
+    const size = byteLength(data);
+    if (size > MAX_INLINE_BYTES) {
+      return {
+        error: `The WordPress export is ${size} bytes, and one call takes at most ${MAX_INLINE_BYTES} (${INLINE_LIMIT}). Nothing was checked or written. Send the .xml file by upload: true (a one-time curl command) or as an https url instead.`,
+      };
+    }
+    const converted = convertWxr(data);
+    if ("error" in converted) return { error: converted.error };
+    document = converted.document;
+    serialised = JSON.stringify(document);
+    return { document, serialised };
+  }
   if (typeof data === "string") {
     serialised = data;
     try {
@@ -288,9 +312,11 @@ async function uploadLink(jobs: ImportJobStore, importId: string | undefined): P
     [
       `Import ${id} is waiting for its document. Nothing has been checked or written yet.`,
       "",
-      `PUT the import file (JSON, up to ${MB(MAX_JOB_BYTES)}) to the server with this command, replacing the path. The link works once, for ${UPLOAD_LINK_MINUTES} minutes (until ${link.expires_at}). If this import already holds a document, the upload is added to it (entries with the same ref, slug or external_id replace the stored ones).`,
+      `PUT the import file to the server with this command, replacing the path: a Writavo import document (JSON, up to ${MB(MAX_JOB_BYTES)}) or a WordPress export file as it is (.xml, up to ${MB(MAX_WXR_BYTES)}, converted on the server). The link works once, for ${UPLOAD_LINK_MINUTES} minutes (until ${link.expires_at}). If this import already holds a document, the upload is added to it (entries with the same ref, slug or external_id replace the stored ones).`,
       "",
       `curl -sS --fail-with-body -X PUT -H "Content-Type: application/json" -H "Authorization: Bearer ${link.token}" --data-binary @/absolute/path/to/import.json ${link.url}`,
+      "",
+      "For a WordPress export, the same command with the .xml file (the Content-Type header does not matter for this link).",
       "",
       "The token in that command is a credential for this upload only: do not show it to anyone else or put it in a file.",
       `When it answers ok, call import_content ${JSON.stringify({ import_id: id })} for the dry run.`,
@@ -404,16 +430,23 @@ export async function handleImportContent(
     background?: boolean;
     status?: boolean;
     cancel?: boolean;
+    wordpress_url?: string;
+    wordpress_username?: string;
+    wordpress_application_password?: string;
   };
 
   const startedAt = Date.now();
   const hasData = args.data !== undefined && args.data !== null && args.data !== "";
   const hasUrl = jobs !== null && typeof args.url === "string" && args.url.length > 0;
   const wantsUpload = jobs !== null && args.upload === true;
+  const hasWp = jobs !== null && typeof args.wordpress_url === "string" && args.wordpress_url.length > 0;
   const hasId = jobs !== null && typeof args.import_id === "string" && args.import_id.length > 0;
-  const given = [hasData, hasUrl, wantsUpload].filter(Boolean).length;
+  const given = [hasData, hasUrl, wantsUpload, hasWp].filter(Boolean).length;
   if (given === 0 && !hasId) return text(importFormatDocument());
-  if (given > 1) return toolError("import_content takes one of data, url or upload per call, not several.");
+  if (given > 1) return toolError("import_content takes one of data, url, upload or wordpress_url per call, not several.");
+  if (hasWp && Boolean(args.wordpress_username) !== Boolean(args.wordpress_application_password)) {
+    return toolError("Give wordpress_username and wordpress_application_password together, or neither (published posts only).");
+  }
 
   if (!hasKey(ctx)) return toolError(ctx.notSignedIn());
   if (keyKindOf(ctx) === "publishable") return publishableKeyRefusal(NAME, "articles:write");
@@ -442,21 +475,33 @@ export async function handleImportContent(
       if (id && !IMPORT_ID_RE.test(id)) {
         return toolError(`import_id "${id.slice(0, 40)}" is not an import id. They look like imp_ followed by 22 characters, exactly as a previous call returned.`);
       }
+      let converting = false;
       if (id) {
         const info = await remote.info(id);
         if (!info) return toolError(NO_SUCH_IMPORT(id));
-        if (info.status !== "ready" && !hasData && !hasUrl) {
+        // A WordPress export or site still being read or converted: the store's reply says how far.
+        converting = info.conversion !== undefined && info.conversion.state !== "failed";
+        if (info.status !== "ready" && !hasData && !hasUrl && !hasWp && info.conversion === undefined) {
           return toolError(
             `Nothing has been uploaded to the import ${id} yet. Run the upload command that call returned (it PUTs the file to the server), or call import_content with upload: true and this import_id for a new link.`,
           );
         }
       }
-      if (hasData || hasUrl) {
+      if (hasWp && !remote.addFromWordPress) return toolError("This server cannot read a WordPress site directly. Export a file from Tools > Export and send it by upload: true instead.");
+      if (hasData || hasUrl || hasWp) {
         if (!id) id = await remote.create();
-        const added = hasData ? await remote.addPart!(id, args.data) : await remote.addFromUrl!(id, args.url!);
+        const added = hasData
+          ? await remote.addPart!(id, args.data)
+          : hasWp
+            ? await remote.addFromWordPress!(id, {
+                url: args.wordpress_url!,
+                ...(args.wordpress_username ? { username: args.wordpress_username, applicationPassword: args.wordpress_application_password! } : {}),
+              })
+            : await remote.addFromUrl!(id, args.url!);
         if (!added.ok) return toolError(added.error);
+        converting = added.converting === true;
       }
-      if (args.dry_run === false && runner) {
+      if (args.dry_run === false && runner && !converting) {
         const started = await applyInBackground(runner, id, args, ctx);
         if (started) return started;
       }

@@ -249,11 +249,25 @@ function listed(lines: string[], cap = MAX_LISTED): string[] {
 }
 
 /** Whether an item needs nothing more under the options of this call. */
+/**
+ * What a run does to an article after writing it: publish it (a post live at the source), schedule
+ * it (a post scheduled at the source, whose time is still ahead), or nothing (a draft, or any
+ * article while publish is false). A scheduled post whose time has passed is left a draft: the
+ * API refuses a schedule in the past, and publishing it now would date it today.
+ */
+export function lifecycleOf(article: ImportArticle, opts: Pick<ImportOptions, "publish">, now = Date.now()): "publish" | "schedule" | null {
+  if (!opts.publish) return null;
+  if (article.status === "published") return "publish";
+  if (article.status === "scheduled" && Date.parse(article.scheduled_at) > now) return "schedule";
+  return null;
+}
+
 function isSettled(entry: ProgressItem | undefined, item: ValidItem, opts: ImportOptions, mayTouchLive: boolean): boolean {
   if (!entry || entry.hash !== item.hash) return false;
   switch (entry.outcome) {
     case "done":
-      return !(item.article.status === "published" && opts.publish) || entry.published === true;
+      // `published` records that the article's lifecycle step (publish or schedule) is done.
+      return lifecycleOf(item.article, opts) === null || entry.published === true;
     case "deferred":
       return !mayTouchLive;
     case "skipped":
@@ -330,6 +344,13 @@ async function load(api: ToolContext, source: ImportSource): Promise<Loaded | To
   // no longer stop the checks: the entries that parse are kept, every article is still checked,
   // and the dry run reports everything in one pass. An apply refuses while any remain (apply()).
   const envelope = checked.envelope;
+  // A converted export's notes (the WordPress importer's report) join each article's own warnings,
+  // so the dry run and the apply report them beside the article they concern.
+  const conversionNotes = envelope.conversion?.items ?? {};
+  for (const item of checked.items) {
+    const notes = item.externalId ? conversionNotes[item.externalId] : undefined;
+    if (notes?.length) item.warnings.unshift(...notes);
+  }
 
   let site: SiteInfo;
   let siteCategories: Map<string, string>;
@@ -452,7 +473,7 @@ async function dryRun(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
   }
 
   const mayTouchLive = opts.publish;
-  const counts = { create: 0, update: 0, done: 0, unchangedLive: 0, publish: 0, blocked: 0 };
+  const counts = { create: 0, update: 0, done: 0, unchangedLive: 0, publish: 0, schedule: 0, blocked: 0 };
   const warnings: string[] = [];
   const pending: ValidItem[] = [];
 
@@ -485,7 +506,13 @@ async function dryRun(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
       }
       counts.create += 1;
     }
-    if (article.status === "published" && opts.publish) {
+    if (lifecycleOf(article, opts) === "schedule") {
+      if (existing?.status === "published") {
+        warnings.push(`- ${label}: is already live on the Site, so it is not scheduled`);
+      } else {
+        counts.schedule += 1;
+      }
+    } else if (article.status === "published" && opts.publish) {
       if (existing?.status === "published") {
         if (existing.published_at && article.published_at && Date.parse(existing.published_at) !== Date.parse(article.published_at)) {
           warnings.push(`- ${label}: is already published on the Site since ${existing.published_at}; it keeps that date (the file says ${article.published_at})`);
@@ -556,11 +583,13 @@ async function dryRun(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
   const invalid = ctx.items.filter((i) => i.errors.length > 0);
   counts.blocked = invalid.length;
   const published = valid.filter((v) => v.article.status === "published").length;
+  const scheduled = valid.filter((v) => v.article.status === "scheduled").length;
 
   const lines = [
     `Dry run of ${ctx.source.label} for the Site "${site.name}". Nothing was written.`,
     "",
-    `Articles in the file: ${ctx.items.length} (${published} published, ${plural(valid.length - published, "draft")}${invalid.length ? `, ${invalid.length} with problems` : ""}).`,
+    ...(envelope.conversion?.lines.length ? [...envelope.conversion.lines, ""] : []),
+    `Articles in the file: ${ctx.items.length} (${published} published, ${scheduled ? `${scheduled} scheduled, ` : ""}${plural(valid.length - published - scheduled, "draft")}${invalid.length ? `, ${invalid.length} with problems` : ""}).`,
     `- create: ${counts.create}`,
     `- update: ${counts.update} (already on the Site with the same external_id)`,
     ...(counts.done ? [`- already done by an earlier run: ${counts.done}`] : []),
@@ -569,6 +598,7 @@ async function dryRun(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
     opts.publish
       ? `- to publish with their original dates: ${counts.publish}`
       : "- to publish: none, because publish is false (everything is imported as a draft)",
+    ...(opts.publish && counts.schedule ? [`- to schedule for their future dates: ${counts.schedule}`] : []),
     "",
     `Categories: ${(envelope.categories ?? []).length} in the file, ${categoriesToCreate.length} to create. Tags: ${(envelope.tags ?? []).length} in the file, ${tagsToCreate.length} to create. Authors: ${(envelope.authors ?? []).length} in the file, ${authorsToCreate.length} to create, ${authorsToFill.length} already on the Site to fill in (matched by slug, else exact name; only empty fields are filled).`,
     opts.rehostImages
@@ -613,13 +643,13 @@ async function dryRun(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
   if (pending.length === 0) {
     lines.push(invalid.length > 0 ? "Nothing else to import. Fix the problems above and run the dry run again." : "Nothing to import: everything in the document is already on the Site.");
   } else {
-    const needsConfirm = opts.publish && pending.some((p) => p.article.status === "published");
+    const needsConfirm = opts.publish && pending.some((p) => lifecycleOf(p.article, opts) !== null);
     if (invalid.length > 0) {
       lines.push("Fix the problems above in the document and run the dry run again. Or apply now: the articles with problems are skipped and reported, and everything else is imported.");
     }
     lines.push(
       needsConfirm
-        ? `To apply, first ask the user: this publishes ${plural(counts.publish, "article")} on their live site with their original dates${counts.update ? `, and updates to articles already live take effect immediately` : ""}. If they agree, call:`
+        ? `To apply, first ask the user: this publishes ${plural(counts.publish, "article")} on their live site with their original dates${counts.schedule ? `, schedules ${plural(counts.schedule, "article")} to go live at their scheduled times` : ""}${counts.update ? `, and updates to articles already live take effect immediately` : ""}. If they agree, call:`
         : "To apply, call:",
       nextCall(ctx.source, opts, needsConfirm ? { confirm: true } : {}),
       ctx.source.store
@@ -641,7 +671,7 @@ interface ApplyState {
   /** Everything still in flight is cut off at this (the API client's own deadline). */
   hardDeadline: number;
   mayTouchLive: boolean;
-  counts: { created: number; updated: number; published: number; deferred: number; skipped: number; failed: number; imagesCopied: number; imagesFailed: number };
+  counts: { created: number; updated: number; published: number; scheduled: number; deferred: number; skipped: number; failed: number; imagesCopied: number; imagesFailed: number };
   problems: string[];
   warnings: string[];
   /** When progress was last written (save). */
@@ -826,6 +856,32 @@ async function ensureTaxonomy(state: ApplyState): Promise<boolean> {
     if (ranOut) return false;
   }
 
+  // 0129: nested categories. Once every category exists, each one whose file entry names a parent
+  // gets it, when it has none on the Site yet (an existing parent is never changed). One list
+  // read, then a PATCH only where something is missing, so a re-run changes nothing.
+  const nested = (envelope.categories ?? []).filter((c) => c.parent && c.parent !== c.slug);
+  if (nested.length) {
+    if (Date.now() > state.deadline) return false;
+    const onSite = new Map(
+      (await listAll<SiteTerm & { parent_id?: string | null }>(ctx.api, "/categories", [["fields", "id,slug,parent_id"]])).map((t) => [t.slug, t]),
+    );
+    for (const c of nested) {
+      const self = onSite.get(c.slug);
+      const parentId = progress.categories[c.parent!] ?? ctx.siteCategories.get(c.parent!) ?? onSite.get(c.parent!)?.id;
+      if (!self || self.parent_id || !parentId) {
+        if (self && !self.parent_id && !parentId) state.warnings.push(`- category "${c.slug}": its parent "${c.parent}" is not on the Site, so it stays at the top level`);
+        continue;
+      }
+      if (Date.now() > state.deadline) return false;
+      try {
+        await call(ctx.api, { method: "PATCH", path: `/categories/${self.id}`, body: { parent_id: parentId } }, state.hardDeadline);
+      } catch (err) {
+        if (!(err instanceof WritavoApiError && err.status === 422)) throw err;
+        state.warnings.push(`- category "${c.slug}": its parent "${c.parent}" was refused (${err.message}); it stays at the top level`);
+      }
+    }
+  }
+
   for (const author of envelope.authors ?? []) {
     const known = matchAuthor(ctx.siteAuthors, author);
     const gaps = known ? authorGaps(known, author) : {};
@@ -907,6 +963,7 @@ function buildBody(article: ImportArticle, ctx: Loaded, imageUrl: (url: string) 
       body.original_content_updated_at = article.content_updated_at;
     }
   }
+  if (article.kind !== undefined) body.article_kind = article.kind;
   if (article.title !== undefined) body.title = article.title;
   if (article.slug !== undefined) body.slug = article.slug;
   if (article.content !== undefined) {
@@ -922,6 +979,15 @@ function buildBody(article: ImportArticle, ctx: Loaded, imageUrl: (url: string) 
   if (article.seo_title !== undefined) body.seo_title = article.seo_title;
   if (article.seo_description !== undefined) body.seo_description = article.seo_description;
   if (article.seo_keywords !== undefined) body.seo_keywords = article.seo_keywords;
+  // 0128: the SEO overrides. The social image is copied into the media library like the featured one.
+  if (article.canonical_url !== undefined) body.canonical_url = article.canonical_url;
+  if (article.noindex !== undefined) body.noindex = article.noindex;
+  if (article.og_title !== undefined) body.og_title = article.og_title;
+  if (article.og_description !== undefined) body.og_description = article.og_description;
+  if (article.og_image !== undefined) {
+    body.og_image_url = article.og_image === null ? null : (imageUrl(article.og_image.url) ?? article.og_image.url);
+    body.og_image_alt = article.og_image === null ? null : (article.og_image.alt ?? null);
+  }
   if (article.faqs !== undefined) body.faqs = article.faqs;
   if (article.key_takeaways !== undefined) body.key_takeaways = article.key_takeaways;
   if (article.howto_steps !== undefined) {
@@ -943,6 +1009,15 @@ function buildBody(article: ImportArticle, ctx: Loaded, imageUrl: (url: string) 
     const id = progress.categories[article.category] ?? ctx.siteCategories.get(article.category);
     if (!id) throw new ItemProblem(`category "${article.category}" is not on the Site`);
     body.category_id = id;
+    // 0129: the other categories, as the full set (the API files it under the primary first).
+    if (article.categories?.length) {
+      const others = article.categories.filter((c) => c !== article.category).map((c) => {
+        const other = progress.categories[c] ?? ctx.siteCategories.get(c);
+        if (!other) throw new ItemProblem(`category "${c}" is not on the Site`);
+        return other;
+      });
+      body.category_ids = [id, ...others];
+    }
   }
   if (article.author !== undefined) {
     const name = (envelope.authors ?? []).find((a) => a.ref === article.author)?.name;
@@ -982,7 +1057,8 @@ async function processArticle(state: ApplyState, item: ValidItem): Promise<void>
   const { article } = item;
   const label = itemLabel(item.check);
   const previous = ctx.progress.items[article.external_id];
-  const needsPublish = article.status === "published" && opts.publish;
+  const lifecycle = lifecycleOf(article, opts);
+  const needsPublish = lifecycle !== null;
   const warnings: string[] = [...item.check.warnings];
 
   let articleId = previous && previous.hash === item.hash && previous.action ? previous.article_id : undefined;
@@ -1065,7 +1141,25 @@ async function processArticle(state: ApplyState, item: ValidItem): Promise<void>
     await save(state);
   }
 
-  if (needsPublish && !(previous && previous.hash === item.hash && previous.published)) {
+  if (lifecycle === "schedule" && !(previous && previous.hash === item.hash && previous.published)) {
+    current ??= await getArticleState(ctx.api, articleId!, state.hardDeadline);
+    if (current.status === "published") {
+      // Live already (published by hand, or by an earlier import): scheduling would be refused.
+      warnings.push("it is already live on the Site, so it was not scheduled");
+    } else {
+      await call(
+        ctx.api,
+        {
+          method: "POST",
+          path: `/articles/${encodeURIComponent(articleId!)}/schedule`,
+          body: { scheduled_publish_at: article.status === "scheduled" ? article.scheduled_at : undefined },
+        },
+        state.hardDeadline,
+      );
+      state.counts.scheduled += 1;
+    }
+    record(state, item, { outcome: "done", article_id: articleId, published: true, error: undefined, warnings });
+  } else if (lifecycle === "publish" && !(previous && previous.hash === item.hash && previous.published)) {
     current ??= await getArticleState(ctx.api, articleId!, state.hardDeadline);
     if (current.status !== "published") {
       const firstPublish = !current.published_at;
@@ -1415,13 +1509,14 @@ async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
   const pending = ctx.valid.filter((v) => !isSettled(ctx.progress.items[v.article.external_id], v, opts, mayTouchLive));
   const invalid = ctx.items.filter((i) => i.errors.length > 0);
 
-  const toPublish = pending.filter((v) => v.article.status === "published").length;
-  if (opts.publish && toPublish > 0 && !opts.confirm) {
+  const toPublish = pending.filter((v) => lifecycleOf(v.article, opts) === "publish").length;
+  const toSchedule = pending.filter((v) => lifecycleOf(v.article, opts) === "schedule").length;
+  if (opts.publish && toPublish + toSchedule > 0 && !opts.confirm) {
     return tagged("needs_confirm", text(
       [
         "Nothing has been done. This import needs the user to confirm first.",
         "",
-        `It publishes ${plural(toPublish, "article")} on the Site "${ctx.site.name}" with their original dates, where search engines and readers will see them, and updates to articles already live take effect immediately.${pending.length > toPublish ? ` Drafts imported as drafts: ${pending.length - toPublish}.` : ""}`,
+        `It publishes ${plural(toPublish, "article")} on the Site "${ctx.site.name}" with their original dates, where search engines and readers will see them${toSchedule ? `, schedules ${plural(toSchedule, "article")} to go live at their scheduled times` : ""}, and updates to articles already live take effect immediately.${pending.length > toPublish + toSchedule ? ` Drafts imported as drafts: ${pending.length - toPublish - toSchedule}.` : ""}`,
         "",
         "Ask the user whether to go ahead. If they agree, call:",
         nextCall(ctx.source, opts, { confirm: true }),
@@ -1436,7 +1531,7 @@ async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
     deadline: (opts.startedAt ?? Date.now()) + (opts.budget ?? FOREGROUND_BUDGET).workMs,
     hardDeadline: (opts.startedAt ?? Date.now()) + (opts.budget ?? FOREGROUND_BUDGET).workMs + (opts.budget ?? FOREGROUND_BUDGET).graceMs,
     mayTouchLive,
-    counts: { created: 0, updated: 0, published: 0, deferred: 0, skipped: 0, failed: 0, imagesCopied: 0, imagesFailed: 0 },
+    counts: { created: 0, updated: 0, published: 0, scheduled: 0, deferred: 0, skipped: 0, failed: 0, imagesCopied: 0, imagesFailed: 0 },
     problems: [],
     warnings: [],
     lastSave: Date.now(),
@@ -1540,7 +1635,7 @@ async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
   const allDone = remaining === 0 && !engagementUnfinished && !redirectsUnfinished;
   const c = state.counts;
   const lines: string[] = [];
-  const thisCall = `This call: created ${c.created}, updated ${c.updated}, published ${c.published}, left unchanged ${c.deferred}, skipped ${c.skipped}, failed ${c.failed}. Images copied ${c.imagesCopied}${c.imagesFailed ? `, not copied ${c.imagesFailed}` : ""}.`;
+  const thisCall = `This call: created ${c.created}, updated ${c.updated}, published ${c.published}${c.scheduled ? `, scheduled ${c.scheduled}` : ""}, left unchanged ${c.deferred}, skipped ${c.skipped}, failed ${c.failed}. Images copied ${c.imagesCopied}${c.imagesFailed ? `, not copied ${c.imagesFailed}` : ""}.`;
   const created = ctx.progress.created;
 
   if (allDone) {

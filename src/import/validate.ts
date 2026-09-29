@@ -216,8 +216,8 @@ export function checkDocument(value: unknown, now = Date.now()): DocumentCheck {
     const check: ItemCheck = { index, externalId, article: null, errors: [], warnings: [] };
 
     const status = raw && typeof raw === "object" ? (raw as Record<string, unknown>).status : undefined;
-    if (status !== "published" && status !== "draft") {
-      check.errors.push(`status: must be "published" or "draft"${status === undefined ? "" : `, not ${JSON.stringify(status)}`}`);
+    if (status !== "published" && status !== "draft" && status !== "scheduled") {
+      check.errors.push(`status: must be "published", "draft" or "scheduled"${status === undefined ? "" : `, not ${JSON.stringify(status)}`}`);
       return check;
     }
 
@@ -259,7 +259,14 @@ export function checkDocument(value: unknown, now = Date.now()): DocumentCheck {
         check.errors.push("content_updated_at: is before published_at");
       }
     } else if (article.published_at || article.content_updated_at) {
-      check.warnings.push("published_at and content_updated_at are ignored on a draft; it is imported unpublished");
+      check.warnings.push(
+        article.status === "scheduled"
+          ? "published_at and content_updated_at are ignored on a scheduled article; it goes live at scheduled_at"
+          : "published_at and content_updated_at are ignored on a draft; it is imported unpublished",
+      );
+    }
+    if (article.status === "scheduled" && Date.parse(article.scheduled_at) <= now) {
+      check.warnings.push(`scheduled_at ${article.scheduled_at} has passed, so it is imported as a draft; publish or schedule it after the import`);
     }
 
     if (article.comparison) {

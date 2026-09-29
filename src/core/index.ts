@@ -36,3 +36,6 @@ export { jobSource } from "../import/jobs.js";
 export { runImport, summariseProgress } from "./import-runner.js";
 export type { ImportResult, ImportRunStatus, ImportProgressSummary, ImportBudget } from "../import/engine.js";
 export { readInlinePart, backgroundStatusText, MAX_INLINE_ARTICLES, MAX_INLINE_BYTES } from "../tools/import-content.js";
+export { readImportBody, convertWxr, looksLikeWxr, MAX_WXR_BYTES, type ReadImportBody } from "../import/wordpress/index.js";
+export { stageWxr, convertStaged, assembleStaged, clearStaged, readStageState, sniffBody, stagedOptions, type StageStore, type StageState } from "../import/wordpress/index.js";
+export { probeSite, pullStep, setSiteName, type WordPressSite, type PullState } from "../import/wordpress/index.js";

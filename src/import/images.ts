@@ -45,6 +45,7 @@ export function articleImages(article: ImportArticle): ImageRef[] {
   if (article.featured_image?.url) {
     refs.push({ url: article.featured_image.url, alt: article.featured_image.alt, kind: "featured" });
   }
+  if (article.og_image?.url) refs.push({ url: article.og_image.url, alt: article.og_image.alt, kind: "featured" });
   for (const image of markdownImages(article.content ?? "")) {
     refs.push({ url: image.url, alt: image.alt || undefined, kind: "inline" });
   }

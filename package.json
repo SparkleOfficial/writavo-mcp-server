@@ -44,9 +44,19 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
+    "hast-util-from-html": "^2",
+    "hast-util-to-mdast": "^10",
+    "mdast-util-from-markdown": "^2",
+    "mdast-util-gfm": "^3",
+    "mdast-util-to-markdown": "^2",
+    "mdast-util-to-string": "^4",
+    "micromark-extension-gfm": "^3",
+    "saxes": "^6",
     "zod": "^3.25.76"
   },
   "devDependencies": {
+    "@types/hast": "^3",
+    "@types/mdast": "^4",
     "@types/node": "^20.19.0",
     "tsx": "^4.20.0",
     "typescript": "^5.7.2",

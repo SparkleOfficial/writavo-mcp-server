@@ -532,6 +532,13 @@ async function main(): Promise<void> {
         return ok(row, 201);
       }
     }
+    const term = /^\/(categories|tags)\/([^/]+)$/.exec(path);
+    if (term && req.method === "PATCH") {
+      const row = site[term[1] as "categories" | "tags"].find((t) => t.id === term[2]);
+      if (!row) return fail(404, "NOT_FOUND", "No such term.");
+      Object.assign(row, body);
+      return ok(row);
+    }
     const author = /^\/authors\/([^/]+)$/.exec(path);
     if (author && req.method === "PATCH") {
       const row = site.authors.find((a) => a.id === author[1]);
@@ -555,10 +562,17 @@ async function main(): Promise<void> {
       site.replays.set(req.idempotencyKey ?? "", response);
       return response;
     }
-    const one = /^\/articles\/([^/]+)(\/publish)?$/.exec(path);
+    const one = /^\/articles\/([^/]+)(\/publish|\/schedule)?$/.exec(path);
     if (one) {
       const row = site.articles.find((a) => a.id === one[1]);
       if (!row) return fail(404, "NOT_FOUND", "No such article.");
+      if (one[2] === "/schedule" && req.method === "POST") {
+        if (row.status === "published") return fail(409, "CONFLICT", "This article is live.");
+        if (!(Date.parse(String(body.scheduled_publish_at)) > Date.now())) return fail(422, "VALIDATION_FAILED", "Must be in the future.");
+        row.status = "scheduled";
+        row.scheduled_publish_at = body.scheduled_publish_at;
+        return ok({ id: row.id, status: row.status, scheduled_publish_at: row.scheduled_publish_at });
+      }
       if (one[2] && req.method === "POST") {
         row.status = "published";
         row.published_at ??= (body.published_at as string | undefined) ?? new Date().toISOString();
@@ -1315,6 +1329,293 @@ async function main(): Promise<void> {
     const callsBefore = site.redirectCalls;
     const again = bodyOf(await handleImportContent(CTX, { import_id: redId, dry_run: false, background: false }, store));
     check("running it again sends nothing new (the redirects are already delivered)", again.includes("Import complete") && site.redirectCalls === callsBefore, again.slice(0, 300));
+  }
+
+  // -- 14h. Scheduled posts and the SEO overrides (0128) ---------------------------
+  console.log("\n[ 14h. Scheduled posts keep their time; SEO overrides travel with the article ]");
+  {
+    currentKey = SECRET_KEY;
+    const future = new Date(Date.now() + 7 * 86_400_000).toISOString();
+    const doc = {
+      format: "writavo-import",
+      version: 1,
+      articles: [
+        {
+          external_id: "sch:1", status: "scheduled", title: "Coming soon", slug: "coming-soon", content: "Soon.", scheduled_at: future,
+          canonical_url: "https://partner.example.com/coming-soon", noindex: true, og_title: "Share me",
+          og_description: "Shared text", og_image: { url: "https://img.example.test/og.png", alt: "Share alt" },
+        },
+        { external_id: "sch:2", status: "scheduled", title: "Too late", slug: "too-late", content: "Late.", scheduled_at: "2020-01-01T00:00:00Z" },
+      ],
+    };
+    const store = memStore("g:key-scheduled");
+    stub.reset();
+    const dry = bodyOf(await handleImportContent(CTX, { data: doc }, store));
+    const schId = /imp_[A-Za-z0-9_-]{22}/.exec(dry)?.[0] ?? "";
+    check(
+      "the dry run counts a scheduled article, and imports one whose time has passed as a draft, with a warning",
+      dry.includes("2 scheduled") && dry.includes("to schedule for their future dates: 1") && dry.includes("has passed, so it is imported as a draft"),
+      dry.slice(0, 1400),
+    );
+    const unconfirmed = bodyOf(await handleImportContent(CTX, { import_id: schId, dry_run: false, background: false }, store));
+    check("scheduling needs the user's confirm, like publishing", unconfirmed.includes("needs the user to confirm") && unconfirmed.includes("schedules 1 article"), unconfirmed.slice(0, 600));
+    stub.reset();
+    const applied = bodyOf(await handleImportContent(CTX, { import_id: schId, dry_run: false, background: false, confirm: true }, store));
+    const soon = byExternal("sch:1");
+    const late = byExternal("sch:2");
+    check(
+      "an apply schedules the future post for its time and leaves the past one a draft",
+      applied.includes("Import complete") && soon.status === "scheduled" && soon.scheduled_publish_at === future && late.status === "draft" &&
+        soon.original_published_at === undefined,
+      `${String(soon.status)} ${String(soon.scheduled_publish_at)} / ${String(late.status)}`,
+    );
+    check(
+      "the SEO overrides are written, and the share image is copied into the media library",
+      soon.canonical_url === "https://partner.example.com/coming-soon" && soon.noindex === true && soon.og_title === "Share me" &&
+        soon.og_description === "Shared text" && String(soon.og_image_url).startsWith("https://cdn.example.test/media/") && soon.og_image_alt === "Share alt",
+      JSON.stringify({ og: soon.og_image_url, alt: soon.og_image_alt }),
+    );
+    const schedulesBefore = writes().filter((r) => r.path.endsWith("/schedule")).length;
+    const again = bodyOf(await handleImportContent(CTX, { import_id: schId, dry_run: false, background: false, confirm: true }, store));
+    check(
+      "running it again schedules nothing twice",
+      again.includes("Import complete") && writes().filter((r) => r.path.endsWith("/schedule")).length === schedulesBefore,
+      again.slice(0, 300),
+    );
+  }
+
+  // -- 14i. Native WordPress import (WXR) -------------------------------------------
+  console.log("\n[ 14i. A WordPress export file is converted by Writavo itself ]");
+  {
+    const { convertWxr, readImportBody } = await import("../src/import/wordpress/index.js");
+    const { checkDocument } = await import("../src/import/validate.js");
+    const wxr = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "fixtures/wordpress/sample.wxr.xml"), "utf8");
+    const converted = convertWxr(wxr);
+    const doc = "error" in converted ? null : (converted.document as { articles: Row[]; redirects: Row[]; authors: Row[]; categories: Row[] });
+    const byId = (id: string) => doc?.articles.find((a) => a.external_id === id) ?? {};
+    check(
+      "a WXR file converts: posts, and the published page as a page; trash and menus left out",
+      Boolean(doc) && doc!.articles.length === 7 && doc!.articles.find((a) => a.external_id === "wp:2")?.kind === "page",
+      "error" in converted ? converted.error : "",
+    );
+    check(
+      "statuses follow the owner's rules: publish, future -> scheduled, password / private / pending -> draft",
+      byId("wp:101").status === "published" && byId("wp:103").status === "scheduled" && byId("wp:104").status === "draft" &&
+        byId("wp:105").status === "draft" && byId("wp:106").status === "draft",
+    );
+    const body = String(byId("wp:101").content);
+    check(
+      "classic content gets its paragraphs back (wpautop) and its words unchanged, including 10:30 and note:important",
+      body.startsWith("High water comes twice a day. Meet at 10:30, note:important.\n\nThe moon does most of the work.") && !body.includes("<!--"),
+      body.slice(0, 200),
+    );
+    check(
+      "a captioned image uses the original upload, with its caption under it; a gallery becomes its images",
+      body.includes("![Boats at dawn](https://harbour.example.com/wp-content/uploads/2021/03/dawn.jpg)\n\n_Dawn over the harbour_") &&
+        body.includes("![](https://harbour.example.com/wp-content/uploads/2021/03/chart.png)"),
+    );
+    check(
+      "YouTube (a URL on its own line) and Vimeo ([embed]) become ::embed lines; a script is dropped; an unknown shortcode stays as text",
+      body.includes('::embed{url="https://www.youtube.com/watch?v=dQw4w9WgXcQ"}') && body.includes('::embed{url="https://vimeo.com/76979871"}') &&
+        !body.includes("alert(") && body.includes("contact-form-7"),
+    );
+    const block = String(byId("wp:102").content);
+    check(
+      "block content: the X embed block becomes an embed, a Spotify block a link, the image its full-size file (srcset), the table a table",
+      block.includes('::embed{url="https://twitter.com/jack/status/20"}') && block.includes("https://open.spotify.com/track/abc") &&
+        block.includes("chart.png") && !block.includes("chart-1024x683") && block.includes("| Tide"),
+      block,
+    );
+    check(
+      "every category comes across, the primary first, and the tree with it (a parent is named on its child)",
+      byId("wp:101").category === "dinghies" && JSON.stringify(byId("wp:101").categories) === '["sailing"]' &&
+        doc!.categories.some((c) => c.slug === "dinghies" && c.parent === "sailing") && doc!.categories.some((c) => c.slug === "sailing" && c.parent === undefined),
+      JSON.stringify(doc!.categories),
+    );
+    check(
+      "SEO: Yoast title template resolved, primary category chosen, Rank Math noindex and canonical kept",
+      byId("wp:101").seo_title === "Reading the tides – a primer - Harbour Notes" && byId("wp:101").category === "dinghies" &&
+        byId("wp:101").og_title === "Tides, simply" && byId("wp:102").noindex === true && byId("wp:102").canonical_url === "https://partner.example.com/original",
+    );
+    check(
+      "old URLs: each post's permalink and ?p= link, and the (nested) category and tag archives as redirects",
+      JSON.stringify(byId("wp:101").old_urls) === JSON.stringify(["https://harbour.example.com/2021/03/reading-the-tides/", "https://harbour.example.com/?p=101"]) &&
+        doc!.redirects.some((r) => r.from === "https://harbour.example.com/category/sailing/dinghies/" && r.to === "/category/dinghies"),
+    );
+    check("a non-ASCII slug becomes an ASCII one, and the old permalink redirects to it", byId("wp:102").slug === "cafe-culture");
+    const whole = JSON.stringify(converted);
+    check("no author email, commenter email or post password is carried over", !whole.includes("private.example") && !whole.includes("hunter2"));
+    const checked = checkDocument(doc);
+    check(
+      "the converted document passes the importer's own checks with no problems",
+      checked.envelopeErrors.length === 0 && checked.items.every((i) => i.errors.length === 0),
+      JSON.stringify(checked.items.filter((i) => i.errors.length)),
+    );
+
+    // Streamed in small, awkward chunks (as the Durable Object reads an upload): the same result.
+    const bytes = new TextEncoder().encode(wxr);
+    const stream = new ReadableStream<Uint8Array>({
+      start(c) {
+        for (let i = 0; i < bytes.length; i += 777) c.enqueue(bytes.slice(i, i + 777));
+        c.close();
+      },
+    });
+    const streamed = await readImportBody(stream, 10 * 1024 * 1024);
+    check(
+      "a streamed WXR body gives the same document as the whole file, and the report travels inside it",
+      streamed.kind === "wxr" && JSON.stringify(streamed.conversion.document.articles) === JSON.stringify(doc!.articles) &&
+        Array.isArray((streamed.conversion.document.conversion as { lines?: unknown })?.lines),
+    );
+    const jsonBody = await readImportBody(new Response('{"format":"writavo-import"}').body!, 1024);
+    check("a JSON body is still read as JSON", jsonBody.kind === "json" && jsonBody.text === '{"format":"writavo-import"}');
+
+    // Staged (the hosted Durable Object's way): posts to storage, converted a page per call, assembled.
+    {
+      const { stageWxr, convertStaged, assembleStaged, clearStaged, sniffBody } = await import("../src/import/wordpress/index.js");
+      const kv = new Map<string, string>();
+      const mem = { put: async (k: string, v: string) => void kv.set(k, v), get: async (k: string) => kv.get(k) ?? null, remove: async (ks: string[]) => void ks.forEach((k) => kv.delete(k)) };
+      // Many posts, so there are several pages: the tides post repeated under new ids.
+      const one = wxr.slice(wxr.indexOf("<item>\n\t\t<title><![CDATA[Reading"), wxr.indexOf("</item>", wxr.indexOf("<item>\n\t\t<title><![CDATA[Reading")) + 7);
+      const many = wxr.replace("</channel>", Array.from({ length: 120 }, (_, i) => one.replaceAll("<wp:post_id>101</wp:post_id>", `<wp:post_id>${5000 + i}</wp:post_id>`).replaceAll("reading-the-tides", `tides-${i}`)).join("\n") + "</channel>");
+      const enc = new TextEncoder().encode(many);
+      const body = await sniffBody(new ReadableStream<Uint8Array>({ start(c) { for (let i = 0; i < enc.length; i += 4096) c.enqueue(enc.slice(i, i + 4096)); c.close(); } }));
+      const staged = await stageWxr(body.head, body.rest, mem, 100 * 1024 * 1024, body.bytes);
+      let calls = 0;
+      let tick = 0;
+      let state = staged.ok ? staged.state : null;
+      // A clock that runs out after one page: one page per call, as an alarm with no time left would.
+      while (state && state.converted < state.pages && calls < 50) {
+        tick = 0;
+        state = await convertStaged(mem, 1, { source: "wordpress-wxr", rawContent: true }, () => tick++);
+        calls += 1;
+      }
+      const assembled = await assembleStaged(mem, { source: "wordpress-wxr", rawContent: true });
+      const whole = convertWxr(many);
+      check(
+        "a staged export, converted one page per call, assembles to the same document as converting it in one go",
+        body.wxr && staged.ok && calls >= 3 && !("error" in whole) &&
+          JSON.stringify(assembled.document.articles) === JSON.stringify((whole as { document: { articles: unknown } }).document.articles),
+        `pages ${state?.pages} calls ${calls}`,
+      );
+      await clearStaged(mem);
+      check("clearing the stage leaves nothing behind", kv.size === 0, [...kv.keys()].join(","));
+    }
+
+    // A live site over its REST API: probed, pulled in resumable steps, converted, assembled.
+    {
+      const { probeSite, pullStep, convertStaged, assembleStaged, stagedOptions, readStageState, setSiteName, restBase } = await import("../src/import/wordpress/index.js");
+      const kv = new Map<string, string>();
+      const mem = { put: async (k: string, v: string) => void kv.set(k, v), get: async (k: string) => kv.get(k) ?? null, remove: async (ks: string[]) => void ks.forEach((k) => kv.delete(k)) };
+      const seen: string[] = [];
+      const auths: string[] = [];
+      const posts = [
+        {
+          id: 201, type: "post", status: "publish", slug: "tide-clock", link: "https://wp.example.com/tide-clock/", guid: { rendered: "https://wp.example.com/?p=201" },
+          title: { rendered: "The tide &amp; the clock" }, excerpt: { rendered: "<p>Short.</p>" },
+          content: { rendered: '<p>Rendered <em>content</em>.</p>\n<figure class="wp-block-embed is-provider-youtube"><div class="wp-block-embed__wrapper"><iframe src="https://www.youtube.com/embed/dQw4w9WgXcQ?feature=oembed"></iframe></div></figure>', protected: false },
+          date_gmt: "2023-02-03T04:05:06", modified_gmt: "2023-03-01T00:00:00", author: 7, categories: [3], tags: [9], featured_media: 55,
+          yoast_head_json: { title: "Tide & clock - 100% useful", description: "Desc", canonical: "https://wp.example.com/tide-clock/", robots: { index: "index" }, og_title: "Tide & clock - 100% useful", og_image: [{ url: "https://wp.example.com/og.jpg" }] },
+          _embedded: { author: [{ id: 7, slug: "ana", name: "Ana Mar" }], "wp:featuredmedia": [{ id: 55, source_url: "https://wp.example.com/hero.jpg", alt_text: "Hero" }] },
+        },
+        {
+          id: 202, type: "post", status: "draft", slug: "", link: "https://wp.example.com/?p=202", title: { rendered: "Locked" },
+          excerpt: { rendered: "" }, content: { rendered: "", raw: "Secret line one.\n\nSecret line two.", protected: true }, date_gmt: "2023-04-01T00:00:00", author: 7, categories: [], tags: [],
+        },
+      ];
+      const reply = (body: unknown, pages = 1) => new Response(JSON.stringify(body), { headers: { "content-type": "application/json", "x-wp-totalpages": String(pages), "x-wp-total": "2" } });
+      const fetcher = async (url: string, init: { headers: Record<string, string> }) => {
+        seen.push(new URL(url).pathname + new URL(url).search);
+        if (init.headers.Authorization) auths.push(init.headers.Authorization);
+        const u = new URL(url);
+        if (u.pathname === "/wp-json/") return reply({ name: "WP Example" });
+        if (u.pathname.endsWith("/users/me")) return reply({ id: 7 });
+        if (u.pathname.endsWith("/categories")) return reply([{ id: 3, slug: "tides", name: "Tides", parent: 0, description: "" }]);
+        if (u.pathname.endsWith("/tags")) return reply([{ id: 9, slug: "clocks", name: "Clocks" }]);
+        if (u.pathname.endsWith("/posts")) return u.searchParams.get("page") === "1" ? reply([posts[0]], 2) : reply([posts[1]], 2);
+        if (u.pathname.endsWith("/pages")) return reply([{ id: 2, type: "page", status: "publish", title: { rendered: "About" } }]);
+        return new Response("not found", { status: 404 });
+      };
+      const site = { url: "wp.example.com/some/page", username: "admin", applicationPassword: "abcd efgh ijkl" };
+      check("an address a person types resolves to its site's REST root; a private address is refused",
+        (restBase("wp.example.com/blog/") as { base: string }).base === "https://wp.example.com/blog" &&
+          "error" in restBase("http://wp.example.com") && "error" in restBase("https://192.168.1.10") && "error" in restBase("https://localhost"));
+      const probe = await probeSite({ ...site, url: "https://wp.example.com" }, fetcher);
+      check("the probe reads the site and checks the application password", probe.ok && seen.includes("/wp-json/wp/v2/users/me?context=edit"));
+      let steps = 0;
+      if (probe.ok) {
+        await setSiteName(mem, probe.state.base, probe.name);
+        let state = probe.state;
+        for (;;) {
+          const step = await pullStep({ ...site, url: "https://wp.example.com" }, state, mem, fetcher, 2);
+          state = step.state;
+          steps += 1;
+          if (step.done || steps > 10) break;
+        }
+      }
+      const staged = await readStageState(mem);
+      await convertStaged(mem, Date.now() + 60_000, stagedOptions(staged!));
+      const out = await assembleStaged(mem, stagedOptions(staged!));
+      const arts = out.document.articles as Row[];
+      const a = arts.find((x) => x.external_id === "wp:201") ?? {};
+      const b = arts.find((x) => x.external_id === "wp:202") ?? {};
+      check(
+        "the pull is resumable (two requests a step here), reads drafts with the password, and never writes",
+        steps >= 3 && seen.some((p) => p.includes("status=publish,future,draft,pending,private")) &&
+          auths.every((h) => h === `Basic ${btoa("admin:abcdefghijkl")}`),
+        `steps ${steps} ${seen.join(" ")}`,
+      );
+      check(
+        "a REST post maps like a WXR one: rendered content, the embed, the featured image, author name, category, tag",
+        String(a.content).startsWith("Rendered _content_.") && String(a.content).includes('::embed{url="https://www.youtube.com/embed/dQw4w9WgXcQ?feature=oembed"}') &&
+          (a.featured_image as Row)?.url === "https://wp.example.com/hero.jpg" && a.category === "tides" && JSON.stringify(a.tags) === '["clocks"]' &&
+          (out.document.authors as Row[]).some((x) => x.ref === "ana" && x.name === "Ana Mar"),
+        JSON.stringify(a).slice(0, 600),
+      );
+      check(
+        "Yoast's computed head is kept as text (a % is not a template), a self canonical is dropped, a same og title is not repeated",
+        a.seo_title === "Tide & clock - 100% useful" && a.canonical_url === undefined && a.og_title === undefined && (a.og_image as Row)?.url === "https://wp.example.com/og.jpg",
+        JSON.stringify({ t: a.seo_title, c: a.canonical_url, o: a.og_title }),
+      );
+      check(
+        "a password-protected post comes in as a draft from its raw content, and the page comes across as a page",
+        b.status === "draft" && String(b.content).includes("Secret line one.") && arts.some((x) => x.external_id === "wp:2" && x.kind === "page"),
+        JSON.stringify(b).slice(0, 300),
+      );
+    }
+
+    // Through import_content: the dry run shows the conversion report and the notes per article.
+    currentKey = SECRET_KEY;
+    const small = wxr.replace(/<item><title><!\[CDATA\[Menu[\s\S]*?<\/item>/, "");
+    const store = memStore("g:key-wordpress");
+    stub.reset();
+    const dry = bodyOf(await handleImportContent(CTX, { data: small }, store));
+    const wpId = /imp_[A-Za-z0-9_-]{22}/.exec(dry)?.[0] ?? "";
+    check(
+      "the dry run of a WordPress export shows the conversion report and each article's notes",
+      dry.includes("Converted from a WordPress export file") && dry.includes("6 posts and 1 page") &&
+        dry.includes("was password protected") && dry.includes("to schedule for their future dates: 1"),
+      dry.slice(0, 1600),
+    );
+    stub.reset();
+    const applied = bodyOf(await handleImportContent(CTX, { import_id: wpId, dry_run: false, background: false, confirm: true }, store));
+    const tides = byExternal("wp:101");
+    check(
+      "an apply writes the posts with their SEO fields, schedules the future one, and leaves the private one a draft",
+      applied.includes("Import complete") && tides.status === "published" && tides.published_at === "2021-03-04T09:30:00Z" &&
+        byExternal("wp:102").noindex === true && byExternal("wp:103").status === "scheduled" && byExternal("wp:105").status === "draft",
+      applied.slice(0, 1200),
+    );
+    const again = bodyOf(await handleImportContent(CTX, { import_id: wpId, dry_run: false, background: false, confirm: true }, store));
+    const sailing = site.categories.find((c) => c.slug === "sailing");
+    const dinghies = site.categories.find((c) => c.slug === "dinghies");
+    check(
+      "the apply creates the tree (dinghies under sailing) and files the post under both categories",
+      Boolean(sailing && dinghies) && dinghies!.parent_id === sailing!.id &&
+        JSON.stringify(byExternal("wp:101").category_ids) === JSON.stringify([dinghies!.id, sailing!.id]),
+      JSON.stringify({ dinghies, ids: byExternal("wp:101").category_ids }),
+    );
+    const patchesBefore = writes().filter((r) => r.path.startsWith("/categories/")).length;
+    check("importing the same export again changes nothing twice", again.includes("Import complete") && site.articles.filter((a) => a.external_id === "wp:101").length === 1 && writes().filter((r) => r.path.startsWith("/categories/")).length === patchesBefore, again.slice(0, 300));
   }
 
   // -- 14c. The store does the document work (the hosted Durable Object) --------

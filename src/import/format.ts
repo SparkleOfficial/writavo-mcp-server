@@ -148,7 +148,12 @@ const termFields = {
   is_active: z.boolean().optional().describe("false imports it archived: kept, but hidden on the public blog and from the AI. Only applied when the term is created."),
 };
 
-export const CategorySchema = z.strictObject(termFields);
+export const CategorySchema = z.strictObject({
+  ...termFields,
+  parent: slug(LIMITS.termSlug)
+    .optional()
+    .describe("The parent category's slug (in this file or on the Site), for a nested category. Set on an existing category only when it has no parent."),
+});
 
 export const TagSchema = z.strictObject({
   ...termFields,
@@ -179,6 +184,10 @@ const articleFields = {
     .string()
     .regex(EXTERNAL_ID_PATTERN, "must be 1 to 255 printable ASCII characters with no spaces")
     .describe("Your stable id for this article in the source system, for example blog:1234. Re-running an import updates the article with this id rather than creating a second one."),
+  kind: z
+    .enum(["article", "page"])
+    .optional()
+    .describe("page for a page such as About or Contact (no byline or date, not listed with the posts); article (the default) for a post."),
   title: text(LIMITS.title).nullable().optional(),
   slug: slug(LIMITS.slug).nullable().optional().describe("Keep the source slug exactly, so the URL does not change."),
   content: z.string().nullable().optional().describe("The body, in markdown."),
@@ -192,7 +201,12 @@ const articleFields = {
   howto_steps: HowtoSchema.nullable().optional(),
   comparison: ComparisonSchema.nullable().optional(),
   author: z.string().min(1).optional().describe("An authors[].ref."),
-  category: z.string().min(1).optional().describe("A categories[].slug, or the slug of a category already on the Site."),
+  category: z.string().min(1).optional().describe("The PRIMARY category: a categories[].slug, or the slug of a category already on the Site."),
+  categories: z
+    .array(z.string().min(1))
+    .max(19)
+    .optional()
+    .describe("Every OTHER category the article is filed under (slugs), when it is in several. The primary goes in category."),
   tags: z.array(z.string().min(1)).optional().describe("tags[].slug values, or slugs of tags already on the Site."),
   format: z.string().min(1).optional().describe("A content type key on the Site, for example how_to. Optional."),
   source: ArticleSourceSchema.nullable().optional().describe("Where the article came from. Private."),
@@ -208,6 +222,18 @@ const articleFields = {
     .max(20)
     .optional()
     .describe("Every URL the article was reachable at in the old system: its permalink (https://example.com/2021/03/my-post/), its ?p=123 link, older permalinks. Each answers with a 301 to the article on the Writavo blog once it is published."),
+  // The per-article SEO overrides (API 0128): what Yoast or Rank Math kept for the post. Leave a
+  // field out when the old system derived it; the blog then derives it the same way.
+  canonical_url: url
+    .nullable()
+    .optional()
+    .describe("Only when the post's canonical pointed somewhere other than its own URL (a syndicated post). Leave it out otherwise."),
+  noindex: z.boolean().optional().describe("true when the post was hidden from search engines. It stays on the blog but leaves the sitemap."),
+  og_title: text(LIMITS.seoTitle).nullable().optional().describe("The social-share title, when it differed from the SEO title."),
+  og_description: text(LIMITS.seoDescription).nullable().optional().describe("The social-share description, when it differed from the meta description."),
+  og_image: FeaturedImageSchema.nullable()
+    .optional()
+    .describe("The social-share image, when it differed from the featured image. Copied into the media library like every other image."),
 };
 
 // ---------------------------------------------------------------------------
@@ -290,6 +316,18 @@ export const EngagementEnvelopeSchema = z.strictObject({
 export type EngagementDaily = z.infer<typeof EngagementDailySchema>;
 export type EngagementReaction = z.infer<typeof EngagementReactionSchema>;
 
+/**
+ * Written by Writavo, not by hand: what a native conversion (a WordPress export) decided, shown in
+ * the dry run beside the articles it concerns. Informational; nothing is imported from it.
+ */
+export const ConversionSchema = z
+  .strictObject({
+    from: z.enum(["wordpress-wxr", "wordpress-rest"]),
+    lines: z.array(z.string().max(2000)).max(50),
+    items: z.record(z.string(), z.array(z.string().max(2000)).max(50)),
+  })
+  .describe("Written by Writavo when it converts a WordPress export: the conversion's report. Leave it out of a document you write yourself.");
+
 export const PublishedArticleSchema = z.strictObject({
   ...articleFields,
   status: z.literal("published"),
@@ -304,7 +342,19 @@ export const DraftArticleSchema = z.strictObject({
   status: z.literal("draft"),
 });
 
-export const ImportArticleSchema = z.discriminatedUnion("status", [PublishedArticleSchema, DraftArticleSchema]);
+/** A post that was scheduled at the source: it goes live on Writavo at scheduled_at. */
+export const ScheduledArticleSchema = z.strictObject({
+  ...articleFields,
+  status: z.literal("scheduled"),
+  title: z.string().min(1, "a scheduled article needs a title").max(LIMITS.title),
+  slug: slug(LIMITS.slug).describe("Required for a scheduled article."),
+  content: z.string().min(1, "a scheduled article needs content"),
+  scheduled_at: dateTime.describe(
+    "When it goes live on the Writavo blog. A time that has already passed when the import runs imports it as a draft instead, with a warning.",
+  ),
+});
+
+export const ImportArticleSchema = z.discriminatedUnion("status", [PublishedArticleSchema, DraftArticleSchema, ScheduledArticleSchema]);
 
 const documentFields = {
   format: z.literal(IMPORT_FORMAT_NAME),
@@ -325,6 +375,7 @@ const documentFields = {
     .max(50_000)
     .optional()
     .describe("Old URLs that are not an article's own (category archives, pages, feeds) and where each goes now. An article's own old URLs go in its old_urls."),
+  conversion: ConversionSchema.optional(),
 };
 
 export const ImportDocumentSchema = z
@@ -424,29 +475,41 @@ Top level:
   changes its slug or name. socials is { network: https URL } with network one of
   ${AUTHOR_SOCIAL_NETWORKS.join(", ")}. author_type is ${AUTHOR_TYPES.join(", ")} (default user).
   is_ai_generated defaults to false, which is right for a real person.
-- categories: [{ slug, name, description?, is_active? }] and tags: [{ slug, name, description?,
+- categories: [{ slug, name, description?, is_active?, parent? }] and tags: [{ slug, name, description?,
   group_label?, is_active? }]. Matched on the Site by slug, created when missing. Slugs are ${SLUG_RULE}, at
   most ${LIMITS.termSlug} characters. On a term already on the Site, description and group_label
   are filled only when it has none; nothing else about it changes. is_active: false creates the
   term ARCHIVED (kept and still on its articles, but hidden on the public blog and never chosen by
   the AI), for a term that was switched off at the source.
 - articles: processed in file order. Each one:
+  - kind: optional. "page" for a page such as About or Contact (served at the blog's root with no
+    byline or date, never listed with the posts); "article" (the default) for a post.
   - external_id (required): your stable id from the source system, for example "blog:1234".
     1 to 255 printable ASCII characters. Never reuse one for a different article.
-  - status (required): "published" or "draft". A published article is published on the Site
-    with its ORIGINAL dates. A draft stays a draft. Leave out anything unfinished or scraped.
+  - status (required): "published", "draft" or "scheduled". A published article is published on
+    the Site with its ORIGINAL dates. A draft stays a draft. A scheduled article (a post scheduled
+    at the source) needs scheduled_at, ISO 8601 with a timezone, and goes live then; one whose time
+    has passed by the import is imported as a draft. Leave out anything unfinished or scraped.
   - title (max ${LIMITS.title}), slug (max ${LIMITS.slug}), content (markdown). All three are
-    required when status is "published". Keep the slug exactly as it is at the source, so the
-    URL does not change.
+    required when status is "published" or "scheduled". Keep the slug exactly as it is at the
+    source, so the URL does not change. An embedded YouTube or Vimeo video, or a post on X, is a
+    line of its own in content: ::embed{url="https://www.youtube.com/watch?v=..."}. Raw HTML
+    (an <iframe>) never renders on the blog.
   - excerpt (max ${LIMITS.excerpt}), seo_title (max ${LIMITS.seoTitle}), seo_description
     (max ${LIMITS.seoDescription}), seo_keywords (array of strings).
+  - Optional SEO overrides, what Yoast or Rank Math kept for the post: canonical_url (only when it
+    pointed somewhere other than the post itself), noindex (true when the post was hidden from
+    search engines), og_title (max ${LIMITS.seoTitle}), og_description (max
+    ${LIMITS.seoDescription}), og_image: { url, alt? }. Leave out any the old system derived.
   - featured_image: { url, alt? }.
   - faqs: [{ question, answer }], key_takeaways: [string].
   - howto_steps: either [{ name, text?, image_url? }] or { name?, description?, steps: [{ name,
     text?, image_url? }] } when the how-to has its own title and summary.
   - comparison: { title?, headers: [string], rows: [[string]] }. Every row should have one cell
     per header.
-  - author: an authors[].ref. category: a category slug. tags: tag slugs.
+  - author: an authors[].ref. category: the primary category's slug; categories: the slugs of any
+    other categories it is filed under. tags: tag slugs. A nested category names its parent's slug
+    in categories[].parent.
   - format: a content type key on the Site (see get_content_types). Optional.
   - source: optional, private (never on the public blog). The page the article was written from:
     { url, title?, competitor?, content?, originality_pct?, target_keywords?, metrics? }. With

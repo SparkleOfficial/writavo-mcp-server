@@ -1,0 +1,153 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0"
+	xmlns:excerpt="http://wordpress.org/export/1.2/excerpt/"
+	xmlns:content="http://purl.org/rss/1.0/modules/content/"
+	xmlns:wfw="http://wellformedweb.org/CommentAPI/"
+	xmlns:dc="http://purl.org/dc/elements/1.1/"
+	xmlns:wp="http://wordpress.org/export/1.2/"
+>
+<channel>
+	<title>Harbour Notes</title>
+	<link>https://harbour.example.com</link>
+	<description>Tides and boats</description>
+	<language>en-GB</language>
+	<wp:wxr_version>1.2</wp:wxr_version>
+	<wp:base_site_url>https://harbour.example.com</wp:base_site_url>
+	<wp:base_blog_url>https://harbour.example.com</wp:base_blog_url>
+	<wp:author><wp:author_id>1</wp:author_id><wp:author_login><![CDATA[jane]]></wp:author_login><wp:author_email><![CDATA[jane@private.example]]></wp:author_email><wp:author_display_name><![CDATA[Jane Harbour]]></wp:author_display_name><wp:author_first_name><![CDATA[Jane]]></wp:author_first_name><wp:author_last_name><![CDATA[Harbour]]></wp:author_last_name></wp:author>
+	<wp:author><wp:author_id>2</wp:author_id><wp:author_login><![CDATA[sam]]></wp:author_login><wp:author_email><![CDATA[sam@private.example]]></wp:author_email><wp:author_display_name><![CDATA[]]></wp:author_display_name><wp:author_first_name><![CDATA[Sam]]></wp:author_first_name><wp:author_last_name><![CDATA[Quay]]></wp:author_last_name></wp:author>
+	<wp:category><wp:term_id>2</wp:term_id><wp:category_nicename><![CDATA[sailing]]></wp:category_nicename><wp:category_parent><![CDATA[]]></wp:category_parent><wp:cat_name><![CDATA[Sailing]]></wp:cat_name><wp:category_description><![CDATA[All about sails]]></wp:category_description></wp:category>
+	<wp:category><wp:term_id>3</wp:term_id><wp:category_nicename><![CDATA[dinghies]]></wp:category_nicename><wp:category_parent><![CDATA[sailing]]></wp:category_parent><wp:cat_name><![CDATA[Dinghies &amp; Skiffs]]></wp:cat_name></wp:category>
+	<wp:category><wp:term_id>1</wp:term_id><wp:category_nicename><![CDATA[uncategorized]]></wp:category_nicename><wp:category_parent><![CDATA[]]></wp:category_parent><wp:cat_name><![CDATA[Uncategorized]]></wp:cat_name></wp:category>
+	<wp:tag><wp:term_id>7</wp:term_id><wp:tag_slug><![CDATA[tides]]></wp:tag_slug><wp:tag_name><![CDATA[Tides]]></wp:tag_name></wp:tag>
+	<wp:tag><wp:term_id>8</wp:term_id><wp:tag_slug><![CDATA[caf%c3%a9]]></wp:tag_slug><wp:tag_name><![CDATA[Café]]></wp:tag_name></wp:tag>
+
+	<item>
+		<title><![CDATA[Harbour at dawn]]></title>
+		<link>https://harbour.example.com/wp-content/uploads/2021/03/dawn.jpg</link>
+		<wp:post_id>50</wp:post_id>
+		<wp:post_date_gmt><![CDATA[2021-03-01 08:00:00]]></wp:post_date_gmt>
+		<wp:post_name><![CDATA[dawn]]></wp:post_name>
+		<wp:status><![CDATA[inherit]]></wp:status>
+		<wp:post_parent>101</wp:post_parent>
+		<wp:post_type><![CDATA[attachment]]></wp:post_type>
+		<wp:attachment_url><![CDATA[https://harbour.example.com/wp-content/uploads/2021/03/dawn.jpg]]></wp:attachment_url>
+		<wp:postmeta><wp:meta_key><![CDATA[_wp_attachment_image_alt]]></wp:meta_key><wp:meta_value><![CDATA[Boats at dawn]]></wp:meta_value></wp:postmeta>
+	</item>
+	<item>
+		<title><![CDATA[Chart]]></title>
+		<wp:post_id>51</wp:post_id>
+		<wp:status><![CDATA[inherit]]></wp:status>
+		<wp:post_parent>101</wp:post_parent>
+		<wp:post_type><![CDATA[attachment]]></wp:post_type>
+		<wp:attachment_url><![CDATA[https://harbour.example.com/wp-content/uploads/2021/03/chart.png]]></wp:attachment_url>
+	</item>
+
+	<item>
+		<title><![CDATA[Reading the tides &#8211; a primer]]></title>
+		<link>https://harbour.example.com/2021/03/reading-the-tides/</link>
+		<dc:creator><![CDATA[jane]]></dc:creator>
+		<guid isPermaLink="false">https://harbour.example.com/?p=101</guid>
+		<content:encoded><![CDATA[High water comes twice a day. Meet at 10:30, note:important.
+
+The moon does most of the work.
+The sun helps a little.
+
+[caption id="attachment_50" align="alignnone" width="1024"]<img class="size-large wp-image-50" src="https://harbour.example.com/wp-content/uploads/2021/03/dawn-1024x683.jpg" alt="Boats at dawn" width="1024" height="683" /> Dawn over the harbour[/caption]
+
+https://www.youtube.com/watch?v=dQw4w9WgXcQ
+
+[embed]https://vimeo.com/76979871[/embed]
+
+[gallery ids="50,51,999"]
+
+[contact-form-7 id="12" title="Contact"]
+
+<script>alert('x')</script>
+<ul>
+<li>Spring tides</li>
+<li>Neap tides</li>
+</ul>
+<pre>tide = moon + sun
+
+  indented</pre>
+<!--more-->
+Last line with a <a href="https://example.org/ref">reference</a>.]]></content:encoded>
+		<excerpt:encoded><![CDATA[<p>Why the tide &amp; the moon agree.</p>]]></excerpt:encoded>
+		<wp:post_id>101</wp:post_id>
+		<wp:post_date><![CDATA[2021-03-04 10:30:00]]></wp:post_date>
+		<wp:post_date_gmt><![CDATA[2021-03-04 09:30:00]]></wp:post_date_gmt>
+		<wp:post_modified_gmt><![CDATA[2022-01-10 12:00:00]]></wp:post_modified_gmt>
+		<wp:post_name><![CDATA[reading-the-tides]]></wp:post_name>
+		<wp:status><![CDATA[publish]]></wp:status>
+		<wp:post_type><![CDATA[post]]></wp:post_type>
+		<wp:post_password><![CDATA[]]></wp:post_password>
+		<category domain="category" nicename="sailing"><![CDATA[Sailing]]></category>
+		<category domain="category" nicename="dinghies"><![CDATA[Dinghies]]></category>
+		<category domain="post_tag" nicename="tides"><![CDATA[Tides]]></category>
+		<wp:postmeta><wp:meta_key><![CDATA[_thumbnail_id]]></wp:meta_key><wp:meta_value><![CDATA[50]]></wp:meta_value></wp:postmeta>
+		<wp:postmeta><wp:meta_key><![CDATA[_yoast_wpseo_title]]></wp:meta_key><wp:meta_value><![CDATA[%%title%% %%sep%% %%sitename%%]]></wp:meta_value></wp:postmeta>
+		<wp:postmeta><wp:meta_key><![CDATA[_yoast_wpseo_metadesc]]></wp:meta_key><wp:meta_value><![CDATA[How to read a tide table.]]></wp:meta_value></wp:postmeta>
+		<wp:postmeta><wp:meta_key><![CDATA[_yoast_wpseo_primary_category]]></wp:meta_key><wp:meta_value><![CDATA[3]]></wp:meta_value></wp:postmeta>
+		<wp:postmeta><wp:meta_key><![CDATA[_yoast_wpseo_focuskw]]></wp:meta_key><wp:meta_value><![CDATA[tide tables]]></wp:meta_value></wp:postmeta>
+		<wp:postmeta><wp:meta_key><![CDATA[_yoast_wpseo_opengraph-title]]></wp:meta_key><wp:meta_value><![CDATA[Tides, simply]]></wp:meta_value></wp:postmeta>
+		<wp:postmeta><wp:meta_key><![CDATA[_edit_last]]></wp:meta_key><wp:meta_value><![CDATA[1]]></wp:meta_value></wp:postmeta>
+		<wp:comment><wp:comment_id>9</wp:comment_id><wp:comment_author_email><![CDATA[reader@private.example]]></wp:comment_author_email><wp:comment_content><![CDATA[Great post]]></wp:comment_content><wp:commentmeta><wp:meta_key><![CDATA[_thumbnail_id]]></wp:meta_key><wp:meta_value><![CDATA[51]]></wp:meta_value></wp:commentmeta></wp:comment>
+	</item>
+
+	<item>
+		<title><![CDATA[Block editor post]]></title>
+		<link>https://harbour.example.com/2022/05/block-post/</link>
+		<dc:creator><![CDATA[sam]]></dc:creator>
+		<guid isPermaLink="false">https://harbour.example.com/?p=102</guid>
+		<content:encoded><![CDATA[<!-- wp:paragraph -->
+<p>First <strong>bold</strong> paragraph.</p>
+<!-- /wp:paragraph -->
+
+<!-- wp:embed {"url":"https://twitter.com/jack/status/20","type":"rich","providerNameSlug":"twitter"} -->
+<figure class="wp-block-embed is-type-rich is-provider-twitter wp-block-embed-twitter"><div class="wp-block-embed__wrapper">
+https://twitter.com/jack/status/20
+</div></figure>
+<!-- /wp:embed -->
+
+<!-- wp:embed {"url":"https://open.spotify.com/track/abc"} -->
+<figure class="wp-block-embed"><div class="wp-block-embed__wrapper">
+https://open.spotify.com/track/abc
+</div></figure>
+<!-- /wp:embed -->
+
+<!-- wp:image {"id":51} -->
+<figure class="wp-block-image"><img src="https://harbour.example.com/wp-content/uploads/2021/03/chart-300x200.png" alt="" class="wp-image-51" srcset="https://harbour.example.com/wp-content/uploads/2021/03/chart-300x200.png 300w, https://harbour.example.com/wp-content/uploads/2021/03/chart-1024x683.png 1024w"/><figcaption>A chart</figcaption></figure>
+<!-- /wp:image -->
+
+<!-- wp:table -->
+<figure class="wp-block-table"><table><thead><tr><th>Tide</th><th>Height</th></tr></thead><tbody><tr><td>Spring</td><td>5 m</td></tr></tbody></table></figure>
+<!-- /wp:table -->
+
+<!-- wp:latest-posts /-->
+
+<!-- wp:video -->
+<figure class="wp-block-video"><video controls src="https://harbour.example.com/wp-content/uploads/clip.mp4"></video></figure>
+<!-- /wp:video -->]]></content:encoded>
+		<excerpt:encoded><![CDATA[]]></excerpt:encoded>
+		<wp:post_id>102</wp:post_id>
+		<wp:post_date_gmt><![CDATA[2022-05-01 12:00:00]]></wp:post_date_gmt>
+		<wp:post_name><![CDATA[caf%c3%a9-culture]]></wp:post_name>
+		<wp:status><![CDATA[publish]]></wp:status>
+		<wp:post_type><![CDATA[post]]></wp:post_type>
+		<category domain="category" nicename="uncategorized"><![CDATA[Uncategorized]]></category>
+		<category domain="post_tag" nicename="caf%c3%a9"><![CDATA[Café]]></category>
+		<wp:postmeta><wp:meta_key><![CDATA[rank_math_title]]></wp:meta_key><wp:meta_value><![CDATA[%title% %sep% %sitename%]]></wp:meta_value></wp:postmeta>
+		<wp:postmeta><wp:meta_key><![CDATA[rank_math_robots]]></wp:meta_key><wp:meta_value><![CDATA[a:1:{i:0;s:7:"noindex";}]]></wp:meta_value></wp:postmeta>
+		<wp:postmeta><wp:meta_key><![CDATA[rank_math_canonical_url]]></wp:meta_key><wp:meta_value><![CDATA[https://partner.example.com/original]]></wp:meta_value></wp:postmeta>
+	</item>
+
+	<item><title><![CDATA[Future race]]></title><link>https://harbour.example.com/?p=103</link><dc:creator><![CDATA[jane]]></dc:creator><guid isPermaLink="false">https://harbour.example.com/?p=103</guid><content:encoded><![CDATA[Race day is coming.]]></content:encoded><wp:post_id>103</wp:post_id><wp:post_date_gmt><![CDATA[2099-06-01 09:00:00]]></wp:post_date_gmt><wp:post_name><![CDATA[future-race]]></wp:post_name><wp:status><![CDATA[future]]></wp:status><wp:post_type><![CDATA[post]]></wp:post_type></item>
+	<item><title><![CDATA[Members only]]></title><link>https://harbour.example.com/2021/04/members/</link><dc:creator><![CDATA[jane]]></dc:creator><content:encoded><![CDATA[Secret tide tables.]]></content:encoded><wp:post_id>104</wp:post_id><wp:post_date_gmt><![CDATA[2021-04-01 09:00:00]]></wp:post_date_gmt><wp:post_name><![CDATA[members]]></wp:post_name><wp:status><![CDATA[publish]]></wp:status><wp:post_type><![CDATA[post]]></wp:post_type><wp:post_password><![CDATA[hunter2]]></wp:post_password></item>
+	<item><title><![CDATA[Private notes]]></title><content:encoded><![CDATA[Only for me.]]></content:encoded><wp:post_id>105</wp:post_id><wp:post_date_gmt><![CDATA[0000-00-00 00:00:00]]></wp:post_date_gmt><wp:post_name><![CDATA[]]></wp:post_name><wp:status><![CDATA[private]]></wp:status><wp:post_type><![CDATA[post]]></wp:post_type></item>
+	<item><title><![CDATA[Waiting for review]]></title><content:encoded><![CDATA[Draft body.]]></content:encoded><wp:post_id>106</wp:post_id><wp:post_name><![CDATA[]]></wp:post_name><wp:status><![CDATA[pending]]></wp:status><wp:post_type><![CDATA[post]]></wp:post_type></item>
+	<item><title><![CDATA[Binned]]></title><content:encoded><![CDATA[Gone.]]></content:encoded><wp:post_id>107</wp:post_id><wp:status><![CDATA[trash]]></wp:status><wp:post_type><![CDATA[post]]></wp:post_type></item>
+	<item><title><![CDATA[About us]]></title><content:encoded><![CDATA[We love boats.]]></content:encoded><wp:post_id>2</wp:post_id><wp:status><![CDATA[publish]]></wp:status><wp:post_type><![CDATA[page]]></wp:post_type></item>
+	<item><title><![CDATA[Menu]]></title><wp:post_id>300</wp:post_id><wp:status><![CDATA[publish]]></wp:status><wp:post_type><![CDATA[nav_menu_item]]></wp:post_type></item>
+</channel>
+</rss>

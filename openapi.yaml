@@ -551,8 +551,8 @@ paths:
           description: |
             Comma separated field allow list. Any field of the Article schema may be named.
             Omit for the default projection, which is:
-            `id, status, title, slug, excerpt, featured_image_url, featured_image_alt, category_id,
-            author_id, format_id, published_at, scheduled_publish_at, created_at, updated_at`.
+            `id, status, article_kind, title, slug, excerpt, featured_image_url, featured_image_alt,
+            category_id, author_id, format_id, published_at, scheduled_publish_at, created_at, updated_at`.
             `id` is always returned whether or not you name it.
           required: false
           schema:
@@ -569,9 +569,15 @@ paths:
             items: { $ref: "#/components/schemas/ArticleStatus" }
           style: form
           explode: true
+        - name: article_kind
+          in: query
+          required: false
+          description: '`page` lists the pages (About, Contact); `article` the posts (news stories included); `news` only news stories.'
+          schema: { type: string, enum: [article, news, page] }
         - name: category_id
           in: query
           required: false
+          description: Articles filed under this category, as their primary category or one of several.
           schema: { type: string, format: uuid }
         - name: author_id
           in: query
@@ -966,6 +972,340 @@ paths:
         "422": { $ref: "#/components/responses/ValidationFailed" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /articles/{id}/revisions:
+    parameters:
+      - $ref: "#/components/parameters/ArticleId"
+    get:
+      operationId: listArticleRevisions
+      tags: [Articles]
+      summary: List an article's revisions
+      description: |
+        Every saved version of the article, newest first: each change a reader would see, from the
+        dashboard, this API, the AI pipeline or an import, with who made it (`actor_user_id`, and
+        `actor_api_key_id` for a key) and from where (`source`). The first edit of an article made
+        before revisions existed keeps its original as `baseline`. Autosaves are kept 30 days,
+        pipeline revisions 180; an article keeps at most 300.
+      x-scope: articles:read
+      x-permission: none
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: false
+      x-cross-tenant: 404
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: A page of revisions (without their bodies).
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          items: { type: array, items: { $ref: "#/components/schemas/ArticleRevisionSummary" } }
+                          next_cursor: { type: [string, "null"] }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /articles/{id}/revisions/{revision_id}:
+    parameters:
+      - $ref: "#/components/parameters/ArticleId"
+      - name: revision_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      operationId: getArticleRevision
+      tags: [Articles]
+      summary: Read one revision
+      description: The version in full, every field it recorded, to compare with the article or another revision.
+      x-scope: articles:read
+      x-permission: none
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: false
+      x-cross-tenant: 404
+      responses:
+        "200":
+          description: The revision.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/ArticleRevision" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /articles/{id}/revisions/{revision_id}/restore:
+    parameters:
+      - $ref: "#/components/parameters/ArticleId"
+      - name: revision_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      operationId: restoreArticleRevision
+      tags: [Articles]
+      summary: Put a revision back
+      description: |
+        Copies the revision's title, body, excerpt, images, SEO fields, structured blocks, category
+        and author back onto the article, as a new change (itself a revision, `source: restore`, so
+        it can be undone the same way). The status never changes: restoring a published article
+        changes the live page, and its cache is cleared. Emits `article.updated`.
+      x-scope: articles:write
+      x-permission: articles.write
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-cross-tenant: 404
+      responses:
+        "200":
+          description: The article as it now is.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Article" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /articles/{id}/preview-links:
+    parameters:
+      - $ref: "#/components/parameters/ArticleId"
+    post:
+      operationId: createArticlePreviewLink
+      tags: [Articles]
+      summary: Share a preview of an unpublished article
+      description: |
+        A link that shows the article as your blog will render it, to anyone who has the link, before
+        it is published. The `token` and `url` come back ONCE, in this response; Writavo keeps only a
+        hash. The link works on your Site's own blog only, expires (7 days by default, at most 30)
+        and can be revoked. It is never indexed or cached. At most 20 live links per article and 200
+        per Site (`409 CONFLICT` past either). `url` is null until the Site's blog has a verified
+        address; build it as `<your blog>/preview/<token>`.
+      x-scope: articles:write
+      x-permission: articles.write
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-cross-tenant: 404
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                expires_in_days: { type: integer, minimum: 1, maximum: 30, default: 7 }
+      responses:
+        "201":
+          description: The new link.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [id, token, expires_at]
+                        properties:
+                          id: { type: string, format: uuid }
+                          token: { type: string, description: 'The link''s secret. Shown once; a credential for this preview.' }
+                          url: { type: [string, "null"], format: uri }
+                          expires_at: { type: string, format: date-time }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    get:
+      operationId: listArticlePreviewLinks
+      tags: [Articles]
+      summary: List an article's preview links
+      description: Every preview link made for the article, newest first, with whether it still works. Never the token.
+      x-scope: articles:read
+      x-permission: articles.write
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: false
+      x-cross-tenant: 404
+      responses:
+        "200":
+          description: The links.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          items:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                id: { type: string, format: uuid }
+                                created_at: { type: string, format: date-time }
+                                expires_at: { type: string, format: date-time }
+                                revoked_at: { type: [string, "null"], format: date-time }
+                                last_viewed_at: { type: [string, "null"], format: date-time }
+                                created_by: { type: [string, "null"], format: uuid }
+                                created_by_key: { type: [string, "null"], format: uuid }
+                                live: { type: boolean }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /articles/{id}/preview-links/{link_id}:
+    parameters:
+      - $ref: "#/components/parameters/ArticleId"
+      - name: link_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    delete:
+      operationId: revokeArticlePreviewLink
+      tags: [Articles]
+      summary: Revoke a preview link
+      description: The link stops working at once. Revoking twice is the same as once.
+      x-scope: articles:write
+      x-permission: articles.write
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-agent-consequence: Stops a shared preview link working at once; whoever had it can no longer see the draft.
+      x-cross-tenant: 404
+      responses:
+        "204": { description: Revoked. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /articles/{id}/schedule-unpublish:
+    parameters:
+      - $ref: "#/components/parameters/ArticleId"
+    post:
+      operationId: scheduleArticleUnpublish
+      tags: [Articles]
+      summary: Take a live article down at a set time
+      description: |
+        The article stays live until `scheduled_unpublish_at`, then goes back to draft on its own,
+        with the same audit, cache purge and `article.unpublished` event as an unpublish. Only a
+        published article; the time must be in the future (`422`). Sending it again moves the time.
+        Like an unpublish, an AI agent needs a person's approval for it.
+      x-scope: articles:write
+      x-permission: articles.write
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-writavo-approval: article.unpublish
+      x-writavo-approval-kind: destructive
+      x-agent-consequence: Schedules the article to come off the live blog at the given time. Reversible by cancelling it, or by publishing again after.
+      x-cross-tenant: 404
+      parameters:
+        - $ref: "#/components/parameters/WritavoApproval"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [scheduled_unpublish_at]
+              additionalProperties: false
+              properties:
+                scheduled_unpublish_at: { type: string, format: date-time }
+      responses:
+        "200":
+          description: The article's state.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/ArticleLifecycleState" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "428": { $ref: "#/components/responses/ApprovalRequired" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /articles/{id}/cancel-unpublish:
+    parameters:
+      - $ref: "#/components/parameters/ArticleId"
+    post:
+      operationId: cancelArticleUnpublish
+      tags: [Articles]
+      summary: Keep a live article up
+      description: Cancels a scheduled unpublish. Nothing happens (and nothing is emitted) when none is set.
+      x-scope: articles:write
+      x-permission: articles.write
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-cross-tenant: 404
+      responses:
+        "200":
+          description: The article's state.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/ArticleLifecycleState" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/InternalError" }
 
   /articles/{id}/cost-history:
@@ -2076,6 +2416,9 @@ paths:
         name the MCP tool, whose calls map one to one onto these endpoints.
 
         An import is kept 7 days after its last use and belongs to the key that made it.
+
+        **From WordPress** there is nothing to convert first: send the export file itself
+        (`Content-Type: application/xml`) or `{ "wordpress": { "url": ... } }` for a live site.
       x-scope: articles:write
       x-also-scopes: ['taxonomy:write', 'authors:write', 'media:write']
       x-permission: articles.write
@@ -2089,10 +2432,28 @@ paths:
           application/json:
             schema:
               description: |
-                The import document (format "writavo-import", version 1: see
-                https://writavo.com/schemas/import-v1.json), or `{ "url": "https://..." }` naming
-                where to fetch it (a signed storage URL; fetched anonymously). At most 10 MB.
+                One of:
+                - the import document (format "writavo-import", version 1: see
+                  https://writavo.com/schemas/import-v1.json), at most 10 MB;
+                - `{ "url": "https://..." }` naming where to fetch a document or a WordPress export
+                  file (a signed storage URL; fetched anonymously);
+                - `{ "wordpress": { "url": "https://example.com", "username": "...",
+                  "application_password": "..." } }`: Writavo reads a live WordPress site over its
+                  REST API, read only, and converts it. Without a user name and Application
+                  Password, published posts only. The password is held encrypted only while the
+                  site is read, then erased; revoke it in WordPress afterwards.
               type: object
+          application/xml:
+            schema:
+              description: |
+                A WordPress export file as it is (Tools > Export > All content), up to 100 MB.
+                Writavo converts it itself: posts with their HTML turned into markdown (words
+                unchanged, checked), categories, tags, authors (never their emails), featured and
+                inline images, Yoast and Rank Math SEO fields, embeds, and every post's old URLs and
+                the category and tag archives as redirects. Private, password-protected and pending
+                posts come in as drafts; scheduled posts stay scheduled; pages come in as pages. The conversion runs on the server: the reply's dry run says when it is ready,
+                so dry-run again (`POST /imports/{import_id}/dry-run`) after a minute.
+              type: string
       responses:
         "201":
           description: The import was stored and dry-run.
@@ -2109,6 +2470,54 @@ paths:
         "403": { $ref: "#/components/responses/InsufficientScope" }
         "404": { $ref: "#/components/responses/NotFound" }
         "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /imports/uploads:
+    post:
+      operationId: createImportUpload
+      tags: [Imports]
+      summary: Start an import with an upload link
+      description: |
+        Creates an empty import and a one-time link to send its file to, so a large file (a
+        WordPress export of up to 100 MB, or an import document of up to 10 MB) goes straight to
+        the import service and never through this API. PUT the file to `upload.url` with
+        `Authorization: Bearer <upload.token>` within 30 minutes; the link works once. A browser
+        on the Writavo dashboard may send it directly (CORS is open to the dashboard only).
+
+        A WordPress export is converted on the server after it arrives; `POST
+        /imports/{import_id}/dry-run` says when it is ready and what the import would do.
+      x-scope: articles:write
+      x-also-scopes: ['taxonomy:write', 'authors:write', 'media:write']
+      x-permission: articles.write
+      x-entitlement: none
+      x-spends-credits: false
+      x-publishable: false
+      x-rate-limit-class: write
+      responses:
+        "201":
+          description: The import and its upload link.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [import_id, upload]
+                        properties:
+                          import_id: { type: string, pattern: "^imp_[A-Za-z0-9_-]{22}$" }
+                          upload:
+                            type: object
+                            required: [url, token, expires_at]
+                            properties:
+                              url: { type: string, format: uri, description: Where to PUT the file. }
+                              token: { type: string, description: 'The bearer token for that PUT. A credential: single use, this import only.' }
+                              expires_at: { type: string, format: date-time }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/InternalError" }
 
@@ -2171,10 +2580,28 @@ paths:
           application/json:
             schema:
               description: |
-                The import document (format "writavo-import", version 1: see
-                https://writavo.com/schemas/import-v1.json), or `{ "url": "https://..." }` naming
-                where to fetch it (a signed storage URL; fetched anonymously). At most 10 MB.
+                One of:
+                - the import document (format "writavo-import", version 1: see
+                  https://writavo.com/schemas/import-v1.json), at most 10 MB;
+                - `{ "url": "https://..." }` naming where to fetch a document or a WordPress export
+                  file (a signed storage URL; fetched anonymously);
+                - `{ "wordpress": { "url": "https://example.com", "username": "...",
+                  "application_password": "..." } }`: Writavo reads a live WordPress site over its
+                  REST API, read only, and converts it. Without a user name and Application
+                  Password, published posts only. The password is held encrypted only while the
+                  site is read, then erased; revoke it in WordPress afterwards.
               type: object
+          application/xml:
+            schema:
+              description: |
+                A WordPress export file as it is (Tools > Export > All content), up to 100 MB.
+                Writavo converts it itself: posts with their HTML turned into markdown (words
+                unchanged, checked), categories, tags, authors (never their emails), featured and
+                inline images, Yoast and Rank Math SEO fields, embeds, and every post's old URLs and
+                the category and tag archives as redirects. Private, password-protected and pending
+                posts come in as drafts; scheduled posts stay scheduled; pages come in as pages. The conversion runs on the server: the reply's dry run says when it is ready,
+                so dry-run again (`POST /imports/{import_id}/dry-run`) after a minute.
+              type: string
       responses:
         "200":
           description: The part was added and the import dry-run.
@@ -11084,6 +11511,14 @@ components:
           allOf: [{ $ref: "#/components/schemas/ArticleStatus" }]
           readOnly: true
           description: Read only here. Change it with the lifecycle endpoints.
+        article_kind:
+          type: string
+          enum: [article, news, page]
+          description: |
+            `article` is a post; `news` a news story written by a news recipe (NewsArticle markup, the
+            Google News sitemap); `page` a page such as About or Contact: served at the blog's root like
+            a post, but with no byline or date, never in the blog's listings or RSS feed, and never
+            rewritten by the AI pipeline. Pages and posts share one URL space.
         title: { type: [string, "null"], maxLength: 300 }
         slug:
           type: [string, "null"]
@@ -11102,11 +11537,32 @@ components:
             primary key in your old CMS. Printable ASCII, no spaces. Unique within the Site: a
             second article with the same value is `409 CONFLICT`. Null for anything written in
             Writavo. Filter on it with `GET /articles?external_id=`.
+        body_format:
+          type: string
+          enum: [markdown, json]
+          readOnly: true
+          description: |
+            `json` when the article was last saved from the dashboard's rich editor: `body_json` is
+            then its document and `content` that document's exact markdown. `markdown` otherwise.
+            Writing `content` through this API makes it `markdown` again.
+        body_json:
+          type: [object, "null"]
+          readOnly: true
+          description: |
+            The rich editor's document (ProseMirror JSON: doc, paragraph, heading, lists, table,
+            image, codeBlock, embed, markdownRaw, and the bold / italic / strike / code / link marks)
+            when `body_format` is `json`, else null. Not in the list default. `content` always holds
+            the same body as markdown, so a reader that only knows markdown loses nothing.
         content:
           type: [string, "null"]
           description: |
             The body, in markdown. Not returned in the list default projection; ask for it by
             name or fetch the article individually.
+
+            **Embeds.** A line on its own of the form `::embed{url="https://..."}` renders as an
+            embedded YouTube or Vimeo player, or a link card for a post on X, on your blog and in
+            `content_html`. Any other URL renders as a plain link. Raw HTML (an `<iframe>`) is
+            never rendered, so use this line instead.
         excerpt: { type: [string, "null"], maxLength: 1000 }
         featured_image_url: { type: [string, "null"], format: uri }
         featured_image_alt:
@@ -11164,7 +11620,16 @@ components:
               items:
                 type: array
                 items: { type: string }
-        category_id: { type: [string, "null"], format: uuid }
+        category_id:
+          type: [string, "null"]
+          format: uuid
+          description: The PRIMARY category, shown on the article and used for its breadcrumb. Always one of `category_ids`.
+        category_ids:
+          type: array
+          items: { type: string, format: uuid }
+          description: |
+            Every category the article is filed under, the primary first (at most 20). Not in the list
+            default projection; ask for it with `fields`.
         author_id: { type: [string, "null"], format: uuid }
         format_id:
           type: [string, "null"]
@@ -11195,6 +11660,11 @@ components:
           format: date-time
           readOnly: true
           description: Set through `POST /articles/{id}/schedule`.
+        scheduled_unpublish_at:
+          type: [string, "null"]
+          format: date-time
+          readOnly: true
+          description: When a published article comes down on its own. Set through `POST /articles/{id}/schedule-unpublish`; cleared by any unpublish.
         content_updated_at:
           type: [string, "null"]
           format: date-time
@@ -11228,6 +11698,36 @@ components:
             published, `content_updated_at` follows it (or `original_published_at` when it is null),
             so the first publish keeps the source's `lastmod`; an edit made in Writavo before then
             moves `content_updated_at` to the edit time as usual. Never returned to a publishable key.
+        canonical_url:
+          type: [string, "null"]
+          format: uri
+          maxLength: 2048
+          description: |
+            The canonical URL override, an absolute http(s) URL. Set it when this article's primary
+            copy lives at another address (a syndicated post). Null means the article's own URL.
+            An article whose canonical points anywhere else is left out of your sitemap.
+        noindex:
+          type: boolean
+          description: |
+            `true` asks search engines not to index the page (`robots: noindex`) and leaves it out
+            of your sitemap. The page stays reachable, listed on your blog and in your RSS feed.
+        og_title:
+          type: [string, "null"]
+          maxLength: 200
+          description: The social-share title (`og:title`). Null means `seo_title`, then `title`.
+        og_description:
+          type: [string, "null"]
+          maxLength: 400
+          description: The social-share description. Null means `seo_description`, then `excerpt`.
+        og_image_url:
+          type: [string, "null"]
+          format: uri
+          maxLength: 2048
+          description: The social-share image, an absolute http(s) URL. Null means `featured_image_url`.
+        og_image_alt:
+          type: [string, "null"]
+          maxLength: 500
+          description: Alt text for `og_image_url`. Null means `featured_image_alt`, then the title.
         created_at: { type: string, format: date-time, readOnly: true }
         updated_at: { type: string, format: date-time, readOnly: true }
         source:
@@ -11314,6 +11814,10 @@ components:
         them is `422 VALIDATION_FAILED`, so a client that assumed it could create published
         content fails loudly rather than leaving a post silently offline.
       properties:
+        article_kind:
+          type: string
+          enum: [article, page]
+          description: '`page` makes it a page (About, Contact) rather than a post. Defaults to `article` on create. `news` is set only by a news recipe.'
         title: { type: [string, "null"], maxLength: 300 }
         slug:
           type: [string, "null"]
@@ -11326,7 +11830,7 @@ components:
           maxLength: 255
           pattern: "^[!-~]+$"
           description: Your id for this article in the system it came from. Unique within the Site.
-        content: { type: [string, "null"], description: Markdown. }
+        content: { type: [string, "null"], description: 'Markdown. Embed a YouTube, Vimeo or X post with a line of its own, `::embed{url="https://..."}`.' }
         excerpt: { type: [string, "null"], maxLength: 1000 }
         featured_image_url: { type: [string, "null"], format: uri }
         featured_image_alt:
@@ -11349,7 +11853,20 @@ components:
           oneOf:
             - $ref: '#/components/schemas/ArticleSourceWrite'
             - type: "null"
-        category_id: { type: [string, "null"], format: uuid }
+        category_id:
+          type: [string, "null"]
+          format: uuid
+          description: |
+            The PRIMARY category. Sent alone it files the article under that category too; an
+            article that was in only its old primary category is moved, one in several keeps them.
+        category_ids:
+          type: array
+          maxItems: 20
+          items: { type: string, format: uuid }
+          description: |
+            Every category the article is filed under: a full replacement, not a merge (send `[]` to
+            clear). With `category_id` too, the primary is put first if missing; without it the
+            current primary stays when listed, otherwise the first becomes primary.
         author_id: { type: [string, "null"], format: uuid }
         format_id: { type: [string, "null"], format: uuid }
         tag_ids: { type: array, items: { type: string, format: uuid } }
@@ -11369,6 +11886,37 @@ components:
             When the imported article's content last changed at its source. Must be in the past,
             needs `original_published_at`, and may not be earlier than it. Becomes the article's
             `content_updated_at` (its sitemap `lastmod`) until it is edited in Writavo.
+        canonical_url:
+          type: [string, "null"]
+          format: uri
+          maxLength: 2048
+          description: |
+            The canonical URL override, an absolute http(s) URL. Set it when this article's
+            primary copy lives at another address (a syndicated post). Blank or `null` means the
+            article's own URL. An article whose canonical points anywhere else is left out of
+            your sitemap.
+        noindex:
+          type: boolean
+          description: |
+            `true` asks search engines not to index the page (`robots: noindex`) and leaves it out
+            of your sitemap. The page stays reachable, listed on your blog and in your RSS feed.
+        og_title:
+          type: [string, "null"]
+          maxLength: 200
+          description: The social-share title (`og:title`). Null means `seo_title`, then `title`.
+        og_description:
+          type: [string, "null"]
+          maxLength: 400
+          description: The social-share description. Null means `seo_description`, then `excerpt`.
+        og_image_url:
+          type: [string, "null"]
+          format: uri
+          maxLength: 2048
+          description: The social-share image, an absolute http(s) URL. Null means `featured_image_url`.
+        og_image_alt:
+          type: [string, "null"]
+          maxLength: 500
+          description: Alt text for `og_image_url`. Null means `featured_image_alt`, then the title.
 
     ArticleUpdate:
       type: object
@@ -11378,6 +11926,10 @@ components:
         `status`, `published_at` and `scheduled_publish_at` are rejected with
         `422 VALIDATION_FAILED`.
       properties:
+        article_kind:
+          type: string
+          enum: [article, page]
+          description: '`page` makes it a page (About, Contact) rather than a post. Defaults to `article` on create. `news` is set only by a news recipe.'
         title: { type: [string, "null"], maxLength: 300 }
         slug:
           type: [string, "null"]
@@ -11393,7 +11945,7 @@ components:
           maxLength: 255
           pattern: "^[!-~]+$"
           description: Your id for this article in the system it came from. `null` clears it.
-        content: { type: [string, "null"], description: Markdown. }
+        content: { type: [string, "null"], description: 'Markdown. Embed a YouTube, Vimeo or X post with a line of its own, `::embed{url="https://..."}`.' }
         excerpt: { type: [string, "null"], maxLength: 1000 }
         featured_image_url:
           type: [string, "null"]
@@ -11419,7 +11971,20 @@ components:
           oneOf:
             - $ref: '#/components/schemas/ArticleSourceWrite'
             - type: "null"
-        category_id: { type: [string, "null"], format: uuid }
+        category_id:
+          type: [string, "null"]
+          format: uuid
+          description: |
+            The PRIMARY category. Sent alone it files the article under that category too; an
+            article that was in only its old primary category is moved, one in several keeps them.
+        category_ids:
+          type: array
+          maxItems: 20
+          items: { type: string, format: uuid }
+          description: |
+            Every category the article is filed under: a full replacement, not a merge (send `[]` to
+            clear). With `category_id` too, the primary is put first if missing; without it the
+            current primary stays when listed, otherwise the first becomes primary.
         author_id: { type: [string, "null"], format: uuid }
         format_id: { type: [string, "null"], format: uuid }
         tag_ids:
@@ -11442,6 +12007,84 @@ components:
             When the imported article's content last changed at its source. Must be in the past,
             needs `original_published_at`, and may not be earlier than it. Becomes the article's
             `content_updated_at` (its sitemap `lastmod`) until it is edited in Writavo.
+        canonical_url:
+          type: [string, "null"]
+          format: uri
+          maxLength: 2048
+          description: |
+            The canonical URL override, an absolute http(s) URL. Set it when this article's
+            primary copy lives at another address (a syndicated post). Blank or `null` means the
+            article's own URL. An article whose canonical points anywhere else is left out of
+            your sitemap.
+        noindex:
+          type: boolean
+          description: |
+            `true` asks search engines not to index the page (`robots: noindex`) and leaves it out
+            of your sitemap. The page stays reachable, listed on your blog and in your RSS feed.
+        og_title:
+          type: [string, "null"]
+          maxLength: 200
+          description: The social-share title (`og:title`). Null means `seo_title`, then `title`.
+        og_description:
+          type: [string, "null"]
+          maxLength: 400
+          description: The social-share description. Null means `seo_description`, then `excerpt`.
+        og_image_url:
+          type: [string, "null"]
+          format: uri
+          maxLength: 2048
+          description: The social-share image, an absolute http(s) URL. Null means `featured_image_url`.
+        og_image_alt:
+          type: [string, "null"]
+          maxLength: 500
+          description: Alt text for `og_image_url`. Null means `featured_image_alt`, then the title.
+
+    ArticleRevisionSummary:
+      type: object
+      required: [id, seq, source, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        seq: { type: integer, description: 1 for the first revision, counting up. }
+        source:
+          type: string
+          enum: [create, baseline, manual, autosave, api, pipeline, import, restore]
+          description: |
+            create: the article's first version. baseline: the article as it was before its first
+            recorded edit. manual / autosave: a person in the dashboard. api: a key. pipeline: the AI
+            pipeline. import: an import. restore: a revision put back (see `restored_from`).
+        actor_user_id: { type: [string, "null"], format: uuid }
+        actor_api_key_id: { type: [string, "null"], format: uuid }
+        restored_from: { type: [string, "null"], format: uuid }
+        status: { type: [string, "null"], description: The article's status when this version was saved. }
+        title: { type: [string, "null"] }
+        slug: { type: [string, "null"] }
+        byte_size: { type: integer }
+        created_at: { type: string, format: date-time }
+
+    ArticleRevision:
+      allOf:
+        - $ref: "#/components/schemas/ArticleRevisionSummary"
+        - type: object
+          properties:
+            excerpt: { type: [string, "null"] }
+            content: { type: [string, "null"], description: Markdown. }
+            seo_title: { type: [string, "null"] }
+            seo_description: { type: [string, "null"] }
+            seo_keywords: { type: [array, "null"], items: { type: string } }
+            featured_image_url: { type: [string, "null"] }
+            featured_image_alt: { type: [string, "null"] }
+            faqs: { type: [array, "null"], items: { type: object } }
+            key_takeaways: { type: [array, "null"], items: { type: string } }
+            howto_steps: { type: [object, array, "null"] }
+            comparison: { type: [object, "null"] }
+            canonical_url: { type: [string, "null"] }
+            noindex: { type: [boolean, "null"] }
+            og_title: { type: [string, "null"] }
+            og_description: { type: [string, "null"] }
+            og_image_url: { type: [string, "null"] }
+            og_image_alt: { type: [string, "null"] }
+            category_id: { type: [string, "null"], format: uuid }
+            author_id: { type: [string, "null"], format: uuid }
 
     ArticleLifecycleState:
       type: object
@@ -11452,6 +12095,7 @@ components:
         status: { $ref: "#/components/schemas/ArticleStatus" }
         published_at: { type: [string, "null"], format: date-time }
         scheduled_publish_at: { type: [string, "null"], format: date-time }
+        scheduled_unpublish_at: { type: [string, "null"], format: date-time }
         url:
           type: [string, "null"]
           format: uri
@@ -11471,13 +12115,17 @@ components:
           type: [string, "null"]
           maxLength: 2000
           description: Shown on the category's page and used as its meta description.
+        parent_id:
+          type: [string, "null"]
+          format: uuid
+          description: The parent category, or null at the top level. For a publishable key, null also when the parent is archived.
         is_active:
           type: boolean
           description: false = archived. Kept and still on its articles, but hidden on the public blog, from publishable keys and from the AI pipeline.
         article_count:
           type: integer
           readOnly: true
-          description: How many articles carry this category. Counted server side.
+          description: How many articles are filed under this category (as their primary category or one of several). Counted server side.
 
     Tag:
       type: object
@@ -11520,6 +12168,13 @@ components:
           type: [string, "null"]
           maxLength: 2000
           description: An empty string clears it, the same as null.
+        parent_id:
+          type: [string, "null"]
+          format: uuid
+          description: |
+            The parent category, on the same Site; null for the top level. Categories nest at most
+            5 levels, and a category cannot be inside itself: either is `422` on `parent_id`. A
+            parent's page lists its children's articles too.
         is_active:
           type: boolean
           description: false archives the term (hidden on the public blog and from the AI; articles keep it). true restores it.
@@ -11537,6 +12192,13 @@ components:
           type: [string, "null"]
           maxLength: 2000
           description: An empty string clears it, the same as null.
+        parent_id:
+          type: [string, "null"]
+          format: uuid
+          description: |
+            The parent category, on the same Site; null for the top level. Categories nest at most
+            5 levels, and a category cannot be inside itself: either is `422` on `parent_id`. A
+            parent's page lists its children's articles too.
         is_active:
           type: boolean
           description: false archives the term (hidden on the public blog and from the AI; articles keep it). true restores it.

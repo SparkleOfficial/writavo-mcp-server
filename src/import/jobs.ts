@@ -33,6 +33,8 @@ export interface ImportJobInfo {
   status: "awaiting_upload" | "ready";
   /** Size of the stored document in bytes; 0 while awaiting upload. */
   bytes: number;
+  /** A WordPress export being converted on the server (or why converting it failed). */
+  conversion?: { state: "pulling" | "converting" | "failed"; posts: number; pages: number; converted: number; error: string | null };
   created_at: string;
   updated_at: string;
 }
@@ -77,10 +79,13 @@ export interface ImportJobStore {
    */
   addPart?(importId: string, part: unknown): Promise<PartOutcome>;
   addFromUrl?(importId: string, url: string): Promise<PartOutcome>;
+  /** A live WordPress site read over its REST API on the server (read only), then converted. */
+  addFromWordPress?(importId: string, site: { url: string; username?: string; applicationPassword?: string }): Promise<PartOutcome>;
   runStored?(importId: string, run: StoredRun): Promise<StoredRunResult>;
 }
 
-export type PartOutcome = { ok: true; bytes: number; articles: number | null } | { ok: false; error: string };
+/** converting: a WordPress export was received and is being converted on the server; the dry run waits for it. */
+export type PartOutcome = { ok: true; bytes: number; articles: number | null; converting?: boolean } | { ok: false; error: string };
 
 /** One foreground call's worth of an import, run where the document is. */
 export interface StoredRun {
@@ -223,6 +228,12 @@ export function mergeImportDocuments(stored: unknown, part: unknown): Json | str
     if (daily !== undefined) engagement.daily = daily;
     if (reactions !== undefined) engagement.reactions = reactions;
     merged.engagement = engagement;
+  }
+  // A second converted export: its summary replaces the first's, its per-article notes join them.
+  if (isObject(part.conversion)) {
+    const before = isObject(merged.conversion) && isObject((merged.conversion as Json).items) ? ((merged.conversion as Json).items as Json) : {};
+    const after = isObject(part.conversion.items) ? (part.conversion.items as Json) : {};
+    merged.conversion = { ...part.conversion, items: { ...before, ...after } };
   }
   for (const field of Object.keys(part)) if (!(field in merged)) merged[field] = part[field];
   return merged;

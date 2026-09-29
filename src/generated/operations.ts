@@ -304,7 +304,7 @@ export const OPERATIONS: McpOperation[] = [
         "name": "fields",
         "in": "query",
         "required": false,
-        "description": "Comma separated field allow list. Any field of the Article schema may be named. Omit for the default projection, which is: `id, status, title, slug, excerpt, featured_image_url, featured_image_alt, category_id, author_id, format_id, published_at, scheduled_publish_at, created_at, updated_at`.",
+        "description": "Comma separated field allow list. Any field of the Article schema may be named. Omit for the default projection, which is: `id, status, article_kind, title, slug, excerpt, featured_image_url, featured_image_alt, category_id, author_id, format_id, published_at, scheduled_publish_at, created_at, updat...",
         "explode": false,
         "kind": "string",
         "nullable": false
@@ -335,10 +335,24 @@ export const OPERATIONS: McpOperation[] = [
         ]
       },
       {
+        "name": "article_kind",
+        "in": "query",
+        "required": false,
+        "description": "`page` lists the pages (About, Contact); `article` the posts (news stories included); `news` only news stories.",
+        "explode": false,
+        "kind": "string",
+        "nullable": false,
+        "enum": [
+          "article",
+          "news",
+          "page"
+        ]
+      },
+      {
         "name": "category_id",
         "in": "query",
         "required": false,
-        "description": "",
+        "description": "Articles filed under this category, as their primary category or one of several.",
         "explode": false,
         "kind": "string",
         "nullable": false,
@@ -456,6 +470,19 @@ export const OPERATIONS: McpOperation[] = [
     "ifMatch": false,
     "params": [
       {
+        "name": "article_kind",
+        "in": "body",
+        "required": false,
+        "description": "`page` makes it a page (About, Contact) rather than a post. Defaults to `article` on create. `news` is set only by a news recipe.",
+        "explode": false,
+        "kind": "string",
+        "nullable": false,
+        "enum": [
+          "article",
+          "page"
+        ]
+      },
+      {
         "name": "title",
         "in": "body",
         "required": false,
@@ -486,7 +513,7 @@ export const OPERATIONS: McpOperation[] = [
         "name": "content",
         "in": "body",
         "required": false,
-        "description": "Markdown.",
+        "description": "Markdown. Embed a YouTube, Vimeo or X post with a line of its own, `::embed{url=\"https://...\"}`.",
         "explode": false,
         "kind": "string",
         "nullable": true
@@ -598,11 +625,21 @@ export const OPERATIONS: McpOperation[] = [
         "name": "category_id",
         "in": "body",
         "required": false,
-        "description": "",
+        "description": "The PRIMARY category. Sent alone it files the article under that category too; an article that was in only its old primary category is moved, one in several keeps them.",
         "explode": false,
         "kind": "string",
         "nullable": true,
         "format": "uuid"
+      },
+      {
+        "name": "category_ids",
+        "in": "body",
+        "required": false,
+        "description": "Every category the article is filed under: a full replacement, not a merge (send `[]` to clear). With `category_id` too, the primary is put first if missing; without it the current primary stays when listed, otherwise the first becomes primary.",
+        "explode": false,
+        "kind": "array",
+        "nullable": false,
+        "itemKind": "string"
       },
       {
         "name": "author_id",
@@ -653,6 +690,62 @@ export const OPERATIONS: McpOperation[] = [
         "kind": "string",
         "nullable": true,
         "format": "date-time"
+      },
+      {
+        "name": "canonical_url",
+        "in": "body",
+        "required": false,
+        "description": "The canonical URL override, an absolute http(s) URL. Set it when this article's primary copy lives at another address (a syndicated post). Blank or `null` means the article's own URL. An article whose canonical points anywhere else is left out of your sitemap.",
+        "explode": false,
+        "kind": "string",
+        "nullable": true,
+        "format": "uri"
+      },
+      {
+        "name": "noindex",
+        "in": "body",
+        "required": false,
+        "description": "`true` asks search engines not to index the page (`robots: noindex`) and leaves it out of your sitemap. The page stays reachable, listed on your blog and in your RSS feed.",
+        "explode": false,
+        "kind": "boolean",
+        "nullable": false
+      },
+      {
+        "name": "og_title",
+        "in": "body",
+        "required": false,
+        "description": "The social-share title (`og:title`). Null means `seo_title`, then `title`.",
+        "explode": false,
+        "kind": "string",
+        "nullable": true
+      },
+      {
+        "name": "og_description",
+        "in": "body",
+        "required": false,
+        "description": "The social-share description. Null means `seo_description`, then `excerpt`.",
+        "explode": false,
+        "kind": "string",
+        "nullable": true
+      },
+      {
+        "name": "og_image_url",
+        "in": "body",
+        "required": false,
+        "description": "The social-share image, an absolute http(s) URL. Null means `featured_image_url`.",
+        "explode": false,
+        "kind": "string",
+        "nullable": true,
+        "format": "uri"
+      },
+      {
+        "name": "og_image_alt",
+        "in": "body",
+        "required": false,
+        "description": "Alt text for `og_image_url`. Null means `featured_image_alt`, then the title.",
+        "explode": false,
+        "kind": "string",
+        "nullable": true
       }
     ],
     "approval": null,
@@ -760,6 +853,19 @@ export const OPERATIONS: McpOperation[] = [
         "format": "uuid"
       },
       {
+        "name": "article_kind",
+        "in": "body",
+        "required": false,
+        "description": "`page` makes it a page (About, Contact) rather than a post. Defaults to `article` on create. `news` is set only by a news recipe.",
+        "explode": false,
+        "kind": "string",
+        "nullable": false,
+        "enum": [
+          "article",
+          "page"
+        ]
+      },
+      {
         "name": "title",
         "in": "body",
         "required": false,
@@ -790,7 +896,7 @@ export const OPERATIONS: McpOperation[] = [
         "name": "content",
         "in": "body",
         "required": false,
-        "description": "Markdown.",
+        "description": "Markdown. Embed a YouTube, Vimeo or X post with a line of its own, `::embed{url=\"https://...\"}`.",
         "explode": false,
         "kind": "string",
         "nullable": true
@@ -902,11 +1008,21 @@ export const OPERATIONS: McpOperation[] = [
         "name": "category_id",
         "in": "body",
         "required": false,
-        "description": "",
+        "description": "The PRIMARY category. Sent alone it files the article under that category too; an article that was in only its old primary category is moved, one in several keeps them.",
         "explode": false,
         "kind": "string",
         "nullable": true,
         "format": "uuid"
+      },
+      {
+        "name": "category_ids",
+        "in": "body",
+        "required": false,
+        "description": "Every category the article is filed under: a full replacement, not a merge (send `[]` to clear). With `category_id` too, the primary is put first if missing; without it the current primary stays when listed, otherwise the first becomes primary.",
+        "explode": false,
+        "kind": "array",
+        "nullable": false,
+        "itemKind": "string"
       },
       {
         "name": "author_id",
@@ -957,6 +1073,62 @@ export const OPERATIONS: McpOperation[] = [
         "kind": "string",
         "nullable": true,
         "format": "date-time"
+      },
+      {
+        "name": "canonical_url",
+        "in": "body",
+        "required": false,
+        "description": "The canonical URL override, an absolute http(s) URL. Set it when this article's primary copy lives at another address (a syndicated post). Blank or `null` means the article's own URL. An article whose canonical points anywhere else is left out of your sitemap.",
+        "explode": false,
+        "kind": "string",
+        "nullable": true,
+        "format": "uri"
+      },
+      {
+        "name": "noindex",
+        "in": "body",
+        "required": false,
+        "description": "`true` asks search engines not to index the page (`robots: noindex`) and leaves it out of your sitemap. The page stays reachable, listed on your blog and in your RSS feed.",
+        "explode": false,
+        "kind": "boolean",
+        "nullable": false
+      },
+      {
+        "name": "og_title",
+        "in": "body",
+        "required": false,
+        "description": "The social-share title (`og:title`). Null means `seo_title`, then `title`.",
+        "explode": false,
+        "kind": "string",
+        "nullable": true
+      },
+      {
+        "name": "og_description",
+        "in": "body",
+        "required": false,
+        "description": "The social-share description. Null means `seo_description`, then `excerpt`.",
+        "explode": false,
+        "kind": "string",
+        "nullable": true
+      },
+      {
+        "name": "og_image_url",
+        "in": "body",
+        "required": false,
+        "description": "The social-share image, an absolute http(s) URL. Null means `featured_image_url`.",
+        "explode": false,
+        "kind": "string",
+        "nullable": true,
+        "format": "uri"
+      },
+      {
+        "name": "og_image_alt",
+        "in": "body",
+        "required": false,
+        "description": "Alt text for `og_image_url`. Null means `featured_image_alt`, then the title.",
+        "explode": false,
+        "kind": "string",
+        "nullable": true
       }
     ],
     "approval": null,
@@ -1359,6 +1531,16 @@ export const OPERATIONS: McpOperation[] = [
         "nullable": true
       },
       {
+        "name": "parent_id",
+        "in": "body",
+        "required": false,
+        "description": "The parent category, on the same Site; null for the top level. Categories nest at most 5 levels, and a category cannot be inside itself: either is `422` on `parent_id`. A parent's page lists its children's articles too.",
+        "explode": false,
+        "kind": "string",
+        "nullable": true,
+        "format": "uuid"
+      },
+      {
         "name": "is_active",
         "in": "body",
         "required": false,
@@ -1489,6 +1671,16 @@ export const OPERATIONS: McpOperation[] = [
         "explode": false,
         "kind": "string",
         "nullable": true
+      },
+      {
+        "name": "parent_id",
+        "in": "body",
+        "required": false,
+        "description": "The parent category, on the same Site; null for the top level. Categories nest at most 5 levels, and a category cannot be inside itself: either is `422` on `parent_id`. A parent's page lists its children's articles too.",
+        "explode": false,
+        "kind": "string",
+        "nullable": true,
+        "format": "uuid"
       },
       {
         "name": "is_active",
@@ -2848,6 +3040,13 @@ export const REFUSALS: McpRefusal[] = [
     "reason": "Use import_content instead: it is the same import (the stored document, the dry run, the background run, its status and cancel) with the confirmation step built in, so it is not offered twice."
   },
   {
+    "operationId": "createImportUpload",
+    "method": "POST",
+    "path": "/imports/uploads",
+    "tag": "Imports",
+    "reason": "Use import_content instead: it is the same import (the stored document, the dry run, the background run, its status and cancel) with the confirmation step built in, so it is not offered twice."
+  },
+  {
     "operationId": "getImport",
     "method": "GET",
     "path": "/imports/{import_id}",
@@ -3089,6 +3288,457 @@ export const ACTIONS: McpOperation[] = [
     "approvalWhen": null,
     "annotations": {
       "title": "Define an article format",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "tool": "list_article_revisions",
+    "operationId": "listArticleRevisions",
+    "method": "GET",
+    "path": "/articles/{id}/revisions",
+    "tag": "Articles",
+    "surface": "action",
+    "area": "articles",
+    "summary": "List an article's revisions",
+    "brief": "Every saved version of the article, newest first: each change a reader would see, from the dashboard, this API, the AI pipeline or an import, with who made it (`actor_user_id`, and `actor_api_key_id` for a key) and from where (`source`).",
+    "description": "List an article's revisions. Every saved version of the article, newest first: each change a reader would see, from the dashboard, this API, the AI pipeline or an import, with who made it (`actor_user_id`, and `actor_api_key_id` for a key) and from where (`source`). The first edit of an article made before revisions existed keeps its original as `baseline`. Autosaves are kept 30 days, pipeline revisions 180; an article keeps at most 300. Read only. Nothing is changed. Needs a secret key (wv_sk_) carrying the articles:read scope.",
+    "scope": "articles:read",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": false,
+    "spendsCredits": false,
+    "spendsMoney": false,
+    "consequence": null,
+    "makesPublic": false,
+    "readOnly": true,
+    "confirm": false,
+    "confirmReason": null,
+    "idempotency": false,
+    "ifMatch": false,
+    "params": [
+      {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "description": "",
+        "explode": false,
+        "kind": "string",
+        "nullable": false,
+        "format": "uuid"
+      },
+      {
+        "name": "cursor",
+        "in": "query",
+        "required": false,
+        "description": "The opaque cursor from `data.next_cursor` on the previous page. Do not parse it or construct one; its encoding is not part of this contract and will change.",
+        "explode": false,
+        "kind": "string",
+        "nullable": false
+      },
+      {
+        "name": "limit",
+        "in": "query",
+        "required": false,
+        "description": "Page size. Values above the maximum are clamped rather than rejected, so a client asking for a thousand rows gets a hundred and a `next_cursor`.",
+        "explode": false,
+        "kind": "integer",
+        "nullable": false
+      }
+    ],
+    "approval": null,
+    "approvalMode": null,
+    "approvalKind": null,
+    "approvalWhen": null,
+    "annotations": {
+      "title": "List an article's revisions",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "tool": "get_article_revision",
+    "operationId": "getArticleRevision",
+    "method": "GET",
+    "path": "/articles/{id}/revisions/{revision_id}",
+    "tag": "Articles",
+    "surface": "action",
+    "area": "articles",
+    "summary": "Read one revision",
+    "brief": "The version in full, every field it recorded, to compare with the article or another revision.",
+    "description": "Read one revision. The version in full, every field it recorded, to compare with the article or another revision. Read only. Nothing is changed. Needs a secret key (wv_sk_) carrying the articles:read scope.",
+    "scope": "articles:read",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": false,
+    "spendsCredits": false,
+    "spendsMoney": false,
+    "consequence": null,
+    "makesPublic": false,
+    "readOnly": true,
+    "confirm": false,
+    "confirmReason": null,
+    "idempotency": false,
+    "ifMatch": false,
+    "params": [
+      {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "description": "",
+        "explode": false,
+        "kind": "string",
+        "nullable": false,
+        "format": "uuid"
+      },
+      {
+        "name": "revision_id",
+        "in": "path",
+        "required": true,
+        "description": "",
+        "explode": false,
+        "kind": "string",
+        "nullable": false,
+        "format": "uuid"
+      }
+    ],
+    "approval": null,
+    "approvalMode": null,
+    "approvalKind": null,
+    "approvalWhen": null,
+    "annotations": {
+      "title": "Read one revision",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "tool": "restore_article_revision",
+    "operationId": "restoreArticleRevision",
+    "method": "POST",
+    "path": "/articles/{id}/revisions/{revision_id}/restore",
+    "tag": "Articles",
+    "surface": "action",
+    "area": "articles",
+    "summary": "Put a revision back",
+    "brief": "Copies the revision's title, body, excerpt, images, SEO fields, structured blocks, category and author back onto the article, as a new change (itself a revision, `source: restore`, so it can be undone the same way).",
+    "description": "Put a revision back. Copies the revision's title, body, excerpt, images, SEO fields, structured blocks, category and author back onto the article, as a new change (itself a revision, `source: restore`, so it can be undone the same way). The status never changes: restoring a published article changes the live page, and its cache is cleared. Emits `article.updated`. Changes content on the customer's Site. Nothing becomes public: publishing is always a separate call. Needs a secret key (wv_sk_) carrying the articles:write scope.",
+    "scope": "articles:write",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": false,
+    "spendsCredits": false,
+    "spendsMoney": false,
+    "consequence": null,
+    "makesPublic": false,
+    "readOnly": false,
+    "confirm": false,
+    "confirmReason": null,
+    "idempotency": false,
+    "ifMatch": false,
+    "params": [
+      {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "description": "",
+        "explode": false,
+        "kind": "string",
+        "nullable": false,
+        "format": "uuid"
+      },
+      {
+        "name": "revision_id",
+        "in": "path",
+        "required": true,
+        "description": "",
+        "explode": false,
+        "kind": "string",
+        "nullable": false,
+        "format": "uuid"
+      }
+    ],
+    "approval": null,
+    "approvalMode": null,
+    "approvalKind": null,
+    "approvalWhen": null,
+    "annotations": {
+      "title": "Put a revision back",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "tool": "list_article_preview_links",
+    "operationId": "listArticlePreviewLinks",
+    "method": "GET",
+    "path": "/articles/{id}/preview-links",
+    "tag": "Articles",
+    "surface": "action",
+    "area": "articles",
+    "summary": "List an article's preview links",
+    "brief": "Every preview link made for the article, newest first, with whether it still works. Never the token.",
+    "description": "List an article's preview links. Every preview link made for the article, newest first, with whether it still works. Never the token. Read only. Nothing is changed. Needs a secret key (wv_sk_) carrying the articles:read scope.",
+    "scope": "articles:read",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": false,
+    "spendsCredits": false,
+    "spendsMoney": false,
+    "consequence": null,
+    "makesPublic": false,
+    "readOnly": true,
+    "confirm": false,
+    "confirmReason": null,
+    "idempotency": false,
+    "ifMatch": false,
+    "params": [
+      {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "description": "",
+        "explode": false,
+        "kind": "string",
+        "nullable": false,
+        "format": "uuid"
+      }
+    ],
+    "approval": null,
+    "approvalMode": null,
+    "approvalKind": null,
+    "approvalWhen": null,
+    "annotations": {
+      "title": "List an article's preview links",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "tool": "create_article_preview_link",
+    "operationId": "createArticlePreviewLink",
+    "method": "POST",
+    "path": "/articles/{id}/preview-links",
+    "tag": "Articles",
+    "surface": "action",
+    "area": "articles",
+    "summary": "Share a preview of an unpublished article",
+    "brief": "A link that shows the article as your blog will render it, to anyone who has the link, before it is published. The `token` and `url` come back ONCE, in this response; Writavo keeps only a hash.",
+    "description": "Share a preview of an unpublished article. A link that shows the article as your blog will render it, to anyone who has the link, before it is published. The `token` and `url` come back ONCE, in this response; Writavo keeps only a hash. The link works on your Site's own blog only, expires (7 days by default, at most 30) and can be revoked. It is never indexed or cached. At most 20 live links per article and 200 per Site (`409 CONFLICT` past either). Changes content on the customer's Site. Nothing becomes public: publishing is always a separate call. Needs a secret key (wv_sk_) carrying the articles:write scope.",
+    "scope": "articles:write",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": false,
+    "spendsCredits": false,
+    "spendsMoney": false,
+    "consequence": null,
+    "makesPublic": false,
+    "readOnly": false,
+    "confirm": false,
+    "confirmReason": null,
+    "idempotency": false,
+    "ifMatch": false,
+    "params": [
+      {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "description": "",
+        "explode": false,
+        "kind": "string",
+        "nullable": false,
+        "format": "uuid"
+      },
+      {
+        "name": "expires_in_days",
+        "in": "body",
+        "required": false,
+        "description": "",
+        "explode": false,
+        "kind": "integer",
+        "nullable": false
+      }
+    ],
+    "approval": null,
+    "approvalMode": null,
+    "approvalKind": null,
+    "approvalWhen": null,
+    "annotations": {
+      "title": "Share a preview of an unpublished article",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "tool": "revoke_article_preview_link",
+    "operationId": "revokeArticlePreviewLink",
+    "method": "DELETE",
+    "path": "/articles/{id}/preview-links/{link_id}",
+    "tag": "Articles",
+    "surface": "action",
+    "area": "articles",
+    "summary": "Revoke a preview link",
+    "brief": "The link stops working at once. Revoking twice is the same as once.",
+    "description": "Revoke a preview link. The link stops working at once. Revoking twice is the same as once. PERMANENT: Stops a shared preview link working at once; whoever had it can no longer see the draft. Ask the user before calling this, and pass confirm: true only once they have agreed. Needs a secret key (wv_sk_) carrying the articles:write scope.",
+    "scope": "articles:write",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": false,
+    "spendsCredits": false,
+    "spendsMoney": false,
+    "consequence": "Stops a shared preview link working at once; whoever had it can no longer see the draft.",
+    "makesPublic": false,
+    "readOnly": false,
+    "confirm": true,
+    "confirmReason": "destructive",
+    "idempotency": false,
+    "ifMatch": false,
+    "params": [
+      {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "description": "",
+        "explode": false,
+        "kind": "string",
+        "nullable": false,
+        "format": "uuid"
+      },
+      {
+        "name": "link_id",
+        "in": "path",
+        "required": true,
+        "description": "",
+        "explode": false,
+        "kind": "string",
+        "nullable": false,
+        "format": "uuid"
+      }
+    ],
+    "approval": null,
+    "approvalMode": null,
+    "approvalKind": null,
+    "approvalWhen": null,
+    "annotations": {
+      "title": "Revoke a preview link",
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "tool": "schedule_article_unpublish",
+    "operationId": "scheduleArticleUnpublish",
+    "method": "POST",
+    "path": "/articles/{id}/schedule-unpublish",
+    "tag": "Articles",
+    "surface": "action",
+    "area": "articles",
+    "summary": "Take a live article down at a set time",
+    "brief": "The article stays live until `scheduled_unpublish_at`, then goes back to draft on its own, with the same audit, cache purge and `article.unpublished` event as an unpublish. Only a published article; the time must be in the future (`422`).",
+    "description": "Take a live article down at a set time. The article stays live until `scheduled_unpublish_at`, then goes back to draft on its own, with the same audit, cache purge and `article.unpublished` event as an unpublish. Only a published article; the time must be in the future (`422`). Sending it again moves the time. Like an unpublish, an AI agent needs a person's approval for it. Changes content on the customer's Site. Nothing becomes public: publishing is always a separate call. CONSEQUENCE: Schedules the article to come off the live blog at the given time. Reversible by cancelling it, or by publishing again after. Ask the user before calling this, and pass confirm: true only once they have agreed. Needs a secret key (wv_sk_) carrying the articles:write scope. APPROVAL: when the organisation requires it, the first call returns a link for a person to approve instead of acting; after they approve, call run_writavo_action again with the same operation_id and arguments plus approval_id.",
+    "scope": "articles:write",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": false,
+    "spendsCredits": false,
+    "spendsMoney": false,
+    "consequence": "Schedules the article to come off the live blog at the given time. Reversible by cancelling it, or by publishing again after.",
+    "makesPublic": false,
+    "readOnly": false,
+    "confirm": true,
+    "confirmReason": "approval",
+    "idempotency": false,
+    "ifMatch": false,
+    "params": [
+      {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "description": "",
+        "explode": false,
+        "kind": "string",
+        "nullable": false,
+        "format": "uuid"
+      },
+      {
+        "name": "scheduled_unpublish_at",
+        "in": "body",
+        "required": true,
+        "description": "",
+        "explode": false,
+        "kind": "string",
+        "nullable": false,
+        "format": "date-time"
+      }
+    ],
+    "approval": "article.unpublish",
+    "approvalMode": "switchable",
+    "approvalKind": "destructive",
+    "approvalWhen": null,
+    "annotations": {
+      "title": "Take a live article down at a set time",
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "tool": "cancel_article_unpublish",
+    "operationId": "cancelArticleUnpublish",
+    "method": "POST",
+    "path": "/articles/{id}/cancel-unpublish",
+    "tag": "Articles",
+    "surface": "action",
+    "area": "articles",
+    "summary": "Keep a live article up",
+    "brief": "Cancels a scheduled unpublish. Nothing happens (and nothing is emitted) when none is set.",
+    "description": "Keep a live article up. Cancels a scheduled unpublish. Nothing happens (and nothing is emitted) when none is set. Changes content on the customer's Site. Nothing becomes public: publishing is always a separate call. Needs a secret key (wv_sk_) carrying the articles:write scope.",
+    "scope": "articles:write",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": false,
+    "spendsCredits": false,
+    "spendsMoney": false,
+    "consequence": null,
+    "makesPublic": false,
+    "readOnly": false,
+    "confirm": false,
+    "confirmReason": null,
+    "idempotency": false,
+    "ifMatch": false,
+    "params": [
+      {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "description": "",
+        "explode": false,
+        "kind": "string",
+        "nullable": false,
+        "format": "uuid"
+      }
+    ],
+    "approval": null,
+    "approvalMode": null,
+    "approvalKind": null,
+    "approvalWhen": null,
+    "annotations": {
+      "title": "Keep a live article up",
       "readOnlyHint": false,
       "destructiveHint": false,
       "idempotentHint": false,

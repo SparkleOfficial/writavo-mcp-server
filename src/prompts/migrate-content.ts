@@ -64,10 +64,13 @@ ${signIn}
    tags, posts with more than one category, where the images are hosted, embeds or shortcodes, the
    oldest and newest publish dates, and the URL pattern of a post.
 4. Agree the statuses with me. Default: published and public -> "published"; drafts and pending
-   review -> "draft"; scheduled -> "draft", scheduled again after the import with schedule_article;
-   private, password protected or members only -> ask me; trashed, revisions, test posts -> leave
-   out. Tell me everything you leave out and why.
-5. Export, read only, into the export folder.
+   review -> "draft"; scheduled -> "scheduled" with its scheduled_at (it goes live then; one whose
+   time has passed comes in as a draft); private, password protected or members only -> ask me;
+   trashed, revisions, test posts -> leave out. Tell me everything you leave out and why.
+5. Export, read only, into the export folder. FROM WORDPRESS, skip steps 5 and 6: Writavo converts it
+   itself. Ask me for the export file (Tools > Export > All content, an .xml file) and send it as
+   it is with import_content upload: true, or call import_content with wordpress_url (published
+   posts only unless I give a user name and an Application Password). Then go to the dry run.
 6. Map to the Writavo Import Format. Call import_content with no arguments (or read the
    writavo://import-format resource) for the exact format, then map field by field:
    - external_id: the source's own stable id, prefixed with the system, for example "wp:1042". It
@@ -78,19 +81,23 @@ ${signIn}
      today, not the last modified date. content_updated_at is the last content change.
    - content: markdown, words unchanged. Images as ![alt](https://...) so they are copied; relative
      image paths need their absolute https URL (a local image file can be uploaded with upload_media as base64 and its returned URL used).
+     A YouTube or Vimeo video or a post on X becomes a line of its own: ::embed{url="https://..."}.
    - authors (a ref each; is_ai_generated false for real people), categories and tags (slug,
-     name and description; a tag also its group_label), and each post's author, ONE category and
+     name and description; a tag also its group_label; a nested category its parent's slug), and
+     each post's author, its primary category (category), any other categories (categories) and
      its tags.
    - excerpt, seo_title, seo_description, seo_keywords, featured_image, faqs, key_takeaways,
      howto_steps (with its own name and description when it has them) and comparison (with its
      title) wherever the source has them.
+   - The SEO plugin's per-post overrides (Yoast, Rank Math): canonical_url only when it pointed
+     somewhere other than the post itself, noindex when the post was hidden from search, and
+     og_title, og_description and og_image when the social share differed.
    - source, when the old system recorded the page an article was written from: its url, title,
      competitor, the page's text (content, so Writavo can measure originality) and metrics. It
      stays private. Categories and tags switched off at the source: is_active false.
-   Some things have no place in the format: a second category, category parents, author emails,
-   a how-to's time or supplies,
-   canonical URLs, custom fields, comments, embeds and shortcodes, and non-https or non-image
-   files. Do not squeeze them into another field: list them for me per article.
+   Some things have no place in the format: author emails,
+   a how-to's time or supplies, custom fields, comments, embeds other than YouTube, Vimeo and X,
+   shortcodes, and non-https or non-image files. Do not squeeze them into another field: list them for me per article.
 ${dryRun}
 8. Show me the dry run report: how many will be created, updated and published, the problems and
    warnings, the images. Fix problems in the document (never by inventing data) and run the dry
