@@ -1429,7 +1429,7 @@ async function main(): Promise<void> {
     check(
       "the dry run summarises the engagement section, flags a row for no post and a future day, and sends nothing",
       dry.includes("Engagement history: 3 daily rows and 1 visitor reactions for 3 posts") && dry.includes("views 26") &&
-        dry.includes("name a post that is neither in this document nor on the Site") && dry.includes("not a finished day") && site.engagementCalls === 0,
+        dry.includes("name a post that is neither in this document nor on the Site") && dry.includes("is in the future") && site.engagementCalls === 0,
       dry.slice(dry.indexOf("Engagement"), dry.indexOf("Engagement") + 700),
     );
     stub.reset();

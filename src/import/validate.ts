@@ -197,7 +197,7 @@ export function checkEngagement(raw: { daily?: unknown[]; reactions?: unknown[] 
       return;
     }
     const d = parsed.data;
-    if (d.day >= today) return void out.problems.push(`engagement.daily[${i}]: day ${d.day} is not a finished day; today is counted live from the blog and would overwrite it`);
+    if (d.day > today) return void out.problems.push(`engagement.daily[${i}]: day ${d.day} is in the future`);
     if (d.day < "1990-01-01") return void out.problems.push(`engagement.daily[${i}]: day ${d.day} is before 1990`);
     const key = `${d.external_id ?? `slug:${d.slug}`}|${d.day}`;
     if (seenDays.has(key)) return void out.problems.push(`engagement.daily[${i}]: a second row for the same post and day ${d.day}; each day appears once`);

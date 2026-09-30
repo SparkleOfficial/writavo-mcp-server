@@ -8758,6 +8758,11 @@ paths:
         sending another replaces it and `reaction: null` removes it. `visitor_id` is your own stable
         anonymous id for the reader (a cookie value, for example); Writavo stores only a hash of it.
         The response is the article's totals after the write. An unknown or unpublished slug is 404.
+        A recorded view, reaction or share shows in the dashboard and in `GET /seo/engagement` at once.
+
+        This records article views. Visitors and pageviews on the dashboard come from the visitor
+        script instead (Visitors, Setup): one script tag on the pages that show your articles.
+        Until it is added, the dashboard shows them as not measured.
       x-scope: engagement:write
       x-permission: articles.write
       x-entitlement: none
@@ -8807,10 +8812,11 @@ paths:
         article. Sending the same payload twice changes nothing, so a retried or repeated import can
         never double-count.
 
-        **Which days.** Any UTC day from 1990-01-01 up to yesterday, including days that already
-        have live counts: the import replaces them. Today is refused only because Writavo rewrites
-        today's counts from the live events every hour, so an import for today would be overwritten
-        within the hour; import it tomorrow. `set_at` on a reaction may be any past instant.
+        **Which days.** Any UTC day from 1990-01-01 up to today, including days that already have
+        live counts: the import replaces them. Today is for the day you cut over: the import sets
+        the day's counts as they stood on the old system, and views and shares Writavo records
+        after the import add to them. Sending today's row again sets it again, so send it once.
+        `set_at` on a reaction may be any past instant.
 
         **Reactions.** Writavo keeps a per-day reaction TOTAL and, separately, one current reaction
         per reader (which is what the per-type counts are made of). A `daily` row's `reactions` may
@@ -12999,7 +13005,7 @@ components:
         day:
           type: string
           format: date
-          description: The UTC day, from 1990-01-01 to yesterday. Today is refused (the hourly rollup owns it).
+          description: The UTC day, from 1990-01-01 to today. For today, live views and shares recorded after the import add to the imported counts.
         views: {type: integer, minimum: 0, maximum: 10000000, description: That day's views. Replaces the stored value.}
         reactions:
           description: That day's reaction total, or counts per reaction (summed; at most 10,000,000 in all).

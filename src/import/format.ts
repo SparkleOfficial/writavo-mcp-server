@@ -283,7 +283,7 @@ const ONE_POST_KEY = { message: "give exactly one of external_id or slug", path:
 export const EngagementDailySchema = z
   .strictObject({
     ...postKey,
-    day: z.iso.date({ error: "must be a date, YYYY-MM-DD (UTC)" }).describe("The UTC day: any finished day (not today, which is counted live)."),
+    day: z.iso.date({ error: "must be a date, YYYY-MM-DD (UTC)" }).describe("The UTC day, up to today. For today, views and shares counted after the import add to the imported numbers."),
     views: engagementCount.optional(),
     reactions: z
       .union([engagementCount, z.strictObject(Object.fromEntries(ENGAGEMENT_REACTIONS.map((r) => [r, engagementCount.optional()])))])
@@ -303,7 +303,7 @@ export const EngagementReactionSchema = z
   .refine(onePostKey, ONE_POST_KEY);
 
 const ENGAGEMENT_DESCRIPTION =
-  "Optional engagement history (views, reactions, shares per post). Imported after every article; each row SETS the totals for its post and day (replacing whatever that day held), so re-running never double-counts. Any finished day; not today, which is counted live.";
+  "Optional engagement history (views, reactions, shares per post). Imported after every article; each row SETS the totals for its post and day (replacing whatever that day held), so re-running never double-counts. Any day up to today (UTC); for today, views and shares counted after the import add to the imported numbers.";
 
 /** The section as documented (the JSON Schema): every row typed. */
 export const EngagementSchema = z
@@ -698,7 +698,7 @@ Top level:
 Engagement (optional, top level): the old blog's views, reactions and shares, so a migrated blog
 keeps its counts. { daily: [...], reactions: [...] }, every row keyed by external_id (an article
 in this document or already on the Site) or slug:
-- daily: [{ external_id | slug, day (YYYY-MM-DD, UTC; any finished day, not today), views?,
+- daily: [{ external_id | slug, day (YYYY-MM-DD, UTC; any day up to today), views?,
   reactions? (a number, or per type: ${ENGAGEMENT_REACTIONS.join(", ")}), shares? ({ ${SHARE_PLATFORMS.join(", ")} }) }].
   Each row SETS that post's totals for that day, replacing whatever the day held, so re-running
   never double-counts. Writavo keeps a day's reactions as a total; the per-type counts on a post
