@@ -288,6 +288,21 @@ export function wordpressHtmlToMarkdown(input: string, ctx: HtmlContext): Conver
       state.patch(el, image);
       return image;
     },
+    // A link the old CMS marked nofollow, sponsored or ugc keeps that choice. Writavo stores it in
+    // the link's title as `rel:nofollow` (its one rule for whether a link is followed, the docs'
+    // "Dofollow or nofollow"), so a migrated paid or swapped link does not silently become dofollow.
+    a(state, el) {
+      const node = (defaultHandlers.a as (s: State, e: Element) => MdastNodes)(state, el);
+      const rel = el.properties?.rel;
+      const tokens = (Array.isArray(rel) ? rel.map(String) : typeof rel === "string" ? rel.split(/\s+/) : []).map((t) => t.toLowerCase());
+      const choice = tokens.includes("sponsored") ? "sponsored" : tokens.includes("ugc") ? "ugc" : tokens.includes("nofollow") ? "nofollow" : null;
+      if (choice && node && (node as { type?: string }).type === "link") {
+        const link = node as { title?: string | null };
+        const title = (link.title ?? "").replace(/(^|\s)rel:(follow|nofollow|sponsored|ugc)(?=\s|$)/gi, " ").replace(/\s+/g, " ").trim();
+        link.title = title ? `${title} rel:${choice}` : `rel:${choice}`;
+      }
+      return node;
+    },
     "wv-embed"(_state, el) {
       const url = prop(el, "dataUrl");
       return url ? embedNode(url) : undefined;

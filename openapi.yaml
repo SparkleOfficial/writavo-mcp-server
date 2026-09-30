@@ -2,7 +2,7 @@ openapi: 3.1.0
 
 info:
   title: Writavo Content API
-  version: "1.5.0"
+  version: "1.6.0"
   summary: The CMS control plane for a Writavo Site.
   description: |
     The Writavo Content API is the programmable half of the CMS. It lets you create, edit,
@@ -1592,6 +1592,82 @@ paths:
         "409": { $ref: "#/components/responses/Conflict" }
         "422": { $ref: "#/components/responses/ValidationFailed" }
         "428": { $ref: "#/components/responses/ApprovalRequired" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /articles/{id}/link-rel:
+    parameters:
+      - $ref: "#/components/parameters/ArticleId"
+    post:
+      operationId: setArticleLinkRel
+      tags: [Articles]
+      summary: Set one link in an article to dofollow, nofollow or sponsored
+      description: |
+        Say whether one link in an article passes ranking credit. `rel` is `follow` (dofollow),
+        `nofollow`, `sponsored` (a paid or swapped link), `ugc`, or `null` to clear the choice so the
+        Site's rule decides again. Every link in the article to `target_url` is set. Find the link
+        and its exact `target_url` with `listArticleLinks`.
+
+        The rule, which the hosted blog and `content_html` both follow: what is set here wins; else a
+        link to the Site's own pages is followed; else a link to another site takes the Site's
+        `external_link_rel` (`PATCH /site/settings`).
+
+        The choice is stored in the link's Markdown title, as `[text](https://example.com "rel:nofollow")`,
+        and is taken out again when the page is rendered. So it is an edit to the article: it makes a
+        revision, and on a published article it is live at once. Writing that title yourself with
+        `updateArticle` does the same thing. `changed` is how many links were rewritten; 0 means the
+        article already said so.
+      x-scope: articles:write
+      x-permission: articles.write
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-cross-tenant: 404
+      x-mcp-surface: action
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [target_url, rel]
+              additionalProperties: false
+              properties:
+                target_url:
+                  type: string
+                  maxLength: 2000
+                  description: The link's address, exactly as `listArticleLinks` returns it (a full URL or a path).
+                rel:
+                  type: [string, "null"]
+                  enum: [follow, nofollow, sponsored, ugc, null]
+                  description: "`null` clears the choice."
+      responses:
+        "200":
+          description: What was changed.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [article_id, target_url, rel, changed]
+                        properties:
+                          article_id: {type: string, format: uuid}
+                          target_url: {type: string}
+                          rel: {type: [string, "null"]}
+                          changed: {type: integer, description: How many links in the article were rewritten.}
+                          updated_at: {type: string, format: date-time}
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "503": { $ref: "#/components/responses/Maintenance" }
         "500": { $ref: "#/components/responses/InternalError" }
@@ -6181,7 +6257,8 @@ paths:
       tags: [Site settings]
       summary: Change the Site settings
       description: |
-        A partial update of the Site's name, primary domain, locale, niche or timezone. Send at least one
+        A partial update of the Site's name, primary domain, locale, niche, timezone, or whether links
+        to other sites are dofollow or nofollow by default (`external_link_rel`). Send at least one
         field; omitted fields are left alone, and `null` clears `primary_domain` or `niche`.
 
         `primary_domain` is a bare hostname such as `example.com` (a scheme, path or port is stripped,
@@ -8112,7 +8189,8 @@ paths:
         Only published articles count, as sources and as targets. `inbound` and `outbound` count
         distinct linking articles, never self-links. Lists hold at most 200 rows (`list_limit`); the
         summary counts are exact. Run `rescanInternalLinks` first if `summary.last_checked_at` is null
-        or old.
+        or old. For the links themselves, one row each with its state and whether it is followed or
+        nofollow, use `listArticleLinks`.
       x-scope: seo:read
       x-permission: seo.view
       x-entitlement: none
@@ -9811,6 +9889,530 @@ paths:
   # ==========================================================================
   # OUTREACH, READ ONLY (MCP-3)
   # ==========================================================================
+  /seo/link-exchanges:
+    get:
+      operationId: listLinkExchanges
+      tags: [SEO]
+      summary: List link exchanges
+      description: |
+        Every link swap this Site has recorded with another site, each with both sides checked and one
+        verdict in `health`. Neither side is typed in: `our_link` is read from the Site's published
+        articles, and `their_link` from the partner's page (when the exchange names one) or from the
+        backlink profile (when it does not).
+
+        `health` is one of `balanced` (both links are live and theirs is followed),
+        `their_link_nofollow`, `their_link_removed` (their link was seen and is gone while yours is
+        still up), `waiting_on_them` (yours is live, theirs was never seen), `waiting_on_us`,
+        `not_started`, `could_not_check` (their page could not be read, which proves nothing) and
+        `closed`. The first three after `balanced` set `needs_attention`.
+
+        `our_link.followed` says whether your side of the swap passes ranking credit: `true` when at
+        least one of your links to the partner is followed. `external_link_default` is the Site's
+        setting for links to other sites; one link is set on its own with `setArticleLinkRel`. Under
+        Google's rules a swapped or paid link should be `sponsored` or `nofollow`.
+      x-scope: seo:read
+      x-permission: seo.view
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: false
+      x-mcp-surface: action
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema: {type: string, enum: [proposed, agreed, declined, ended]}
+        - name: needs_attention
+          in: query
+          required: false
+          description: "`true` for only the exchanges where you gave a link and are not getting one back."
+          schema: {type: boolean}
+      responses:
+        "200":
+          description: The exchanges, the ones needing attention first.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/LinkExchangeList" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+    post:
+      operationId: createLinkExchange
+      tags: [SEO]
+      summary: Record a link exchange
+      description: |
+        Record a link swap (a backlink exchange) with another site. Say who it is with: `partner_domain`, or just
+        `their_page_url` (the page of theirs that links, or will link, to you), from which the domain
+        is taken. Everything else is optional narrowing. Free.
+
+        Nothing about either link is entered. If `their_page_url` is given the page is read at once,
+        and the answer already says whether their link is there and whether it is followed. Your side
+        is found in your published articles: add the link to an article with `updateArticle` and the
+        exchange shows it within a few minutes.
+
+        Use `inspectLinkProspect` first to look at a site before agreeing to anything.
+      x-scope: seo:write
+      x-permission: seo.manage
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-mcp-surface: action
+      parameters:
+        - { $ref: "#/components/parameters/IdempotencyKeyRequired" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LinkExchangeCreate" }
+      responses:
+        "201":
+          description: The new exchange, with both sides as they stand now.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/LinkExchange" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /seo/link-exchanges/check:
+    post:
+      operationId: checkLinkExchanges
+      tags: [SEO]
+      summary: Re-check every link exchange
+      description: |
+        Read the page of every open exchange that names one, and record whether the partner's link is
+        still there and still followed. Free. Returns `202`; `GET /seo/link-exchanges` shows the result.
+        This also runs by itself every week. Use `checkLinkExchange` to check one exchange and get the
+        answer in the same request.
+      x-scope: seo:write
+      x-permission: seo.manage
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-mcp-surface: action
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EmptyBody" }
+      responses:
+        "202":
+          description: The check is queued.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Queued" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /seo/link-exchanges/{id}:
+    parameters:
+      - $ref: "#/components/parameters/LinkExchangeId"
+    get:
+      operationId: getLinkExchange
+      tags: [SEO]
+      summary: Read a link exchange
+      description: |
+        One exchange with both sides as they stand: which of your published articles link to the
+        partner, and what the last look at their page found. `history` is the record of the deal,
+        newest first: when it was recorded, each decision, and each change in what their page showed
+        (the day their link was first seen, the day it went nofollow, the day it was removed).
+      x-scope: seo:read
+      x-permission: seo.view
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: false
+      x-cross-tenant: 404
+      x-mcp-surface: action
+      responses:
+        "200":
+          description: The exchange.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/LinkExchange" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+    patch:
+      operationId: updateLinkExchange
+      tags: [SEO]
+      summary: Change a link exchange
+      description: |
+        Record a decision (`agreed`, `declined`, `ended`, or back to `proposed`), name or change the
+        pages, or add a note. Changing `their_page_url` forgets the last check and reads the new page
+        at once.
+      x-scope: seo:write
+      x-permission: seo.manage
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-cross-tenant: 404
+      x-mcp-surface: action
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LinkExchangeUpdate" }
+      responses:
+        "200":
+          description: The updated exchange.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/LinkExchange" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+    delete:
+      operationId: removeLinkExchange
+      tags: [SEO]
+      summary: Remove a link exchange
+      description: |
+        Stop tracking an exchange. No link is changed anywhere: your article keeps its link until you
+        edit the article.
+      x-scope: seo:write
+      x-permission: seo.manage
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-agent-consequence: Stops tracking the exchange, so a partner removing their link is no longer noticed. No article or link is changed.
+      x-cross-tenant: 404
+      x-mcp-surface: action
+      responses:
+        "204": {description: Removed. No body.}
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /seo/link-exchanges/{id}/check:
+    parameters:
+      - $ref: "#/components/parameters/LinkExchangeId"
+    post:
+      operationId: checkLinkExchange
+      tags: [SEO]
+      summary: Check one link exchange now
+      description: |
+        Read the partner's page now and answer in the same request: is the link to you there, is it
+        followed, what does it say. Free. `page_checked` is `false` when the exchange names no page;
+        its `their_link` then comes from the backlink profile, and naming `their_page_url` with
+        `updateLinkExchange` is what makes a direct check possible.
+      x-scope: seo:write
+      x-permission: seo.manage
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-cross-tenant: 404
+      x-mcp-surface: action
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EmptyBody" }
+      responses:
+        "200":
+          description: The exchange after the check.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/LinkExchangeChecked" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /seo/link-prospects/inspect:
+    post:
+      operationId: inspectLinkProspect
+      tags: [SEO]
+      summary: Look at a site offering a link
+      description: |
+        Somebody has offered a backlink, a guest post or a link swap. Give the page they named and get what can
+        be said about it for free: whether the page loads, its title, whether it is hidden from search
+        engines (`noindex`), how many other sites it links to (a very high number is what a link list
+        looks like), whether it already links to you and whether that link is followed, whether your
+        articles already link to that site, and whether the site is on your disavow list. Stores
+        nothing.
+
+        It does not measure how strong the site is: authority, spam score and traffic need a paid link
+        index, and are named in `not_measured` rather than guessed.
+      x-scope: seo:write
+      x-permission: seo.manage
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-mcp-surface: action
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LinkProspectInspect" }
+      responses:
+        "200":
+          description: What the page is and how it already relates to this Site.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/LinkProspectReport" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /seo/links:
+    get:
+      operationId: listArticleLinks
+      tags: [SEO]
+      summary: List every internal and external link in your articles, with its state and nofollow
+      description: |
+        Every link in the published articles, one row each: the article it is in, its anchor text,
+        where it points, and its state. Internal and external links both. Read from the article
+        bodies within minutes of a publish, an edit or an import; nothing is entered.
+
+        `status` for an internal link: `ok` (the target article is published), `unpublished` (it
+        exists but is not live now), `missing` (no such article), `page` (another page of the Site
+        that is not an article). For an external link: `ok`, `unreachable` (it answered 404 or 410)
+        or `unchecked` (external links are checked in batches).
+
+        `follow` is what the link renders as, on the hosted blog and in `content_html` alike:
+        `followed`, `nofollow`, `sponsored` or `ugc`. `follow_source` says why: `link` (set on this
+        link, see `setArticleLinkRel`), `own_site` (a link to the Site's own pages is followed) or
+        `site_default` (the Site's `external_link_rel`, returned here as `external_link_default`).
+        A front end that renders the Markdown `content` itself, rather than `content_html`, decides
+        for itself.
+
+        Filter with `type`, `state` (`broken` is `unpublished`, `missing` and `unreachable`
+        together), `article_id` (links in one article), `target_article_id` (links into one article),
+        `domain` (links to one site) or `q` (anchor, URL or title). `counts` is always the whole Site.
+        For the problems grouped and explained, use `getInternalLinkReport`.
+      x-scope: seo:read
+      x-permission: seo.view
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: false
+      x-mcp-surface: action
+      parameters:
+        - name: type
+          in: query
+          required: false
+          schema: {type: string, enum: [internal, external]}
+        - name: state
+          in: query
+          required: false
+          description: "`nofollow` is every link that is not followed: nofollow, sponsored and ugc."
+          schema: {type: string, enum: [ok, broken, unchecked, nofollow]}
+        - name: article_id
+          in: query
+          required: false
+          description: Only the links in this article.
+          schema: {type: string, format: uuid}
+        - name: target_article_id
+          in: query
+          required: false
+          description: Only the links that point at this article.
+          schema: {type: string, format: uuid}
+        - name: domain
+          in: query
+          required: false
+          description: Only the links to this site and its subdomains.
+          schema: {type: string, maxLength: 253}
+        - name: q
+          in: query
+          required: false
+          description: Text to find in the anchor, the URL or an article title.
+          schema: {type: string, maxLength: 200}
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - name: offset
+          in: query
+          required: false
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        "200":
+          description: The links, by article.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/ArticleLinks" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /seo/outbound-links:
+    get:
+      operationId: listOutboundLinkDomains
+      tags: [SEO]
+      summary: List the sites your articles link to
+      description: |
+        Every other site the published articles link to, most-linked first. Nothing here is entered by
+        anyone: it is read from the article bodies, within minutes of an article being published,
+        edited or imported from another CMS.
+
+        `links_back` is how many live links from that site are in the backlink profile, so
+        `reciprocal=true` lists the sites you link to that also link to you. It is `null`, not 0, when
+        the Site has no backlink data yet (`backlink_data: false`): import it with
+        `importBacklinksCsv` or `syncBing` first.
+      x-scope: seo:read
+      x-permission: seo.view
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: false
+      x-mcp-surface: action
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+        - name: reciprocal
+          in: query
+          required: false
+          description: "`true` for only the sites that also link back."
+          schema: {type: boolean}
+      responses:
+        "200":
+          description: The sites, most-linked first.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/OutboundLinkDomains" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /seo/outbound-links/links:
+    get:
+      operationId: listOutboundLinks
+      tags: [SEO]
+      summary: List your links to one site
+      description: |
+        Every live link from the published articles to one other site and its subdomains: which
+        article, which words, which URL, and whether the URL answered when last checked.
+      x-scope: seo:read
+      x-permission: seo.view
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: false
+      x-mcp-surface: action
+      parameters:
+        - name: domain
+          in: query
+          required: true
+          description: The site, as a bare hostname such as `example.com`.
+          schema: {type: string, maxLength: 253}
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 500, default: 200 }
+      responses:
+        "200":
+          description: The links.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/OutboundLinks" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
   /outreach/readiness:
     get:
       operationId: getOutreachReadiness
@@ -12616,6 +13218,11 @@ components:
       in: path
       required: true
       schema: {type: string, format: uuid}
+    LinkExchangeId:
+      name: id
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
     DisavowEntryId:
       name: id
       in: path
@@ -14971,6 +15578,10 @@ components:
           type: string
           description: 'IANA time zone name, `UTC` by default. Informational: schedule times are absolute ISO 8601 timestamps.'
           examples: [Europe/London]
+        external_link_rel:
+          type: string
+          enum: [follow, nofollow]
+          description: What a link to another site gets when the article says nothing about that link. Links to the Site's own pages are always followed. One link can be set on its own with `setArticleLinkRel`.
         status:
           type: string
           enum: [active, paused, suspended]
@@ -15003,6 +15614,10 @@ components:
           maxLength: 64
           pattern: ^(UTC|[A-Z][A-Za-z_]+(/[A-Za-z0-9_+-]+){1,2})$
           description: '`UTC`, or an IANA Area/Location name such as `Europe/London` or `America/Argentina/Buenos_Aires`. Single-segment names such as `GMT` or `EST` are refused; a name that is not a real time zone is `422`.'
+        external_link_rel:
+          type: string
+          enum: [follow, nofollow]
+          description: '`follow` (the default) or `nofollow`: what every link to another site gets unless that link says otherwise. It applies on the hosted blog and in `content_html` alike, as pages are next rendered.'
 
     KnowledgeProfile:
       type: object
@@ -16876,6 +17491,297 @@ components:
       properties:
         plan_item: { $ref: "#/components/schemas/PlanItem" }
         opportunity: { $ref: "#/components/schemas/LinkOpportunity" }
+
+    LinkExchange:
+      type: object
+      required: [id, partner_domain, status, health, needs_attention, their_link, our_link]
+      properties:
+        id: {type: string, format: uuid, readOnly: true}
+        partner_domain: {type: string}
+        status:
+          type: string
+          enum: [proposed, agreed, declined, ended]
+          description: The decision a person recorded. Whether the links are actually there is `health`.
+        health:
+          type: string
+          enum: [balanced, their_link_nofollow, their_link_removed, waiting_on_them, waiting_on_us, not_started, could_not_check, closed]
+        needs_attention:
+          type: boolean
+          description: True when you gave a link and are not getting a followed one back.
+        note: {type: [string, "null"]}
+        kind: {type: string, enum: [swap, guest_post, paid, other], description: What was agreed. For the record; it does not change how the links are checked.}
+        contact: {type: [string, "null"], description: Who offered it, as the person wrote it.}
+        agreed_at: {type: [string, "null"], format: date-time, description: When the status first became `agreed`. Set by Writavo.}
+        history:
+          type: [array, "null"]
+          description: On a single exchange only, newest first. When it was recorded, each change of decision, and each change in what their page showed (first seen, turned nofollow, removed).
+          items:
+            type: object
+            required: [event, to, at]
+            properties:
+              event: {type: string, enum: [recorded, decision, their_link]}
+              from: {type: [string, "null"]}
+              to: {type: string}
+              detail: {type: [object, "null"]}
+              at: {type: string, format: date-time}
+        their_page_url: {type: [string, "null"], description: The page of theirs the exchange names.}
+        our_target_url: {type: [string, "null"], description: The page of yours their link should point at.}
+        their_target_url: {type: [string, "null"], description: The page of theirs your link should point at.}
+        our_article_id: {type: [string, "null"], format: uuid, description: The article expected to carry your link.}
+        their_link:
+          type: object
+          required: [state, source]
+          properties:
+            state:
+              type: string
+              enum: [unchecked, live, nofollow, missing, unreachable]
+              description: "`nofollow` covers nofollow, sponsored and ugc. `unreachable` means the page could not be read; nothing else is concluded from it."
+            source:
+              type: string
+              enum: [page_check, backlink_profile]
+              description: "`page_check` when the exchange names a page and it was read; `backlink_profile` when it names none."
+            page_url: {type: [string, "null"]}
+            link_url: {type: [string, "null"], description: Where their link points.}
+            anchor: {type: [string, "null"]}
+            rel: {type: [string, "null"]}
+            followed: {type: [boolean, "null"], description: Null when not established.}
+            first_seen_at: {type: [string, "null"], format: date-time}
+            lost_at: {type: [string, "null"], format: date-time}
+            checked_at: {type: [string, "null"], format: date-time}
+            page:
+              type: [object, "null"]
+              description: What their page is, from the last read. Null when the exchange names no page.
+              properties:
+                http_status: {type: [integer, "null"]}
+                title: {type: [string, "null"]}
+                noindex: {type: [boolean, "null"], description: True when the page is hidden from search engines, so its link counts for nothing.}
+                outbound_domains: {type: [integer, "null"], description: Distinct other sites the page links to.}
+        our_link:
+          type: object
+          required: [state, links, articles, sample]
+          properties:
+            state: {type: string, enum: [live, missing]}
+            links: {type: integer}
+            articles: {type: integer, description: Published articles that link to the partner.}
+            followed: {type: [boolean, "null"], description: True when at least one of your links to the partner is followed. Null when you have none.}
+            points_at_their_target: {type: [boolean, "null"], description: Null when the exchange names no `their_target_url`.}
+            expected_article_has_link: {type: [boolean, "null"], description: Null when the exchange names no `our_article_id`.}
+            sample:
+              type: array
+              description: Up to 10 of the links.
+              items:
+                type: object
+                properties:
+                  article_id: {type: string, format: uuid}
+                  title: {type: [string, "null"]}
+                  slug: {type: [string, "null"]}
+                  anchor: {type: [string, "null"]}
+                  target_url: {type: [string, "null"]}
+                  is_broken: {type: boolean}
+        own_domain: {type: [string, "null"], description: On a single exchange only.}
+        external_link_default: {type: string, enum: [follow, nofollow], description: On a single exchange only. See `LinkExchangeList`.}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+
+    LinkExchangeChecked:
+      allOf:
+        - { $ref: "#/components/schemas/LinkExchange" }
+        - type: object
+          required: [page_checked]
+          properties:
+            page_checked: {type: boolean, description: False when the exchange names no page to read.}
+
+    LinkExchangeList:
+      type: object
+      required: [attention, items]
+      properties:
+        own_domain: {type: [string, "null"]}
+        external_link_default:
+          type: string
+          enum: [follow, nofollow]
+          description: What a link of yours to another site gets unless the link says otherwise (`external_link_rel` in the Site settings).
+        attention: {type: integer, description: How many exchanges need attention, before any filter.}
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/LinkExchange" }
+
+    LinkExchangeCreate:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        partner_domain:
+          type: string
+          maxLength: 253
+          description: A bare hostname such as `example.com`. Optional when `their_page_url` is given.
+        their_page_url:
+          type: [string, "null"]
+          format: uri
+          maxLength: 2000
+          description: The page of theirs that links, or will link, to you. Read at once, and every week after.
+        our_target_url: {type: [string, "null"], format: uri, maxLength: 2000, description: The page of yours their link should point at.}
+        their_target_url: {type: [string, "null"], format: uri, maxLength: 2000, description: The page of theirs you link to.}
+        our_article_id: {type: [string, "null"], format: uuid, description: The article expected to carry your link.}
+        status: {type: string, enum: [proposed, agreed, declined, ended], default: proposed}
+        kind: {type: string, enum: [swap, guest_post, paid, other], default: swap}
+        contact: {type: [string, "null"], maxLength: 200, description: Who offered it (a name, an address, a handle).}
+        note: {type: [string, "null"], maxLength: 2000}
+
+    LinkExchangeUpdate:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        partner_domain: {type: string, maxLength: 253}
+        their_page_url: {type: [string, "null"], format: uri, maxLength: 2000}
+        our_target_url: {type: [string, "null"], format: uri, maxLength: 2000}
+        their_target_url: {type: [string, "null"], format: uri, maxLength: 2000}
+        our_article_id: {type: [string, "null"], format: uuid}
+        status: {type: string, enum: [proposed, agreed, declined, ended]}
+        kind: {type: string, enum: [swap, guest_post, paid, other]}
+        contact: {type: [string, "null"], maxLength: 200}
+        note: {type: [string, "null"], maxLength: 2000}
+
+    LinkProspectInspect:
+      type: object
+      required: [url]
+      additionalProperties: false
+      properties:
+        url: {type: string, format: uri, maxLength: 2000, description: The page they offered, as a full URL.}
+
+    LinkProspectReport:
+      type: object
+      required: [url, domain, reachable, links_to_you, you_link_to_them, on_disavow_list, flags, not_measured]
+      properties:
+        url: {type: string}
+        domain: {type: string}
+        reachable: {type: boolean, description: False when the page could not be read; the page facts are then null.}
+        http_status: {type: [integer, "null"]}
+        title: {type: [string, "null"]}
+        noindex: {type: [boolean, "null"]}
+        outbound_links: {type: [integer, "null"]}
+        outbound_domains: {type: [integer, "null"], description: Distinct other sites the page links to.}
+        links_to_you:
+          type: array
+          items:
+            type: object
+            properties:
+              url: {type: string}
+              anchor: {type: [string, "null"]}
+              followed: {type: boolean}
+              rel: {type: string}
+        you_link_to_them:
+          type: object
+          properties:
+            links: {type: integer}
+            articles: {type: integer}
+        known_backlinks: {type: [integer, "null"], description: Live links from this site in the backlink profile. Null when the Site has no backlink data.}
+        on_disavow_list: {type: boolean}
+        exchange_id: {type: [string, "null"], format: uuid, description: An exchange already recorded with this site.}
+        opportunity_id: {type: [string, "null"], format: uuid, description: This site on the link opportunities board.}
+        flags:
+          type: array
+          description: "Any of `page_unreadable`, `page_noindex`, `many_outbound_sites`, `already_links_to_you`, `links_to_you_nofollow`, `you_already_link_to_them`, `on_disavow_list`."
+          items: {type: string}
+        not_measured:
+          type: array
+          description: What this does not tell you, because it needs a paid link index.
+          items: {type: string}
+
+    ArticleLinks:
+      type: object
+      required: [external_link_default, limit, offset, total, counts, links]
+      properties:
+        external_link_default:
+          type: string
+          enum: [follow, nofollow]
+          description: The Site's setting for links to other sites.
+        limit: {type: integer}
+        offset: {type: integer}
+        total: {type: integer, description: How many links match the filters.}
+        counts:
+          type: object
+          description: The whole Site, whatever the filters.
+          properties:
+            links: {type: integer}
+            internal: {type: integer}
+            external: {type: integer}
+            broken: {type: integer}
+            unchecked: {type: integer}
+            nofollow: {type: integer, description: Links that are not followed (nofollow, sponsored or ugc).}
+            internal_nofollow: {type: integer, description: Links between the Site's own pages that somebody set to not followed.}
+        links:
+          type: array
+          items:
+            type: object
+            required: [id, type, status, follow, source]
+            properties:
+              id: {type: string, format: uuid}
+              type: {type: string, enum: [internal, external]}
+              status: {type: string, enum: [ok, unpublished, missing, page, unreachable, unchecked]}
+              follow: {type: string, enum: [followed, nofollow, sponsored, ugc]}
+              follow_source: {type: string, enum: [link, own_site, site_default]}
+              anchor: {type: [string, "null"]}
+              target_url: {type: [string, "null"]}
+              target_domain: {type: [string, "null"], description: External links only.}
+              source:
+                type: object
+                properties:
+                  article_id: {type: string, format: uuid}
+                  title: {type: [string, "null"]}
+                  slug: {type: [string, "null"]}
+              target:
+                type: [object, "null"]
+                description: The article an internal link resolves to.
+                properties:
+                  article_id: {type: string, format: uuid}
+                  title: {type: [string, "null"]}
+                  slug: {type: [string, "null"]}
+                  status: {type: string}
+              http_status: {type: [integer, "null"], description: External links only. Null when not checked yet.}
+              http_checked_at: {type: [string, "null"], format: date-time}
+              checked_at: {type: string, format: date-time, description: When the article's links were last read.}
+
+    OutboundLinkDomains:
+      type: object
+      required: [backlink_data, total_domains, total_links, domains]
+      properties:
+        own_domain: {type: [string, "null"]}
+        backlink_data: {type: boolean, description: False when the Site has no backlink data, so `links_back` cannot be answered.}
+        total_domains: {type: integer}
+        total_links: {type: integer}
+        reciprocal_domains: {type: [integer, "null"]}
+        domains:
+          type: array
+          items:
+            type: object
+            required: [domain, links, articles, broken_links]
+            properties:
+              domain: {type: string}
+              links: {type: integer}
+              articles: {type: integer}
+              broken_links: {type: integer}
+              links_back: {type: [integer, "null"], description: Null when not measured.}
+              exchange_id: {type: [string, "null"], format: uuid}
+
+    OutboundLinks:
+      type: object
+      required: [domain, links]
+      properties:
+        domain: {type: string}
+        links:
+          type: array
+          items:
+            type: object
+            properties:
+              article_id: {type: string, format: uuid}
+              title: {type: [string, "null"]}
+              slug: {type: [string, "null"]}
+              anchor: {type: [string, "null"]}
+              target_url: {type: [string, "null"]}
+              is_broken: {type: boolean}
+              http_status: {type: [integer, "null"]}
+              http_checked_at: {type: [string, "null"], format: date-time}
 
     Mailbox:
       type: object

@@ -100,6 +100,42 @@ ownership and the person's own access (https://app.writavo.com/team), the outrea
 mailbox (https://app.writavo.com/outreach), CMS and Bing credentials (the `connect_url` the
 connect operation returns), deleting a Site, and API keys and webhooks.
 
+## Links: exchanges, offers and what the articles link to
+
+All free, and nothing about a link is typed in: Writavo reads the Site's own links from its
+published articles (within minutes of a publish, an edit or an import) and the other side from the
+partner's page.
+
+- **Somebody offered a link, a guest post or a swap.** `inspectLinkProspect` with the page they
+  named: does it load, is it hidden from search engines, how many other sites does it link to, does
+  it already link to the Site, does the Site already link to it. It cannot measure authority or spam
+  score (those need a paid link index) and says so in `not_measured`; tell the person that, do not
+  guess a score.
+- **They agreed.** `createLinkExchange` with `their_page_url` (or just `partner_domain`), and for
+  the record `kind` (`swap`, `guest_post`, `paid`, `other`), `contact` and `note`. Put the
+  link in the article with `update_article`; the exchange finds it by itself. `checkLinkExchange`
+  reads their page now; every open exchange is also re-read weekly.
+- **Is anybody not holding up their side?** `listLinkExchanges` with `needs_attention=true`:
+  `their_link_removed`, `their_link_nofollow`, `waiting_on_them`. `our_link.followed` says
+  whether the Site's own side passes ranking credit. `getLinkExchange` returns one deal with its
+  `history`: recorded, agreed, their link first seen, turned nofollow, removed. Guide:
+  https://writavo.com/docs/links.md
+- **Who does the Site link to, and who links back?** `listOutboundLinkDomains` (add
+  `reciprocal=true`), then `listOutboundLinks` for one site.
+- **Show me the links.** `listArticleLinks` is every link in the published articles with its
+  state (`ok`, `unpublished`, `missing`, `unreachable`, `unchecked`) and what it renders as
+  (`followed`, `nofollow`, `sponsored`, `ugc`); filter by `type`, `state`, `article_id`,
+  `target_article_id` or `domain`. `getInternalLinkReport` groups the problems: orphans,
+  under-linked, broken, anchors.
+- **Dofollow or nofollow.** One rule, on the hosted blog and in `content_html` alike: what is set
+  on the link wins; else a link to the Site's own pages is followed; else a link to another site
+  takes the Site's `external_link_rel` (`updateSiteSettings`, `follow` or `nofollow`). Set one
+  link with `setArticleLinkRel` (the article id and the `target_url` from `listArticleLinks`;
+  `rel` is `follow`, `nofollow`, `sponsored`, `ugc` or `null`). When writing an article, the
+  same choice is the link's title: `[text](https://example.com "rel:sponsored")`. A swapped or
+  paid link should be `sponsored` or `nofollow` under Google's rules; say so, and let the person
+  decide.
+
 ## The AI pipeline: costs money
 
 `trigger_pipeline_run` (`POST /pipeline/runs`) spends credits, as do turning the pipeline up,

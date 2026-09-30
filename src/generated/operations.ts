@@ -106,7 +106,7 @@ export interface McpRefusal {
 }
 
 export const API_BASE_URL = "https://api.writavo.com/v1";
-export const API_VERSION = "1.5.0";
+export const API_VERSION = "1.6.0";
 
 /**
  * A fingerprint of the tool surface: every generated operation (name, description, arguments) and
@@ -4669,6 +4669,79 @@ export const ACTIONS: McpOperation[] = [
     }
   },
   {
+    "tool": "set_article_link_rel",
+    "operationId": "setArticleLinkRel",
+    "method": "POST",
+    "path": "/articles/{id}/link-rel",
+    "tag": "Articles",
+    "surface": "action",
+    "area": "articles",
+    "summary": "Set one link in an article to dofollow, nofollow or sponsored",
+    "brief": "Say whether one link in an article passes ranking credit. `rel` is `follow` (dofollow), `nofollow`, `sponsored` (a paid or swapped link), `ugc`, or `null` to clear the choice so the Site's rule decides again.",
+    "description": "Set one link in an article to dofollow, nofollow or sponsored. Say whether one link in an article passes ranking credit. `rel` is `follow` (dofollow), `nofollow`, `sponsored` (a paid or swapped link), `ugc`, or `null` to clear the choice so the Site's rule decides again. Every link in the article to `target_url` is set. Find the link and its exact `target_url` with `listArticleLinks`. Changes content on the customer's Site. Nothing becomes public: publishing is always a separate call. Needs a secret key (wv_sk_) carrying the articles:write scope.",
+    "scope": "articles:write",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": false,
+    "spendsCredits": false,
+    "spendsMoney": false,
+    "consequence": null,
+    "makesPublic": false,
+    "readOnly": false,
+    "confirm": false,
+    "confirmReason": null,
+    "idempotency": false,
+    "ifMatch": false,
+    "params": [
+      {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "description": "",
+        "explode": false,
+        "kind": "string",
+        "nullable": false,
+        "format": "uuid"
+      },
+      {
+        "name": "target_url",
+        "in": "body",
+        "required": true,
+        "description": "The link's address, exactly as `listArticleLinks` returns it (a full URL or a path).",
+        "explode": false,
+        "kind": "string",
+        "nullable": false
+      },
+      {
+        "name": "rel",
+        "in": "body",
+        "required": true,
+        "description": "`null` clears the choice.",
+        "explode": false,
+        "kind": "string",
+        "nullable": true,
+        "enum": [
+          "follow",
+          "nofollow",
+          "sponsored",
+          "ugc",
+          "null"
+        ]
+      }
+    ],
+    "approval": null,
+    "approvalMode": null,
+    "approvalKind": null,
+    "approvalWhen": null,
+    "annotations": {
+      "title": "Set one link in an article to dofollow, nofollow or sponsored",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
     "tool": "set_article_cost_history",
     "operationId": "setArticleCostHistory",
     "method": "POST",
@@ -7267,8 +7340,8 @@ export const ACTIONS: McpOperation[] = [
     "surface": "action",
     "area": "site_settings",
     "summary": "Change the Site settings",
-    "brief": "A partial update of the Site's name, primary domain, locale, niche or timezone. Send at least one field; omitted fields are left alone, and `null` clears `primary_domain` or `niche`.",
-    "description": "Change the Site settings. A partial update of the Site's name, primary domain, locale, niche or timezone. Send at least one field; omitted fields are left alone, and `null` clears `primary_domain` or `niche`. Changes Site settings. Needs a secret key (wv_sk_) carrying the site:write scope.",
+    "brief": "A partial update of the Site's name, primary domain, locale, niche, timezone, or whether links to other sites are dofollow or nofollow by default (`external_link_rel`).",
+    "description": "Change the Site settings. A partial update of the Site's name, primary domain, locale, niche, timezone, or whether links to other sites are dofollow or nofollow by default (`external_link_rel`). Send at least one field; omitted fields are left alone, and `null` clears `primary_domain` or `niche`. Changes Site settings. Needs a secret key (wv_sk_) carrying the site:write scope.",
     "scope": "site:write",
     "alsoScopes": [],
     "entitlement": "none",
@@ -7336,6 +7409,19 @@ export const ACTIONS: McpOperation[] = [
         "explode": false,
         "kind": "string",
         "nullable": false
+      },
+      {
+        "name": "external_link_rel",
+        "in": "body",
+        "required": false,
+        "description": "`follow` (the default) or `nofollow`: what every link to another site gets unless that link says otherwise. It applies on the hosted blog and in `content_html` alike, as pages are next rendered.",
+        "explode": false,
+        "kind": "string",
+        "nullable": false,
+        "enum": [
+          "follow",
+          "nofollow"
+        ]
       }
     ],
     "approval": null,
@@ -11532,6 +11618,811 @@ export const ACTIONS: McpOperation[] = [
       "readOnlyHint": false,
       "destructiveHint": false,
       "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "tool": "list_link_exchanges",
+    "operationId": "listLinkExchanges",
+    "method": "GET",
+    "path": "/seo/link-exchanges",
+    "tag": "SEO",
+    "surface": "action",
+    "area": "seo",
+    "summary": "List link exchanges",
+    "brief": "Every link swap this Site has recorded with another site, each with both sides checked and one verdict in `health`. Neither side is typed in: `our_link` is read from the Site's published articles, and `their_link` from the partner's page (w...",
+    "description": "List link exchanges. Every link swap this Site has recorded with another site, each with both sides checked and one verdict in `health`. Neither side is typed in: `our_link` is read from the Site's published articles, and `their_link` from the partner's page (when the exchange names one) or from the backlink profile (when it does not). Read only. Nothing is changed. Needs a secret key (wv_sk_) carrying the seo:read scope.",
+    "scope": "seo:read",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": false,
+    "spendsCredits": false,
+    "spendsMoney": false,
+    "consequence": null,
+    "makesPublic": false,
+    "readOnly": true,
+    "confirm": false,
+    "confirmReason": null,
+    "idempotency": false,
+    "ifMatch": false,
+    "params": [
+      {
+        "name": "status",
+        "in": "query",
+        "required": false,
+        "description": "",
+        "explode": false,
+        "kind": "string",
+        "nullable": false,
+        "enum": [
+          "proposed",
+          "agreed",
+          "declined",
+          "ended"
+        ]
+      },
+      {
+        "name": "needs_attention",
+        "in": "query",
+        "required": false,
+        "description": "`true` for only the exchanges where you gave a link and are not getting one back.",
+        "explode": false,
+        "kind": "boolean",
+        "nullable": false
+      }
+    ],
+    "approval": null,
+    "approvalMode": null,
+    "approvalKind": null,
+    "approvalWhen": null,
+    "annotations": {
+      "title": "List link exchanges",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "tool": "create_link_exchange",
+    "operationId": "createLinkExchange",
+    "method": "POST",
+    "path": "/seo/link-exchanges",
+    "tag": "SEO",
+    "surface": "action",
+    "area": "seo",
+    "summary": "Record a link exchange",
+    "brief": "Record a link swap (a backlink exchange) with another site. Say who it is with: `partner_domain`, or just `their_page_url` (the page of theirs that links, or will link, to you), from which the domain is taken.",
+    "description": "Record a link exchange. Record a link swap (a backlink exchange) with another site. Say who it is with: `partner_domain`, or just `their_page_url` (the page of theirs that links, or will link, to you), from which the domain is taken. Everything else is optional narrowing. Free. Changes SEO settings. Needs a secret key (wv_sk_) carrying the seo:write scope.",
+    "scope": "seo:write",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": false,
+    "spendsCredits": false,
+    "spendsMoney": false,
+    "consequence": null,
+    "makesPublic": false,
+    "readOnly": false,
+    "confirm": false,
+    "confirmReason": null,
+    "idempotency": true,
+    "ifMatch": false,
+    "params": [
+      {
+        "name": "partner_domain",
+        "in": "body",
+        "required": false,
+        "description": "A bare hostname such as `example.com`. Optional when `their_page_url` is given.",
+        "explode": false,
+        "kind": "string",
+        "nullable": false
+      },
+      {
+        "name": "their_page_url",
+        "in": "body",
+        "required": false,
+        "description": "The page of theirs that links, or will link, to you. Read at once, and every week after.",
+        "explode": false,
+        "kind": "string",
+        "nullable": true,
+        "format": "uri"
+      },
+      {
+        "name": "our_target_url",
+        "in": "body",
+        "required": false,
+        "description": "The page of yours their link should point at.",
+        "explode": false,
+        "kind": "string",
+        "nullable": true,
+        "format": "uri"
+      },
+      {
+        "name": "their_target_url",
+        "in": "body",
+        "required": false,
+        "description": "The page of theirs you link to.",
+        "explode": false,
+        "kind": "string",
+        "nullable": true,
+        "format": "uri"
+      },
+      {
+        "name": "our_article_id",
+        "in": "body",
+        "required": false,
+        "description": "The article expected to carry your link.",
+        "explode": false,
+        "kind": "string",
+        "nullable": true,
+        "format": "uuid"
+      },
+      {
+        "name": "status",
+        "in": "body",
+        "required": false,
+        "description": "",
+        "explode": false,
+        "kind": "string",
+        "nullable": false,
+        "enum": [
+          "proposed",
+          "agreed",
+          "declined",
+          "ended"
+        ]
+      },
+      {
+        "name": "kind",
+        "in": "body",
+        "required": false,
+        "description": "",
+        "explode": false,
+        "kind": "string",
+        "nullable": false,
+        "enum": [
+          "swap",
+          "guest_post",
+          "paid",
+          "other"
+        ]
+      },
+      {
+        "name": "contact",
+        "in": "body",
+        "required": false,
+        "description": "Who offered it (a name",
+        "explode": false,
+        "kind": "string",
+        "nullable": true
+      },
+      {
+        "name": "note",
+        "in": "body",
+        "required": false,
+        "description": "",
+        "explode": false,
+        "kind": "string",
+        "nullable": true
+      }
+    ],
+    "approval": null,
+    "approvalMode": null,
+    "approvalKind": null,
+    "approvalWhen": null,
+    "annotations": {
+      "title": "Record a link exchange",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "tool": "check_link_exchanges",
+    "operationId": "checkLinkExchanges",
+    "method": "POST",
+    "path": "/seo/link-exchanges/check",
+    "tag": "SEO",
+    "surface": "action",
+    "area": "seo",
+    "summary": "Re-check every link exchange",
+    "brief": "Read the page of every open exchange that names one, and record whether the partner's link is still there and still followed. Free. Returns `202`; `GET /seo/link-exchanges` shows the result. This also runs by itself every week.",
+    "description": "Re-check every link exchange. Read the page of every open exchange that names one, and record whether the partner's link is still there and still followed. Free. Returns `202`; `GET /seo/link-exchanges` shows the result. This also runs by itself every week. Use `checkLinkExchange` to check one exchange and get the answer in the same request. Changes SEO settings. Needs a secret key (wv_sk_) carrying the seo:write scope.",
+    "scope": "seo:write",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": false,
+    "spendsCredits": false,
+    "spendsMoney": false,
+    "consequence": null,
+    "makesPublic": false,
+    "readOnly": false,
+    "confirm": false,
+    "confirmReason": null,
+    "idempotency": false,
+    "ifMatch": false,
+    "params": [],
+    "approval": null,
+    "approvalMode": null,
+    "approvalKind": null,
+    "approvalWhen": null,
+    "annotations": {
+      "title": "Re-check every link exchange",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "tool": "get_link_exchange",
+    "operationId": "getLinkExchange",
+    "method": "GET",
+    "path": "/seo/link-exchanges/{id}",
+    "tag": "SEO",
+    "surface": "action",
+    "area": "seo",
+    "summary": "Read a link exchange",
+    "brief": "One exchange with both sides as they stand: which of your published articles link to the partner, and what the last look at their page found.",
+    "description": "Read a link exchange. One exchange with both sides as they stand: which of your published articles link to the partner, and what the last look at their page found. `history` is the record of the deal, newest first: when it was recorded, each decision, and each change in what their page showed (the day their link was first seen, the day it went nofollow, the day it was removed). Read only. Nothing is changed. Needs a secret key (wv_sk_) carrying the seo:read scope.",
+    "scope": "seo:read",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": false,
+    "spendsCredits": false,
+    "spendsMoney": false,
+    "consequence": null,
+    "makesPublic": false,
+    "readOnly": true,
+    "confirm": false,
+    "confirmReason": null,
+    "idempotency": false,
+    "ifMatch": false,
+    "params": [
+      {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "description": "",
+        "explode": false,
+        "kind": "string",
+        "nullable": false,
+        "format": "uuid"
+      }
+    ],
+    "approval": null,
+    "approvalMode": null,
+    "approvalKind": null,
+    "approvalWhen": null,
+    "annotations": {
+      "title": "Read a link exchange",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "tool": "update_link_exchange",
+    "operationId": "updateLinkExchange",
+    "method": "PATCH",
+    "path": "/seo/link-exchanges/{id}",
+    "tag": "SEO",
+    "surface": "action",
+    "area": "seo",
+    "summary": "Change a link exchange",
+    "brief": "Record a decision (`agreed`, `declined`, `ended`, or back to `proposed`), name or change the pages, or add a note. Changing `their_page_url` forgets the last check and reads the new page at once.",
+    "description": "Change a link exchange. Record a decision (`agreed`, `declined`, `ended`, or back to `proposed`), name or change the pages, or add a note. Changing `their_page_url` forgets the last check and reads the new page at once. Changes SEO settings. Needs a secret key (wv_sk_) carrying the seo:write scope.",
+    "scope": "seo:write",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": false,
+    "spendsCredits": false,
+    "spendsMoney": false,
+    "consequence": null,
+    "makesPublic": false,
+    "readOnly": false,
+    "confirm": false,
+    "confirmReason": null,
+    "idempotency": false,
+    "ifMatch": false,
+    "params": [
+      {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "description": "",
+        "explode": false,
+        "kind": "string",
+        "nullable": false,
+        "format": "uuid"
+      },
+      {
+        "name": "partner_domain",
+        "in": "body",
+        "required": false,
+        "description": "",
+        "explode": false,
+        "kind": "string",
+        "nullable": false
+      },
+      {
+        "name": "their_page_url",
+        "in": "body",
+        "required": false,
+        "description": "",
+        "explode": false,
+        "kind": "string",
+        "nullable": true,
+        "format": "uri"
+      },
+      {
+        "name": "our_target_url",
+        "in": "body",
+        "required": false,
+        "description": "",
+        "explode": false,
+        "kind": "string",
+        "nullable": true,
+        "format": "uri"
+      },
+      {
+        "name": "their_target_url",
+        "in": "body",
+        "required": false,
+        "description": "",
+        "explode": false,
+        "kind": "string",
+        "nullable": true,
+        "format": "uri"
+      },
+      {
+        "name": "our_article_id",
+        "in": "body",
+        "required": false,
+        "description": "",
+        "explode": false,
+        "kind": "string",
+        "nullable": true,
+        "format": "uuid"
+      },
+      {
+        "name": "status",
+        "in": "body",
+        "required": false,
+        "description": "",
+        "explode": false,
+        "kind": "string",
+        "nullable": false,
+        "enum": [
+          "proposed",
+          "agreed",
+          "declined",
+          "ended"
+        ]
+      },
+      {
+        "name": "kind",
+        "in": "body",
+        "required": false,
+        "description": "",
+        "explode": false,
+        "kind": "string",
+        "nullable": false,
+        "enum": [
+          "swap",
+          "guest_post",
+          "paid",
+          "other"
+        ]
+      },
+      {
+        "name": "contact",
+        "in": "body",
+        "required": false,
+        "description": "",
+        "explode": false,
+        "kind": "string",
+        "nullable": true
+      },
+      {
+        "name": "note",
+        "in": "body",
+        "required": false,
+        "description": "",
+        "explode": false,
+        "kind": "string",
+        "nullable": true
+      }
+    ],
+    "approval": null,
+    "approvalMode": null,
+    "approvalKind": null,
+    "approvalWhen": null,
+    "annotations": {
+      "title": "Change a link exchange",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "tool": "remove_link_exchange",
+    "operationId": "removeLinkExchange",
+    "method": "DELETE",
+    "path": "/seo/link-exchanges/{id}",
+    "tag": "SEO",
+    "surface": "action",
+    "area": "seo",
+    "summary": "Remove a link exchange",
+    "brief": "Stop tracking an exchange. No link is changed anywhere: your article keeps its link until you edit the article.",
+    "description": "Remove a link exchange. Stop tracking an exchange. No link is changed anywhere: your article keeps its link until you edit the article. PERMANENT: Stops tracking the exchange, so a partner removing their link is no longer noticed. No article or link is changed. Ask the user before calling this, and pass confirm: true only once they have agreed. Needs a secret key (wv_sk_) carrying the seo:write scope.",
+    "scope": "seo:write",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": false,
+    "spendsCredits": false,
+    "spendsMoney": false,
+    "consequence": "Stops tracking the exchange, so a partner removing their link is no longer noticed. No article or link is changed.",
+    "makesPublic": false,
+    "readOnly": false,
+    "confirm": true,
+    "confirmReason": "destructive",
+    "idempotency": false,
+    "ifMatch": false,
+    "params": [
+      {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "description": "",
+        "explode": false,
+        "kind": "string",
+        "nullable": false,
+        "format": "uuid"
+      }
+    ],
+    "approval": null,
+    "approvalMode": null,
+    "approvalKind": null,
+    "approvalWhen": null,
+    "annotations": {
+      "title": "Remove a link exchange",
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "tool": "check_link_exchange",
+    "operationId": "checkLinkExchange",
+    "method": "POST",
+    "path": "/seo/link-exchanges/{id}/check",
+    "tag": "SEO",
+    "surface": "action",
+    "area": "seo",
+    "summary": "Check one link exchange now",
+    "brief": "Read the partner's page now and answer in the same request: is the link to you there, is it followed, what does it say. Free.",
+    "description": "Check one link exchange now. Read the partner's page now and answer in the same request: is the link to you there, is it followed, what does it say. Free. `page_checked` is `false` when the exchange names no page; its `their_link` then comes from the backlink profile, and naming `their_page_url` with `updateLinkExchange` is what makes a direct check possible. Changes SEO settings. Needs a secret key (wv_sk_) carrying the seo:write scope.",
+    "scope": "seo:write",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": false,
+    "spendsCredits": false,
+    "spendsMoney": false,
+    "consequence": null,
+    "makesPublic": false,
+    "readOnly": false,
+    "confirm": false,
+    "confirmReason": null,
+    "idempotency": false,
+    "ifMatch": false,
+    "params": [
+      {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "description": "",
+        "explode": false,
+        "kind": "string",
+        "nullable": false,
+        "format": "uuid"
+      }
+    ],
+    "approval": null,
+    "approvalMode": null,
+    "approvalKind": null,
+    "approvalWhen": null,
+    "annotations": {
+      "title": "Check one link exchange now",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "tool": "inspect_link_prospect",
+    "operationId": "inspectLinkProspect",
+    "method": "POST",
+    "path": "/seo/link-prospects/inspect",
+    "tag": "SEO",
+    "surface": "action",
+    "area": "seo",
+    "summary": "Look at a site offering a link",
+    "brief": "Somebody has offered a backlink, a guest post or a link swap. Give the page they named and get what can be said about it for free: whether the page loads, its title, whether it is hidden from search engines (`noindex`), how many other sites...",
+    "description": "Look at a site offering a link. Somebody has offered a backlink, a guest post or a link swap. Give the page they named and get what can be said about it for free: whether the page loads, its title, whether it is hidden from search engines (`noindex`), how many other sites it links to (a very high number is what a link list looks like), whether it already links to you and whether that link is followed, whether your articles already link to that site... Changes SEO settings. Needs a secret key (wv_sk_) carrying the seo:write scope.",
+    "scope": "seo:write",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": false,
+    "spendsCredits": false,
+    "spendsMoney": false,
+    "consequence": null,
+    "makesPublic": false,
+    "readOnly": false,
+    "confirm": false,
+    "confirmReason": null,
+    "idempotency": false,
+    "ifMatch": false,
+    "params": [
+      {
+        "name": "url",
+        "in": "body",
+        "required": true,
+        "description": "The page they offered",
+        "explode": false,
+        "kind": "string",
+        "nullable": false,
+        "format": "uri"
+      }
+    ],
+    "approval": null,
+    "approvalMode": null,
+    "approvalKind": null,
+    "approvalWhen": null,
+    "annotations": {
+      "title": "Look at a site offering a link",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "tool": "list_article_links",
+    "operationId": "listArticleLinks",
+    "method": "GET",
+    "path": "/seo/links",
+    "tag": "SEO",
+    "surface": "action",
+    "area": "seo",
+    "summary": "List every internal and external link in your articles, with its state and nofollow",
+    "brief": "Every link in the published articles, one row each: the article it is in, its anchor text, where it points, and its state. Internal and external links both.",
+    "description": "List every internal and external link in your articles, with its state and nofollow. Every link in the published articles, one row each: the article it is in, its anchor text, where it points, and its state. Internal and external links both. Read from the article bodies within minutes of a publish, an edit or an import; nothing is entered. Read only. Nothing is changed. Needs a secret key (wv_sk_) carrying the seo:read scope.",
+    "scope": "seo:read",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": false,
+    "spendsCredits": false,
+    "spendsMoney": false,
+    "consequence": null,
+    "makesPublic": false,
+    "readOnly": true,
+    "confirm": false,
+    "confirmReason": null,
+    "idempotency": false,
+    "ifMatch": false,
+    "params": [
+      {
+        "name": "type",
+        "in": "query",
+        "required": false,
+        "description": "",
+        "explode": false,
+        "kind": "string",
+        "nullable": false,
+        "enum": [
+          "internal",
+          "external"
+        ]
+      },
+      {
+        "name": "state",
+        "in": "query",
+        "required": false,
+        "description": "`nofollow` is every link that is not followed: nofollow, sponsored and ugc.",
+        "explode": false,
+        "kind": "string",
+        "nullable": false,
+        "enum": [
+          "ok",
+          "broken",
+          "unchecked",
+          "nofollow"
+        ]
+      },
+      {
+        "name": "article_id",
+        "in": "query",
+        "required": false,
+        "description": "Only the links in this article.",
+        "explode": false,
+        "kind": "string",
+        "nullable": false,
+        "format": "uuid"
+      },
+      {
+        "name": "target_article_id",
+        "in": "query",
+        "required": false,
+        "description": "Only the links that point at this article.",
+        "explode": false,
+        "kind": "string",
+        "nullable": false,
+        "format": "uuid"
+      },
+      {
+        "name": "domain",
+        "in": "query",
+        "required": false,
+        "description": "Only the links to this site and its subdomains.",
+        "explode": false,
+        "kind": "string",
+        "nullable": false
+      },
+      {
+        "name": "q",
+        "in": "query",
+        "required": false,
+        "description": "Text to find in the anchor, the URL or an article title.",
+        "explode": false,
+        "kind": "string",
+        "nullable": false
+      },
+      {
+        "name": "limit",
+        "in": "query",
+        "required": false,
+        "description": "",
+        "explode": false,
+        "kind": "integer",
+        "nullable": false
+      },
+      {
+        "name": "offset",
+        "in": "query",
+        "required": false,
+        "description": "",
+        "explode": false,
+        "kind": "integer",
+        "nullable": false
+      }
+    ],
+    "approval": null,
+    "approvalMode": null,
+    "approvalKind": null,
+    "approvalWhen": null,
+    "annotations": {
+      "title": "List every internal and external link in your articles, with its state and nofollow",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "tool": "list_outbound_link_domains",
+    "operationId": "listOutboundLinkDomains",
+    "method": "GET",
+    "path": "/seo/outbound-links",
+    "tag": "SEO",
+    "surface": "action",
+    "area": "seo",
+    "summary": "List the sites your articles link to",
+    "brief": "Every other site the published articles link to, most-linked first. Nothing here is entered by anyone: it is read from the article bodies, within minutes of an article being published, edited or imported from another CMS.",
+    "description": "List the sites your articles link to. Every other site the published articles link to, most-linked first. Nothing here is entered by anyone: it is read from the article bodies, within minutes of an article being published, edited or imported from another CMS. Read only. Nothing is changed. Needs a secret key (wv_sk_) carrying the seo:read scope.",
+    "scope": "seo:read",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": false,
+    "spendsCredits": false,
+    "spendsMoney": false,
+    "consequence": null,
+    "makesPublic": false,
+    "readOnly": true,
+    "confirm": false,
+    "confirmReason": null,
+    "idempotency": false,
+    "ifMatch": false,
+    "params": [
+      {
+        "name": "limit",
+        "in": "query",
+        "required": false,
+        "description": "",
+        "explode": false,
+        "kind": "integer",
+        "nullable": false
+      },
+      {
+        "name": "reciprocal",
+        "in": "query",
+        "required": false,
+        "description": "`true` for only the sites that also link back.",
+        "explode": false,
+        "kind": "boolean",
+        "nullable": false
+      }
+    ],
+    "approval": null,
+    "approvalMode": null,
+    "approvalKind": null,
+    "approvalWhen": null,
+    "annotations": {
+      "title": "List the sites your articles link to",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "tool": "list_outbound_links",
+    "operationId": "listOutboundLinks",
+    "method": "GET",
+    "path": "/seo/outbound-links/links",
+    "tag": "SEO",
+    "surface": "action",
+    "area": "seo",
+    "summary": "List your links to one site",
+    "brief": "Every live link from the published articles to one other site and its subdomains: which article, which words, which URL, and whether the URL answered when last checked.",
+    "description": "List your links to one site. Every live link from the published articles to one other site and its subdomains: which article, which words, which URL, and whether the URL answered when last checked. Read only. Nothing is changed. Needs a secret key (wv_sk_) carrying the seo:read scope.",
+    "scope": "seo:read",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": false,
+    "spendsCredits": false,
+    "spendsMoney": false,
+    "consequence": null,
+    "makesPublic": false,
+    "readOnly": true,
+    "confirm": false,
+    "confirmReason": null,
+    "idempotency": false,
+    "ifMatch": false,
+    "params": [
+      {
+        "name": "domain",
+        "in": "query",
+        "required": true,
+        "description": "The site, as a bare hostname such as `example.com`.",
+        "explode": false,
+        "kind": "string",
+        "nullable": false
+      },
+      {
+        "name": "limit",
+        "in": "query",
+        "required": false,
+        "description": "",
+        "explode": false,
+        "kind": "integer",
+        "nullable": false
+      }
+    ],
+    "approval": null,
+    "approvalMode": null,
+    "approvalKind": null,
+    "approvalWhen": null,
+    "annotations": {
+      "title": "List your links to one site",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
       "openWorldHint": false
     }
   },

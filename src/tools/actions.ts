@@ -156,6 +156,9 @@ const SYNONYMS: string[][] = [
   ["scan", "check", "refresh", "run"],
   ["mention", "llm", "chatgpt", "ai"],
   ["gap", "opportunity"],
+  ["exchange", "swap", "reciprocal", "trade", "partner"],
+  ["inspect", "vet", "evaluate", "assess", "prospect", "offer"],
+  ["outbound", "external", "outgoing"],
 ];
 
 /**
