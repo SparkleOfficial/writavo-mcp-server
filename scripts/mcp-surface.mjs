@@ -252,6 +252,12 @@ export const LOCAL_TOOLS = [
     confirm: false,
   },
   {
+    name: "list_sites",
+    scope: "meta:read",
+    summary: "List the Sites this connection can work on and which is the default. Every other tool takes an optional site to pick one.",
+    confirm: false,
+  },
+  {
     name: "search_writavo_actions",
     scope: "none",
     summary: "Find the operation for a settings, delivery, SEO, team, billing or insights task, with its input schema and whether it needs approval or costs money.",

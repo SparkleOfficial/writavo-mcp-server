@@ -113,7 +113,7 @@ export const API_VERSION = "1.6.0";
  * the local tools' names. It changes exactly when what a client's tool list would show changes, so
  * the hosted server can tell a session that listed its tools before a deploy that they moved on.
  */
-export const TOOL_SURFACE_VERSION = "006df5eff36b64e5";
+export const TOOL_SURFACE_VERSION = "3a6d067b759150a4";
 
 export const OPERATIONS: McpOperation[] = [
   {
@@ -3907,6 +3907,20 @@ export const REFUSALS: McpRefusal[] = [
     "operationId": "revokeCurrentApiKey",
     "method": "POST",
     "path": "/auth/key/revoke",
+    "tag": "API keys",
+    "reason": "Used by the MCP server itself, never by an assistant: the hosted server extends and revokes a connection's key when it refreshes the connection."
+  },
+  {
+    "operationId": "listConnectionSites",
+    "method": "GET",
+    "path": "/auth/key/sites",
+    "tag": "API keys",
+    "reason": "Used by the MCP server itself, never by an assistant: the hosted server extends and revokes a connection's key when it refreshes the connection."
+  },
+  {
+    "operationId": "mintConnectionSiteKey",
+    "method": "POST",
+    "path": "/auth/key/sites",
     "tag": "API keys",
     "reason": "Used by the MCP server itself, never by an assistant: the hosted server extends and revokes a connection's key when it refreshes the connection."
   },

@@ -3027,13 +3027,54 @@ async function main(): Promise<void> {
     check(
       "read_writavo_action is read-only, not destructive and idempotent, and takes no approval_id or confirm",
       read2?.annotations?.readOnlyHint === true && read2?.annotations?.destructiveHint === false && read2?.annotations?.idempotentHint === true &&
-        Object.keys((read2?.inputSchema as { properties?: object })?.properties ?? {}).join() === "operation_id,arguments",
+        Object.keys((read2?.inputSchema as { properties?: object })?.properties ?? {}).join() === "operation_id,arguments,site",
     );
     check(
       "the hosted core lists search read-only and run not",
       search2?.annotations?.readOnlyHint === true && run2?.annotations?.readOnlyHint === false && run2?.annotations?.destructiveHint === true &&
-        Object.keys((run2?.inputSchema as { properties?: object })?.properties ?? {}).join() === "operation_id,arguments,approval_id,confirm",
+        Object.keys((run2?.inputSchema as { properties?: object })?.properties ?? {}).join() === "operation_id,arguments,approval_id,confirm,site",
     );
+    // 0154: one connection, several Sites. `site` picks the key; nothing else changes.
+    {
+      const OTHER_KEY = "wv_sk_smokeothersite00000000000000000000000000";
+      const multi = createWritavoMcpServer({
+        apiKey: () => SECRET_KEY,
+        apiBase: baseUrl,
+        userAgent: "writavo-mcp-smoke-worker/1.0",
+        host: "remote",
+        sites: {
+          list: async () => [
+            { id: "site-a", name: "Alpha", domain: "alpha.example", isDefault: true, available: true },
+            { id: "site-b", name: "Beta", domain: null, isDefault: false, available: true },
+          ],
+          resolve: async (site) => (site === "Beta" ? { apiKey: OTHER_KEY } : { error: `"${site}" is not a Site of this connection.` }),
+        },
+      });
+      const [c3, s3] = InMemoryTransport.createLinkedPair();
+      const client3 = new Client({ name: "writavo-mcp-smoke", version: "1.0.0" });
+      await Promise.all([multi.connect(s3), client3.connect(c3)]);
+      stub.reset();
+      await client3.callTool({ name: "get_site_info", arguments: {} });
+      check("without site, a tool uses the connection's own key", stub.requests[0]?.authorization === `Bearer ${SECRET_KEY}`);
+      stub.reset();
+      await client3.callTool({ name: "get_site_info", arguments: { site: "Beta" } });
+      check(
+        "with site, the same tool uses that Site's key and sends no site argument",
+        stub.requests.length === 1 && stub.requests[0]?.authorization === `Bearer ${OTHER_KEY}` && !/site=/.test(stub.requests[0]?.path ?? ""),
+      );
+      stub.reset();
+      const unknownSite = await client3.callTool({ name: "get_site_info", arguments: { site: "Gamma" } });
+      check("an unknown site is refused and nothing is sent", unknownSite.isError === true && stub.requests.length === 0);
+      const listedSites = await client3.callTool({ name: "list_sites", arguments: {} });
+      check(
+        "list_sites lists the connection's Sites and marks the default, without a request",
+        listedSites.isError !== true && /"name": "Beta"/.test(JSON.stringify(listedSites.content).replace(/\\"/g, '"')) && stub.requests.length === 0,
+        JSON.stringify(listedSites.content).slice(0, 200),
+      );
+      stub.reset();
+      const single = await client2.callTool({ name: "get_site_info", arguments: { site: "Beta" } });
+      check("a connection with one Site refuses site and sends nothing", single.isError === true && stub.requests.length === 0);
+    }
     stub.reset();
     const viaMcp = await client2.callTool({ name: "search_writavo_actions", arguments: { query: "team member" } });
     check("search_writavo_actions answers through the protocol and sends no request", viaMcp.isError !== true && stub.requests.length === 0, JSON.stringify(viaMcp.content).slice(0, 200));

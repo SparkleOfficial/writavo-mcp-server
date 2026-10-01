@@ -16,6 +16,7 @@
 export { createWritavoMcpServer, toolContext, CORE_LOCAL_TOOL_NAMES } from "./server.js";
 export type { CoreOptions } from "./server.js";
 export type { ToolContext } from "./context.js";
+export type { ConnectionSite, SiteAccess, SiteRouter } from "./sites.js";
 export { redact } from "./redact.js";
 export { friendlyClientName, FALLBACK_CLIENT_NAME } from "./client-name.js";
 export { VERSION } from "./version.js";
