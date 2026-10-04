@@ -1,7 +1,7 @@
 ---
 name: writavo
 description: >-
-  Manage a Writavo Site's blog content: draft, edit, organise, schedule and publish articles, upload media, manage categories, tags and authors, import an existing blog, and trigger the AI article pipeline. Also change the Site's settings, delivery and domains, SEO, team and billing. Use when a task involves a blog or content site hosted on Writavo.
+  Manage a Writavo Site's blog content: draft, edit, organise, schedule and publish articles, upload media, manage categories, tags and authors, import an existing blog, and trigger the AI article pipeline. Also change the Site's settings, delivery and domains, SEO, visitor analytics, reader comments, team and billing. Use when a task involves a blog or content site hosted on Writavo.
 license: MIT
 metadata:
   homepage: https://writavo.com
@@ -23,6 +23,8 @@ person can do to that content in the dashboard, an API key can do.
 - The user wants the AI pipeline to research and write articles for them.
 - The user wants a Site setting, the pipeline's configuration, a domain, an SEO task, the team or
   billing changed without opening the dashboard.
+- The user wants visitor analytics added to their site or checked, or reader comments turned on or
+  moderated.
 
 **Do not** use it to write a one-off paragraph (just write it), or to administer a WordPress,
 Ghost or Webflow site (use that platform's API).
@@ -139,7 +141,11 @@ partner's page.
 ## Visitor analytics and reader comments
 
 Both are part of the CMS, free on every plan, and reached through `search_writavo_actions`
-("analytics setup", "comment settings").
+("analytics setup", "comment settings"). Analytics reads and the install check need the Reports
+and logs permission (`insights:read`), and changing its domains Site settings (`site:write`).
+Comments need the Reader comments permission (`comments:read`, `comments:write`), which a
+connection only has when the person chose it on the sign-in screen or later in Settings > AI
+agents; if it is missing, say so and let them add it.
 
 - **Add analytics to a site the person renders themselves.** Read `GET /analytics/setup` and paste
   its `snippet` unchanged into the server-rendered `<head>` (the `src` is always

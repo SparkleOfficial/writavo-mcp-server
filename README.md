@@ -72,20 +72,27 @@ made by hand is not an AI agent key, so the permissions picker, the off switch a
 not apply to it. Prefer the sign-in.
 
 When you connect, Writavo shows which assistant is asking and where it will send you back, the
-Site to connect, and what it may do: for articles, for categories, tags and authors, for media and
-for the AI pipeline, you choose No access, Read, or Read and write ("Read and run" for the
-pipeline, which spends credits). The choices start from your organisation's default, which is Read
-and write for content and media and Read for the pipeline. The connection is an ordinary Writavo
-key limited to that Site and those permissions, named after the app ("Claude Code (hosted MCP)").
+Sites to connect, and what it may do. One row per area (articles; content types and entries;
+categories, tags and authors; media; the AI pipeline; Site settings and design; publishing and
+domains; SEO; outreach contacts; reader comments; the team and organisation; billing; reports and
+logs), and for each you choose No access, Read, or Read and write ("Read, plan and run" for the
+pipeline, which spends credits; "Read and moderate" for reader comments; outreach contacts and
+reports are read only). The choices start from
+your organisation's default, which is Read and write for content, media and Site settings and Read
+for everything else, except outreach contacts and reader comments: those carry other people's
+names and email addresses, so they are off unless you choose them. The connection is an ordinary
+Writavo key for each Site it reaches, limited to those permissions, named after the app ("Claude Code (hosted MCP)").
 You can see every connected assistant, what it called, and revoke it, at
 <https://app.writavo.com/settings/agents>.
 
 ## What it can do
 
-Thirty six tools are compiled from Writavo's published OpenAPI specification, plus seven written by
+Forty five tools are compiled from Writavo's published OpenAPI specification, plus nine written by
 hand:
 
 - **Articles.** List, read, create, update, delete, publish, unpublish, schedule, cancel a schedule.
+- **Content types and entries.** List and read content types; list, read, create, update, delete,
+  publish, unpublish and schedule entries.
 - **Taxonomy and people.** Categories, tags and authors: list, read, create, update, delete.
 - **Media.** List, read, update, delete, and `upload_media`, which drives the whole three step
   presigned upload in one call so the assistant does not have to orchestrate it. It takes a public
@@ -100,8 +107,8 @@ hand:
 - **Import.** `import_content` brings an existing blog in (below).
 - **Everything else, as actions.** Site settings and the knowledge profile, the organisation,
   article formats and AI prompts, the pipeline's configuration and content plan, delivery and
-  domains, SEO, outreach, the team and roles, billing, and insights and logs are not separate
-  tools. `search_writavo_actions` takes a few words ("invite a team member", "custom domain") and
+  domains, SEO, outreach, visitor analytics and its install check, reader comments, the team and
+  roles, billing, and insights and logs are not separate tools. `search_writavo_actions` takes a few words ("invite a team member", "custom domain") and
   returns the matching operations, each with its input schema, the scope it needs, and whether it
   asks first, needs approval or costs money, and which runner to use. `read_writavo_action` runs a
   read (it only ever runs GET operations, so a client may allow it without asking), and
@@ -284,11 +291,11 @@ npm run gen:check   fails if the committed tool surface is stale
 ```
 
 Adding an endpoint to `openapi.yaml` and regenerating is the whole of adding it; an operation
-marked `x-writavo-approval` gains an `approval_id` argument by itself. The thirty six MCP-2
-operations are individual tools; every other operation lands in the `ACTIONS` catalog in
+marked `x-writavo-approval` gains an `approval_id` argument by itself. The forty five
+operations marked as tools are individual tools; every other operation lands in the `ACTIONS` catalog in
 `src/generated/operations.ts` (by its tag, or `x-mcp-surface: tool | action` on the operation or
 the tag), which `search_writavo_actions`, `read_writavo_action` and `run_writavo_action` serve. Editing anything under
-`src/generated/` fails CI. The seven hand-written tools live in `src/tools/` (`CORE_LOCAL_TOOL_NAMES`
+`src/generated/` fails CI. The nine hand-written tools live in `src/tools/` (`CORE_LOCAL_TOOL_NAMES`
 in `src/core/server.ts`) and are listed in `LOCAL_TOOLS` in the monorepo's `scripts/mcp-surface.mjs`.
 
 ## Licence
