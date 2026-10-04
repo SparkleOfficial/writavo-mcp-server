@@ -106,7 +106,7 @@ export interface McpRefusal {
 }
 
 export const API_BASE_URL = "https://api.writavo.com/v1";
-export const API_VERSION = "1.7.0";
+export const API_VERSION = "1.8.0";
 
 /**
  * A fingerprint of the tool surface: every generated operation (name, description, arguments) and
@@ -10126,7 +10126,7 @@ export const ACTIONS: McpOperation[] = [
         "name": "dry_run",
         "in": "body",
         "required": false,
-        "description": "Check and report",
+        "description": "Check and report, write nothing.",
         "explode": false,
         "kind": "boolean",
         "nullable": false
@@ -10440,12 +10440,12 @@ export const ACTIONS: McpOperation[] = [
     "operationId": "recordEngagement",
     "method": "POST",
     "path": "/engagement/events",
-    "tag": "SEO",
+    "tag": "Engagement",
     "surface": "action",
-    "area": "seo",
+    "area": "engagement",
     "summary": "Record a view, reaction or share",
     "brief": "For a site that renders its articles itself: record one view, a reader's reaction, or a share click on a published article, from your own server (never from the browser: the key is a secret key).",
-    "description": "Record a view, reaction or share. For a site that renders its articles itself: record one view, a reader's reaction, or a share click on a published article, from your own server (never from the browser: the key is a secret key). Filter bots and link prefetches before calling. Changes SEO settings. Needs a secret key (wv_sk_) carrying the engagement:write scope.",
+    "description": "Record a view, reaction or share. For a site that renders its articles itself: record one view, a reader's reaction, or a share click on a published article, from your own server (never from the browser: the key is a secret key). Filter bots and link prefetches before calling. Changes Engagement settings. Needs a secret key (wv_sk_) carrying the engagement:write scope.",
     "scope": "engagement:write",
     "alsoScopes": [],
     "entitlement": "none",
@@ -10610,9 +10610,9 @@ export const ACTIONS: McpOperation[] = [
     "operationId": "getPostEngagement",
     "method": "GET",
     "path": "/engagement/posts/{slug}",
-    "tag": "SEO",
+    "tag": "Engagement",
     "surface": "action",
-    "area": "seo",
+    "area": "engagement",
     "summary": "Read an article's views, reactions and shares",
     "brief": "The public counters for one published article: lifetime views, the six reaction totals, share clicks per platform, approved comments and, with `visitor_id`, that reader's current reaction.",
     "description": "Read an article's views, reactions and shares. The public counters for one published article: lifetime views, the six reaction totals, share clicks per platform, approved comments and, with `visitor_id`, that reader's current reaction. Safe for a publishable key: these numbers are shown on the page anyway. For several articles at once, use `GET /engagement/posts?slugs=`. Read only. Nothing is changed. Needs a key carrying the articles:read scope.",
@@ -10666,12 +10666,12 @@ export const ACTIONS: McpOperation[] = [
     "operationId": "listPostsEngagement",
     "method": "GET",
     "path": "/engagement/posts",
-    "tag": "SEO",
+    "tag": "Engagement",
     "surface": "action",
-    "area": "seo",
+    "area": "engagement",
     "summary": "Read views, reactions, shares and comment counts for several articles",
     "brief": "The public counters of up to 50 published articles in one call, for an index or archive page: the same numbers as `GET /engagement/posts/{slug}` for each.",
-    "description": "Read views, reactions, shares and comment counts for several articles. The public counters of up to 50 published articles in one call, for an index or archive page: the same numbers as `GET /engagement/posts/{slug}` for each. Slugs that are unknown or not published are listed in `missing` rather than failing the request, so one unpublished post never breaks a page. Safe for a publishable key. Read only. Nothing is changed. Needs a key carrying the articles:read scope.",
+    "description": "Read views, reactions, shares and comment counts for several articles. The public counters of up to 50 published articles in one call, for an index or archive page: the same numbers as `GET /engagement/posts/{slug}` for each. Slugs that are unknown or not published are listed in `missing` rather than failing the request, so one unpublished post never breaks a page. `posts` and `missing` keep the order the slugs were asked in (a slug asked twice appears once, at its first position). Read only. Nothing is changed. Needs a key carrying the articles:read scope.",
     "scope": "articles:read",
     "alsoScopes": [],
     "entitlement": "none",
@@ -11290,6 +11290,63 @@ export const ACTIONS: McpOperation[] = [
     }
   },
   {
+    "tool": "import_comments",
+    "operationId": "importComments",
+    "method": "POST",
+    "path": "/comments/import",
+    "tag": "Comments",
+    "surface": "action",
+    "area": "comments",
+    "summary": "Import comments",
+    "brief": "Bring a blog's comments to Writavo when it migrates, or restore them from a Site export (`GET /export` writes them in exactly this shape).",
+    "description": "Import comments. Bring a blog's comments to Writavo when it migrates, or restore them from a Site export (`GET /export` writes them in exactly this shape). Each comment names its article by the article's `post_external_id` (as imported) or its `post_slug` on this Site, in any status. Call it from a server with a secret key. Changes Comments settings. CONSEQUENCE: Creates or replaces comments on the Site's articles; approved ones show on the live blog while comments are on. Needs a secret key (wv_sk_) carrying the comments:write scope.",
+    "scope": "comments:write",
+    "alsoScopes": [],
+    "entitlement": "none",
+    "publishable": false,
+    "spendsCredits": false,
+    "spendsMoney": false,
+    "consequence": "Creates or replaces comments on the Site's articles; approved ones show on the live blog while comments are on.",
+    "makesPublic": false,
+    "readOnly": false,
+    "confirm": false,
+    "confirmReason": null,
+    "idempotency": true,
+    "ifMatch": false,
+    "params": [
+      {
+        "name": "dry_run",
+        "in": "body",
+        "required": false,
+        "description": "Check and report without writing. Defaults to true; send false to write.",
+        "explode": false,
+        "kind": "boolean",
+        "nullable": false
+      },
+      {
+        "name": "comments",
+        "in": "body",
+        "required": true,
+        "description": "",
+        "explode": false,
+        "kind": "array",
+        "nullable": false,
+        "itemKind": "object"
+      }
+    ],
+    "approval": null,
+    "approvalMode": null,
+    "approvalKind": null,
+    "approvalWhen": null,
+    "annotations": {
+      "title": "Import comments",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
     "tool": "get_comment",
     "operationId": "getComment",
     "method": "GET",
@@ -11469,7 +11526,7 @@ export const ACTIONS: McpOperation[] = [
     "readOnly": false,
     "confirm": false,
     "confirmReason": null,
-    "idempotency": false,
+    "idempotency": true,
     "ifMatch": false,
     "params": [
       {
@@ -12657,7 +12714,7 @@ export const ACTIONS: McpOperation[] = [
         "name": "contact",
         "in": "body",
         "required": false,
-        "description": "Who offered it (a name",
+        "description": "Who offered it (a name, an address, a handle).",
         "explode": false,
         "kind": "string",
         "nullable": true
@@ -13039,7 +13096,7 @@ export const ACTIONS: McpOperation[] = [
         "name": "url",
         "in": "body",
         "required": true,
-        "description": "The page they offered",
+        "description": "The page they offered, as a full URL.",
         "explode": false,
         "kind": "string",
         "nullable": false,

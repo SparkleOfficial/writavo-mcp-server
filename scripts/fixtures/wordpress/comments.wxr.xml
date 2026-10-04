@@ -1,0 +1,151 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0"
+	xmlns:excerpt="http://wordpress.org/export/1.2/excerpt/"
+	xmlns:content="http://purl.org/rss/1.0/modules/content/"
+	xmlns:wfw="http://wellformedweb.org/CommentAPI/"
+	xmlns:dc="http://purl.org/dc/elements/1.1/"
+	xmlns:wp="http://wordpress.org/export/1.2/"
+>
+<channel>
+	<title>Harbour Talk</title>
+	<link>https://talk.example.com</link>
+	<wp:wxr_version>1.2</wp:wxr_version>
+	<wp:base_site_url>https://talk.example.com</wp:base_site_url>
+	<wp:base_blog_url>https://talk.example.com</wp:base_blog_url>
+	<wp:author><wp:author_id>1</wp:author_id><wp:author_login><![CDATA[jane]]></wp:author_login><wp:author_display_name><![CDATA[Jane Harbour]]></wp:author_display_name></wp:author>
+
+	<item>
+		<title><![CDATA[Knots for beginners]]></title>
+		<link>https://talk.example.com/2022/01/knots/</link>
+		<dc:creator><![CDATA[jane]]></dc:creator>
+		<guid isPermaLink="false">https://talk.example.com/?p=11</guid>
+		<content:encoded><![CDATA[Start with a bowline.]]></content:encoded>
+		<wp:post_id>11</wp:post_id>
+		<wp:post_date_gmt><![CDATA[2022-01-10 08:00:00]]></wp:post_date_gmt>
+		<wp:post_name><![CDATA[knots]]></wp:post_name>
+		<wp:status><![CDATA[publish]]></wp:status>
+		<wp:post_type><![CDATA[post]]></wp:post_type>
+		<wp:comment>
+			<wp:comment_id>1</wp:comment_id>
+			<wp:comment_author><![CDATA[Ann &amp; Bo]]></wp:comment_author>
+			<wp:comment_author_email><![CDATA[ann@readers.example]]></wp:comment_author_email>
+			<wp:comment_author_url>https://ann.example</wp:comment_author_url>
+			<wp:comment_author_IP><![CDATA[203.0.113.9]]></wp:comment_author_IP>
+			<wp:comment_date><![CDATA[2022-01-11 10:00:00]]></wp:comment_date>
+			<wp:comment_date_gmt><![CDATA[2022-01-11 09:00:00]]></wp:comment_date_gmt>
+			<wp:comment_content><![CDATA[Great guide! See <a href="https://ropes.example/bowline">this video</a> &amp; <strong>practise</strong> daily.
+
+Second paragraph
+with a line break.]]></wp:comment_content>
+			<wp:comment_approved><![CDATA[1]]></wp:comment_approved>
+			<wp:comment_type><![CDATA[comment]]></wp:comment_type>
+			<wp:comment_parent>0</wp:comment_parent>
+			<wp:comment_user_id>0</wp:comment_user_id>
+			<wp:commentmeta><wp:meta_key><![CDATA[akismet_result]]></wp:meta_key><wp:meta_value><![CDATA[false]]></wp:meta_value></wp:commentmeta>
+		</wp:comment>
+		<wp:comment>
+			<wp:comment_id>2</wp:comment_id>
+			<wp:comment_author><![CDATA[Jane Harbour]]></wp:comment_author>
+			<wp:comment_author_email><![CDATA[jane@talk.example]]></wp:comment_author_email>
+			<wp:comment_date_gmt><![CDATA[2022-01-11 12:00:00]]></wp:comment_date_gmt>
+			<wp:comment_content><![CDATA[Thanks, Ann!]]></wp:comment_content>
+			<wp:comment_approved><![CDATA[1]]></wp:comment_approved>
+			<wp:comment_type><![CDATA[]]></wp:comment_type>
+			<wp:comment_parent>1</wp:comment_parent>
+			<wp:comment_user_id>1</wp:comment_user_id>
+		</wp:comment>
+		<wp:comment>
+			<wp:comment_id>3</wp:comment_id>
+			<wp:comment_author><![CDATA[Bo]]></wp:comment_author>
+			<wp:comment_date_gmt><![CDATA[0000-00-00 00:00:00]]></wp:comment_date_gmt>
+			<wp:comment_date><![CDATA[2022-01-12 07:30:00]]></wp:comment_date>
+			<wp:comment_content><![CDATA[Waiting on the reply to the reply.]]></wp:comment_content>
+			<wp:comment_approved><![CDATA[0]]></wp:comment_approved>
+			<wp:comment_type><![CDATA[comment]]></wp:comment_type>
+			<wp:comment_parent>2</wp:comment_parent>
+		</wp:comment>
+		<wp:comment>
+			<wp:comment_id>4</wp:comment_id>
+			<wp:comment_author><![CDATA[Cheap Watches]]></wp:comment_author>
+			<wp:comment_date_gmt><![CDATA[2022-01-13 00:00:00]]></wp:comment_date_gmt>
+			<wp:comment_content><![CDATA[Buy now]]></wp:comment_content>
+			<wp:comment_approved><![CDATA[spam]]></wp:comment_approved>
+			<wp:comment_type><![CDATA[comment]]></wp:comment_type>
+			<wp:comment_parent>0</wp:comment_parent>
+		</wp:comment>
+		<wp:comment>
+			<wp:comment_id>5</wp:comment_id>
+			<wp:comment_author><![CDATA[Deleted]]></wp:comment_author>
+			<wp:comment_date_gmt><![CDATA[2022-01-13 01:00:00]]></wp:comment_date_gmt>
+			<wp:comment_content><![CDATA[Binned thought]]></wp:comment_content>
+			<wp:comment_approved><![CDATA[trash]]></wp:comment_approved>
+			<wp:comment_type><![CDATA[comment]]></wp:comment_type>
+			<wp:comment_parent>0</wp:comment_parent>
+		</wp:comment>
+		<wp:comment>
+			<wp:comment_id>6</wp:comment_id>
+			<wp:comment_author><![CDATA[Other Blog]]></wp:comment_author>
+			<wp:comment_date_gmt><![CDATA[2022-01-14 00:00:00]]></wp:comment_date_gmt>
+			<wp:comment_content><![CDATA[[&#8230;] a great post about knots [&#8230;]]]></wp:comment_content>
+			<wp:comment_approved><![CDATA[1]]></wp:comment_approved>
+			<wp:comment_type><![CDATA[pingback]]></wp:comment_type>
+			<wp:comment_parent>0</wp:comment_parent>
+		</wp:comment>
+		<wp:comment>
+			<wp:comment_id>7</wp:comment_id>
+			<wp:comment_author><![CDATA[Cy]]></wp:comment_author>
+			<wp:comment_date_gmt><![CDATA[2022-01-13 02:00:00]]></wp:comment_date_gmt>
+			<wp:comment_content><![CDATA[Replying to the binned one.]]></wp:comment_content>
+			<wp:comment_approved><![CDATA[1]]></wp:comment_approved>
+			<wp:comment_type><![CDATA[comment]]></wp:comment_type>
+			<wp:comment_parent>5</wp:comment_parent>
+		</wp:comment>
+		<wp:comment>
+			<wp:comment_id>8</wp:comment_id>
+			<wp:comment_author><![CDATA[Dee Long-Name Abcdefghij Abcdefghij Abcdefghij Abcdefghij Abcdefghij Abcdefghij Abcdefghij]]></wp:comment_author>
+			<wp:comment_date_gmt><![CDATA[2022-01-15 00:00:00]]></wp:comment_date_gmt>
+			<wp:comment_content><![CDATA[A name too long to keep whole.]]></wp:comment_content>
+			<wp:comment_approved><![CDATA[1]]></wp:comment_approved>
+			<wp:comment_type><![CDATA[comment]]></wp:comment_type>
+			<wp:comment_parent>0</wp:comment_parent>
+		</wp:comment>
+		<wp:comment>
+			<wp:comment_id>9</wp:comment_id>
+			<wp:comment_author><![CDATA[Empty]]></wp:comment_author>
+			<wp:comment_date_gmt><![CDATA[2022-01-15 01:00:00]]></wp:comment_date_gmt>
+			<wp:comment_content><![CDATA[<p> </p>]]></wp:comment_content>
+			<wp:comment_approved><![CDATA[1]]></wp:comment_approved>
+			<wp:comment_type><![CDATA[comment]]></wp:comment_type>
+			<wp:comment_parent>0</wp:comment_parent>
+		</wp:comment>
+		<wp:comment>
+			<wp:comment_id>10</wp:comment_id>
+			<wp:comment_author><![CDATA[Essayist]]></wp:comment_author>
+			<wp:comment_date_gmt><![CDATA[2022-01-15 02:00:00]]></wp:comment_date_gmt>
+			<wp:comment_content><![CDATA[LONG_BODY]]></wp:comment_content>
+			<wp:comment_approved><![CDATA[1]]></wp:comment_approved>
+			<wp:comment_type><![CDATA[comment]]></wp:comment_type>
+			<wp:comment_parent>0</wp:comment_parent>
+		</wp:comment>
+	</item>
+
+	<item>
+		<title><![CDATA[A photo]]></title>
+		<wp:post_id>40</wp:post_id>
+		<wp:status><![CDATA[inherit]]></wp:status>
+		<wp:post_parent>11</wp:post_parent>
+		<wp:post_type><![CDATA[attachment]]></wp:post_type>
+		<wp:attachment_url><![CDATA[https://talk.example.com/wp-content/uploads/photo.jpg]]></wp:attachment_url>
+		<wp:comment><wp:comment_id>30</wp:comment_id><wp:comment_author><![CDATA[Fan]]></wp:comment_author><wp:comment_date_gmt><![CDATA[2022-01-16 00:00:00]]></wp:comment_date_gmt><wp:comment_content><![CDATA[Nice photo]]></wp:comment_content><wp:comment_approved><![CDATA[1]]></wp:comment_approved></wp:comment>
+	</item>
+
+	<item>
+		<title><![CDATA[Old news]]></title>
+		<content:encoded><![CDATA[Gone.]]></content:encoded>
+		<wp:post_id>12</wp:post_id>
+		<wp:status><![CDATA[trash]]></wp:status>
+		<wp:post_type><![CDATA[post]]></wp:post_type>
+		<wp:comment><wp:comment_id>31</wp:comment_id><wp:comment_author><![CDATA[Gil]]></wp:comment_author><wp:comment_date_gmt><![CDATA[2022-01-16 00:00:00]]></wp:comment_date_gmt><wp:comment_content><![CDATA[On a binned post]]></wp:comment_content><wp:comment_approved><![CDATA[1]]></wp:comment_approved></wp:comment>
+	</item>
+</channel>
+</rss>

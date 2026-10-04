@@ -2,7 +2,7 @@ openapi: 3.1.0
 
 info:
   title: Writavo Content API
-  version: "1.7.0"
+  version: "1.8.0"
   summary: The CMS control plane for a Writavo Site.
   description: |
     The Writavo Content API is the programmable half of the CMS. It lets you create, edit,
@@ -277,9 +277,11 @@ tags:
   - name: Engagement
     x-mcp-surface: action
     description: |
-      Bringing a migrated blog's engagement history with it: per post per day views, reactions and
-      share clicks, and each reader's current reaction. Recording live engagement and reading an
-      article's counters are under SEO.
+      Views, reactions, share clicks and comment counts per article: record them live from your
+      own server (`POST /engagement/events`), read one article's counters
+      (`GET /engagement/posts/{slug}`) or up to 50 at once for an index page
+      (`GET /engagement/posts?slugs=`), and bring a migrated blog's history with it
+      (`POST /engagement/import`). The Site-wide engagement report is `GET /seo/engagement`.
   - name: Redirects
     x-mcp-surface: action
     description: |
@@ -612,7 +614,7 @@ paths:
                         required: [id, action, status, expires_at, decided_at]
                         properties:
                           id: { type: string, format: uuid }
-                          action: { type: string, description: The approval action, for example media.delete. }
+                          action: { type: string, description: "The approval action, for example media.delete." }
                           status: { type: string, enum: [pending, approved, denied, used, expired] }
                           expires_at: { type: [string, "null"], format: date-time }
                           decided_at: { type: [string, "null"], format: date-time }
@@ -6190,8 +6192,9 @@ paths:
       description: |
         The whole Site as Writavo Import Format, so it can be backed up, restored or moved to
         another Site: articles and pages (with their SEO fields, source records, old URLs and custom
-        fields), authors, categories, tags, content types, entries, redirects and engagement history.
-        Media travels as URLs; importing copies each into the target Site's library. References
+        fields), authors, categories, tags, content types, entries, redirects, engagement history
+        and reader comments. Media travels as URLs; importing copies each into the target Site's
+        library. References
         between entries and articles are written portably (`$ref` by external_id or slug, `$media`
         by URL), so they resolve on the target Site.
 
@@ -6201,6 +6204,16 @@ paths:
         `cursor` for the next volume. Import the volumes in order with `POST /imports`; a volume
         whose report lists references it could not resolve yet (they were in a later volume) is
         fixed by importing it again at the end.
+
+        **Comments.** The last volumes carry a top-level `comments` array in the row shape of
+        `POST /comments/import`, so they import back as they are: each comment's `external_id` (its
+        own, or `writavo-comment-<id>` when it has none), its article by `post_external_id` (when the
+        article has an external id) or `post_slug`, `parent_external_id` for a reply, status,
+        author, email address, text and date. Top-level comments come first, then replies, so a
+        reply never sits in an earlier volume than its parent. Only comments on exported articles
+        are included. Comments carry commenters' email addresses, so they are exported only when the
+        key also carries `comments:read` (a dashboard session needs `comments.moderate`); otherwise
+        they are left out, and `comments=true` is refused with `403 INSUFFICIENT_SCOPE`.
 
         Left out: the AI pipeline's working rows, revisions, Writavo's own costs, and the source
         pages' scraped text unless `source_text=true` (it can be several times the size of the
@@ -6222,6 +6235,13 @@ paths:
           in: query
           required: false
           description: Include the engagement history (views, reactions, shares). Default true.
+          schema: { type: boolean, default: true }
+        - name: comments
+          in: query
+          required: false
+          description: |
+            Include reader comments. Default true when the caller may read them (`comments:read`);
+            `false` leaves them out; `true` without `comments:read` is `403 INSUFFICIENT_SCOPE`.
           schema: { type: boolean, default: true }
         - name: source_text
           in: query
@@ -6568,6 +6588,14 @@ paths:
         health check passes. The check only passes when the page served at the domain carries this Site's own
         `<meta name="writavo-site" content="...">` marker (the first 32 hex characters of sha256 of `writavo-site:` plus the Site id), so a proxy pointed at another Site's blog never verifies.
 
+        The Cloudflare Worker and Nginx snippets also send two headers: `X-Writavo-Proxy-Key`, this
+        connection's own key, and `X-Writavo-Reader-IP`, the reader's address. The blog believes the
+        address only when the key matches, and then applies comment rate limits and duplicate checks
+        per reader instead of per proxy. A Next.js rewrite cannot add request headers, so behind it
+        comment limits apply to the whole Site; the snippet says so. The key is part of the snippets
+        and is never returned anywhere else; it stays the same until the reverse proxy is removed and
+        set up again.
+
         `domain` is a bare hostname; a Writavo hosted address is `422`. Changing the domain resets the
         connection to `pending` until a health check passes again.
 
@@ -6624,6 +6652,9 @@ paths:
       description: |
         The three installer snippets (Cloudflare Worker, Next.js rewrite, Nginx) for the reverse proxy
         already set up on this Site. `404` when no reverse proxy is set up: use `POST /delivery/proxy`.
+        The Cloudflare Worker and Nginx snippets send this connection's key as `X-Writavo-Proxy-Key`
+        and the reader's address as `X-Writavo-Reader-IP`, so the blog applies comment limits per
+        reader; behind the Next.js rewrite they apply per Site (see `POST /delivery/proxy`).
       x-scope: delivery:read
       x-permission: none
       x-entitlement: none
@@ -8863,7 +8894,7 @@ paths:
   /engagement/events:
     post:
       operationId: recordEngagement
-      tags: [SEO]
+      tags: [Engagement]
       summary: Record a view, reaction or share
       description: |
         For a site that renders its articles itself: record one view, a reader's reaction, or a share
@@ -9036,7 +9067,7 @@ paths:
   /engagement/posts/{slug}:
     get:
       operationId: getPostEngagement
-      tags: [SEO]
+      tags: [Engagement]
       summary: Read an article's views, reactions and shares
       description: |
         The public counters for one published article: lifetime views, the six reaction totals, share
@@ -9082,13 +9113,14 @@ paths:
   /engagement/posts:
     get:
       operationId: listPostsEngagement
-      tags: [SEO]
+      tags: [Engagement]
       summary: Read views, reactions, shares and comment counts for several articles
       description: |
         The public counters of up to 50 published articles in one call, for an index or archive page:
         the same numbers as `GET /engagement/posts/{slug}` for each. Slugs that are unknown or not
         published are listed in `missing` rather than failing the request, so one unpublished post
-        never breaks a page. Safe for a publishable key.
+        never breaks a page. `posts` and `missing` keep the order the slugs were asked in (a slug
+        asked twice appears once, at its first position). Safe for a publishable key.
       x-scope: articles:read
       x-permission: none
       x-entitlement: none
@@ -9501,9 +9533,12 @@ paths:
         answer: `approved` or `pending`). The same comment sent twice within a day returns the first
         one with `duplicate: true` instead of a second copy. Fires the `comment.created` webhook.
 
-        `404` when comments are off on the Site, the slug is not a published article, or `parent_id`
-        is not an approved comment on it; `422` on `slug` when comments have closed on that article;
-        `429` when the reader, or the whole Site, is sending too many.
+        Refusals, each with its own `error.code` (branch on the code, not the status):
+        `404 COMMENTS_DISABLED` when the Site has comments off, `404 NOT_FOUND` when the slug is not a
+        published article, `404 PARENT_NOT_FOUND` when `parent_id` is not an approved comment on it,
+        `422 COMMENTS_CLOSED` when comments have closed on that article, and `429
+        RATE_LIMIT_EXCEEDED` with `error.limit` naming the limit: `reader` (5 comments per reader in
+        10 minutes), `site` (300 per Site per hour) or `queue` (2,000 waiting for review).
       x-scope: engagement:write
       x-permission: articles.write
       x-entitlement: none
@@ -9661,6 +9696,111 @@ paths:
         "503": { $ref: "#/components/responses/Maintenance" }
         "500": { $ref: "#/components/responses/InternalError" }
 
+  /comments/import:
+    post:
+      operationId: importComments
+      tags: [Comments]
+      summary: Import comments
+      description: |
+        Bring a blog's comments to Writavo when it migrates, or restore them from a Site export
+        (`GET /export` writes them in exactly this shape). Each comment names its article by the
+        article's `post_external_id` (as imported) or its `post_slug` on this Site, in any status.
+        Call it from a server with a secret key.
+
+        **SET on `external_id`.** `external_id` is your old system's comment id, unique on the Site.
+        A row whose `external_id` is already on the Site replaces that comment (article, parent,
+        status, author, text and date); a new one is created. Sending the same rows again changes
+        nothing, so a retried or repeated import never duplicates.
+
+        **Parents before replies.** A reply names its parent by `parent_external_id`, which must be a
+        comment imported earlier: in an earlier call, or earlier in the same call. Writavo has one
+        level of replies, so a reply to a reply joins its parent's thread. A parent on a different
+        article is a problem for that row.
+
+        **Dry run first.** `dry_run` defaults to true: every row is checked and matched, `written`
+        says how many comments would be created and updated, and nothing is stored. Send
+        `dry_run: false` to write. A row with a problem is skipped and listed in `problems`; the
+        valid rows are still written. At most 2,000 rows per call.
+
+        Imported comments keep their dates and status. They are stored whether or not comments are
+        switched on for the Site, and appear on the blog when they are (approved ones only). No
+        `comment.created` webhook fires for imported rows. Each applied import is recorded in the
+        audit log with its counts.
+      x-scope: comments:write
+      x-permission: comments.moderate
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-agent-consequence: Creates or replaces comments on the Site's articles; approved ones show on the live blog while comments are on.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyRequired"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CommentImportInput" }
+            examples:
+              dry_run:
+                summary: Check a comment and its reply, write nothing
+                value:
+                  comments:
+                    - external_id: "wp-comment:41"
+                      post_external_id: "wp:12"
+                      author_name: Sam
+                      author_email: sam@example.org
+                      body: Thanks, the comparison table saved me a week.
+                      created_at: "2024-03-02T09:15:00Z"
+                    - external_id: "wp-comment:42"
+                      post_external_id: "wp:12"
+                      parent_external_id: "wp-comment:41"
+                      author_name: The Example team
+                      author_kind: staff
+                      body: Glad it helped.
+                      created_at: "2024-03-02T11:40:00Z"
+              apply:
+                summary: Write a comment held for review, matched by slug
+                value:
+                  dry_run: false
+                  comments:
+                    - external_id: "disqus:9918"
+                      post_slug: how-to-choose-a-headless-cms
+                      status: pending
+                      author_name: Alex
+                      body: Does this cover self-hosted options?
+                      created_at: "2025-11-20T18:02:11Z"
+      responses:
+        "200":
+          description: The report. With `dry_run` it describes what would be written.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/CommentImportResult" }
+              examples:
+                applied:
+                  summary: Two comments written, one row skipped
+                  value:
+                    ok: true
+                    data:
+                      dry_run: false
+                      written: { created: 1, updated: 1 }
+                      problems:
+                        - index: 2
+                          external_id: "wp-comment:77"
+                          problem: no article on this Site with that post_external_id
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
   /comments/{id}:
     parameters:
       - $ref: "#/components/parameters/CommentId"
@@ -9765,6 +9905,10 @@ paths:
         Publish a reply at once, shown with a team badge (`author_kind: staff`). Replying to a comment
         that is waiting for review approves it, as in WordPress. A reply to a reply joins the same
         thread. `author_name` defaults to the key creator's name, else the Site's name.
+
+        A retry is safe: the same reply (same text) to the same thread within 10 minutes returns the
+        reply already made instead of posting a second one, with or without an `Idempotency-Key`.
+        Send a key as well when your client retries automatically.
       x-scope: comments:write
       x-permission: comments.moderate
       x-entitlement: none
@@ -9773,6 +9917,8 @@ paths:
       x-publishable: false
       x-cross-tenant: 404
       x-agent-consequence: Publishes a reply on the live blog under the team's name, and approves the comment it answers.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyOptional"
       requestBody:
         required: true
         content:
@@ -13937,6 +14083,21 @@ components:
         type: string
         minLength: 1
         maxLength: 255
+    IdempotencyKeyOptional:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: |
+        Optional on this operation. Send a unique key per logical operation (1 to 255 printable
+        ASCII characters; a UUID is the obvious choice) and a retry with the same key and the same
+        body replays the original response instead of doing the work again. Same key with a
+        different body is `409 IDEMPOTENCY_KEY_CONFLICT`; same key while the first request is still
+        running is `409 IDEMPOTENCY_KEY_IN_FLIGHT`. Keys are scoped to the Site and the endpoint
+        and kept for 24 hours. Without a key the request runs as usual.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 255
     IfMatch:
       name: If-Match
       in: header
@@ -14188,6 +14349,13 @@ components:
                 show next to the input.
             approval:
               $ref: "#/components/schemas/ApprovalRef"
+            limit:
+              type: string
+              enum: [reader, site, queue]
+              description: |
+                Present on a `RATE_LIMIT_EXCEEDED` from `POST /comments`: which comment limit was hit.
+                `reader` (5 comments per reader in 10 minutes), `site` (300 per Site per hour) or
+                `queue` (2,000 comments already waiting for review).
             request_id:
               type: string
               description: Quote this when contacting support. It identifies the exact request in our logs.
@@ -14260,8 +14428,8 @@ components:
         updated_at: { type: [string, "null"], format: date-time }
         finished_at: { type: [string, "null"], format: date-time }
         batches: { type: integer }
-        error: { type: [string, "null"], description: Why it stopped, when it did. }
-        last_report: { type: [string, "null"], description: The last batch's report, including where its time went. }
+        error: { type: [string, "null"], description: "Why it stopped, when it did." }
+        last_report: { type: [string, "null"], description: "The last batch's report, including where its time went." }
         document:
           type: object
           properties:
@@ -14281,7 +14449,7 @@ components:
           type: object
           required: [report, ok]
           properties:
-            report: { type: string, description: The dry run, as text. }
+            report: { type: string, description: "The dry run, as text." }
             ok: { type: boolean, description: false when the document could not be checked at all. }
     ErrorCode:
       type: string
@@ -14307,6 +14475,8 @@ components:
         | `SPEND_CAP_REACHED` | 402 | This Site hit its own monthly ceiling. Raise it or wait. |
         | `PAYMENT_METHOD_REQUIRED` | 402 | This would go past your included CMS allowance and there is no payment method on file. Not a plan limit and not an upgrade: CMS resources are pay-as-you-go on every plan. Add a card and retry. Nothing already published stops serving. |
         | `NOT_FOUND` | 404 | No such object, or it belongs to another Site. Deliberately indistinguishable. |
+        | `COMMENTS_DISABLED` | 404 | The Site has reader comments turned off. Turn them on with `PATCH /comments/settings` (`{"enabled": true}`) or in the dashboard, Settings > Site > Reader comments. |
+        | `PARENT_NOT_FOUND` | 404 | The comment in `parent_id` does not exist, is not approved, or is on another article. Reply to an approved comment on the same article. |
         | `SLUG_CONFLICT` | 409 | Another object on this Site already uses that slug. |
         | `IDEMPOTENCY_KEY_CONFLICT` | 409 | The key was reused with a different request body. |
         | `IDEMPOTENCY_KEY_IN_FLIGHT` | 409 | The first request with this key is still running. Retry shortly. |
@@ -14315,6 +14485,7 @@ components:
         | `FEATURE_UNAVAILABLE` | 409 | Writavo has this capability switched off right now: paid backlink data platform wide, or spending while the plan has no daily spend cap configured. Nothing the caller sends changes it. |
         | `PRECONDITION_FAILED` | 412 | Your `If-Match` did not match. Someone else edited it. Re-read and retry. |
         | `VALIDATION_FAILED` | 422 | The request parsed but the values are not acceptable. See `fields`. |
+        | `COMMENTS_CLOSED` | 422 | Comments have closed on this article: it was published longer ago than the Site's `close_after_days`. Raise or clear that setting to reopen them. |
         | `RATE_LIMIT_EXCEEDED` | 429 | Too many requests. Back off and honour `Retry-After`. |
         | `MAINTENANCE` | 503 | Writes are paused for maintenance. Retry later. |
         | `INTERNAL_ERROR` | 500 | Our fault. Safe to retry an idempotent request. |
@@ -14346,6 +14517,9 @@ components:
         - APPROVAL_INVALID
         - PREREQUISITE_MISSING
         - FEATURE_UNAVAILABLE
+        - COMMENTS_DISABLED
+        - COMMENTS_CLOSED
+        - PARENT_NOT_FOUND
 
     Page:
       type: object
@@ -14490,7 +14664,7 @@ components:
         last_event_at: { type: [string, "null"], format: date-time, description: The newest event in the last 90 days. }
         last_event_host: { type: [string, "null"], description: The host of the page that sent it. }
         last_event_path: { type: [string, "null"], description: The path of the page that sent it. }
-        events_24h: { type: integer, description: Pageviews and engagement events counted in the last 24 hours. }
+        events_24h: { type: integer, description: "Events received in the last 24 hours: one per pageview plus the time-on-page pings the script sends while a reader stays, so it is normally higher than pageviews." }
         rejected_hosts:
           type: array
           description: |
@@ -14556,10 +14730,10 @@ components:
       type: object
       required: [visitors, pageviews, bounces, engaged_ms, engaged_samples, avg_engaged_seconds]
       properties:
-        visitors: { type: integer, description: Unique visitors per day, summed over the range. }
+        visitors: { type: integer, description: "Unique visitors per day, summed over the range." }
         pageviews: { type: integer }
         bounces: { type: integer, description: Visits of a single page. }
-        engaged_ms: { type: integer, description: Total time the pages were visible, in milliseconds. }
+        engaged_ms: { type: integer, description: "Total time the pages were visible, in milliseconds." }
         engaged_samples: { type: integer, description: How many engagement measurements `engaged_ms` sums. }
         avg_engaged_seconds: { type: integer, description: "`engaged_ms / engaged_samples / 1000`, rounded; 0 with no samples." }
 
@@ -14608,7 +14782,10 @@ components:
           required: [page, entry_page, source, referrer, utm_source, utm_medium, utm_campaign, country, region, city, device, browser, os]
           properties:
             page: { type: array, items: { $ref: "#/components/schemas/VisitorBreakdownRow" } }
-            entry_page: { type: array, items: { $ref: "#/components/schemas/VisitorBreakdownRow" } }
+            entry_page:
+              type: array
+              items: { $ref: "#/components/schemas/VisitorBreakdownRow" }
+              description: "The page each visit started on. Its columns count the whole visit (every page viewed after entering there), not views of that page: for views of a page, read `page`."
             source: { type: array, items: { $ref: "#/components/schemas/VisitorBreakdownRow" } }
             referrer: { type: array, items: { $ref: "#/components/schemas/VisitorBreakdownRow" } }
             utm_source: { type: array, items: { $ref: "#/components/schemas/VisitorBreakdownRow" } }
@@ -14653,7 +14830,7 @@ components:
                 type: string
                 enum: [page_reachable, tag_present, site_id_matches, collector_public, include_matches, collecting_enabled, recent_events]
               ok: { type: boolean }
-              message: { type: string, description: What was found, and what to fix when it is not ok. }
+              message: { type: string, description: "What was found, and what to fix when it is not ok." }
         script:
           description: The analytics tag found in the page (the one with this Site's id when there are several), or null.
           oneOf:
@@ -14681,21 +14858,27 @@ components:
           type: string
           enum: [reader, staff]
           description: "`staff`: a reply from the Site's team, shown with a badge."
-        body: { type: string, maxLength: 5000, description: Plain text. Render it as text, never as HTML. }
+        body:
+          type: string
+          maxLength: 20000
+          description: Plain text. Render it as text, never as HTML. Up to 5,000 characters, or 20,000 for an imported comment.
         created_at: { type: string, format: date-time }
 
     Comment:
       allOf:
         - { $ref: "#/components/schemas/PublicComment" }
         - type: object
-          required: [status, author_email, source, article_id, article_slug, updated_at, approved_at]
+          required: [status, author_email, source, external_id, article_id, article_slug, updated_at, approved_at]
           properties:
             status: { type: string, enum: [pending, approved, spam] }
             author_email: { type: [string, "null"], description: Never shown publicly. }
             source:
               type: string
-              enum: [hosted, api, dashboard]
-              description: "Where it came from: the hosted blog, `POST /comments`, or the dashboard."
+              enum: [hosted, api, dashboard, import]
+              description: "Where it came from: the hosted blog, `POST /comments`, the dashboard, or `POST /comments/import`."
+            external_id:
+              type: [string, "null"]
+              description: The id it had in the system it was imported from (`POST /comments/import`); null for a comment made on Writavo.
             article_id: { type: string, format: uuid }
             article_slug: { type: [string, "null"] }
             updated_at: { type: string, format: date-time }
@@ -14827,6 +15010,85 @@ components:
       properties:
         deleted: { type: integer, description: How many comments written under the address were deleted. Replies to them go too and are not counted. }
 
+    CommentImportInput:
+      type: object
+      additionalProperties: false
+      required: [comments]
+      description: |
+        At most 2,000 comments per call; split a larger set into several calls, parents in an
+        earlier call than their replies (or earlier in the same call). A body that is not this
+        shape, or is over the cap, is refused whole with 422; a bad ROW is only skipped and
+        reported in `problems`.
+      properties:
+        dry_run:
+          type: boolean
+          default: true
+          description: Check and report without writing. Defaults to true; send false to write.
+        comments:
+          type: array
+          maxItems: 2000
+          items: { $ref: "#/components/schemas/CommentImportRow" }
+
+    CommentImportRow:
+      type: object
+      additionalProperties: false
+      required: [external_id, author_name, body, created_at]
+      description: One comment. Give exactly one of `post_external_id` or `post_slug`.
+      properties:
+        external_id:
+          type: string
+          pattern: "^[!-~]{1,255}$"
+          description: The comment's id in the system it comes from, unique on the Site. A second import with the same id replaces the comment.
+        post_external_id: {type: string, pattern: "^[!-~]{1,255}$", description: The article's external_id on this Site.}
+        post_slug: {type: string, minLength: 1, maxLength: 200, description: Or the article's slug on this Site.}
+        parent_external_id:
+          type: [string, "null"]
+          pattern: "^[!-~]{1,255}$"
+          description: For a reply, the `external_id` of the comment it answers, imported earlier. A reply to a reply joins its parent's thread.
+        status:
+          type: string
+          enum: [approved, pending, spam]
+          default: approved
+          description: "`approved` shows on the blog while comments are on; `pending` waits for review; `spam` is deleted 30 days after the import."
+        author_name: {type: string, minLength: 1, maxLength: 80}
+        author_email:
+          type: [string, "null"]
+          maxLength: 254
+          description: Never shown publicly. Used for a commenter's erasure request (`POST /comments/erase`).
+        author_kind:
+          type: string
+          enum: [reader, staff]
+          default: reader
+          description: "`staff`: a reply from the Site's team, shown with a badge."
+        body: {type: string, minLength: 1, maxLength: 20000, description: Plain text. Line breaks are kept.}
+        created_at:
+          type: string
+          format: date-time
+          description: When it was written, ISO 8601 with a timezone. From 1990 to now.
+
+    CommentImportResult:
+      type: object
+      required: [dry_run, written, problems]
+      properties:
+        dry_run: {type: boolean}
+        written:
+          type: object
+          description: Comments created and replaced by this call. On a dry run, what would be.
+          required: [created, updated]
+          properties:
+            created: {type: integer}
+            updated: {type: integer}
+        problems:
+          type: array
+          description: The rows that were skipped, and why.
+          items:
+            type: object
+            required: [index, external_id, problem]
+            properties:
+              index: {type: integer, description: "The row's position in `comments`, from 0."}
+              external_id: {type: string, description: The row's external_id as sent (empty when it had none).}
+              problem: {type: string}
+
     EngagementImportInput:
       type: object
       additionalProperties: false
@@ -14920,7 +15182,7 @@ components:
           properties:
             daily: {type: integer, description: Days set (one per valid daily row).}
             share_rows: {type: integer, description: Per-platform share rows written (platforms above 0).}
-            picks: {type: integer, description: Readers' reactions that changed. An identical reaction is not rewritten, so a repeat reports 0.}
+            picks: {type: integer, description: "Readers' reactions that changed. An identical reaction is not rewritten, so a repeat reports 0."}
         posts:
           type: array
           description: Per matched article, what the valid rows carry (the same on a dry run).
@@ -14943,7 +15205,7 @@ components:
             required: [section, index, error]
             properties:
               section: {type: string, enum: [daily, reactions]}
-              index: {type: integer, description: The row's position in its array, from 0.}
+              index: {type: integer, description: "The row's position in its array, from 0."}
               error: {type: string}
 
     Redirect:
@@ -14959,7 +15221,7 @@ components:
         from_host:
           type: [string, "null"]
           description: The old URL's host, without `www.`. `null` means a path under the blog root, on every host the blog is served on.
-        from_path: { type: string, description: The old path, lower case, no trailing slash. }
+        from_path: { type: string, description: "The old path, lower case, no trailing slash." }
         from_query:
           type: [string, "null"]
           description: The query parameters the old URL must carry (`p=123`), or `null`.
@@ -14973,7 +15235,7 @@ components:
             Where it points now: a path under the blog root (`/my-post`) or a full URL. `null`
             while the target is not published (or the term is archived): the old URL then gets
             the ordinary 404 rather than a redirect to one.
-        status: { type: integer, enum: [301, 302], description: 301 permanent, 302 temporary. }
+        status: { type: integer, enum: [301, 302], description: "301 permanent, 302 temporary." }
         origin:
           type: string
           enum: [manual, import, slug_change]
@@ -14985,7 +15247,7 @@ components:
             True when Writavo's blog answers this old URL itself. False: install it on your own
             server (`GET /redirects/export`), or apply it in your own front end if you render the
             blog yourself.
-        last_hit_at: { type: [string, "null"], format: date-time, description: Last used, to the hour. }
+        last_hit_at: { type: [string, "null"], format: date-time, description: "Last used, to the hour." }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
 
@@ -15028,7 +15290,7 @@ components:
       additionalProperties: false
       required: [redirects]
       properties:
-        dry_run: { type: boolean, default: true, description: Check and report, write nothing. }
+        dry_run: { type: boolean, default: true, description: "Check and report, write nothing." }
         redirects:
           type: array
           maxItems: 5000
@@ -15064,7 +15326,7 @@ components:
             type: object
             required: [index, error]
             properties:
-              index: { type: integer, description: The row's position in `redirects`, from 0. }
+              index: { type: integer, description: "The row's position in `redirects`, from 0." }
               error: { type: string }
 
     RedirectExport:
@@ -15579,7 +15841,7 @@ components:
         title: { type: [string, "null"], maxLength: 500 }
         competitor: { type: [string, "null"], maxLength: 253, description: The competitor's domain. }
         content: { type: [string, "null"], maxLength: 80000, description: The source page's text. }
-        originality_pct: { type: [number, "null"], minimum: 0, maximum: 100, description: A figure from the old system, kept as reported. }
+        originality_pct: { type: [number, "null"], minimum: 0, maximum: 100, description: "A figure from the old system, kept as reported." }
         target_keywords: { type: array, maxItems: 50, items: { type: string, maxLength: 200 } }
         metrics:
           type: object
@@ -15847,7 +16109,7 @@ components:
       required: [id, seq, source, created_at]
       properties:
         id: { type: string, format: uuid }
-        seq: { type: integer, description: 1 for the first revision, counting up. }
+        seq: { type: integer, description: "1 for the first revision, counting up." }
         source:
           type: string
           enum: [create, baseline, manual, autosave, api, pipeline, import, restore]
@@ -16488,7 +16750,7 @@ components:
       required: [id, type, slug, title, status, data, version, created_at, updated_at]
       properties:
         id: { type: string, format: uuid }
-        type: { type: string, description: The content type's API id., examples: ["product"] }
+        type: { type: string, description: "The content type's API id., examples: [\"product\"]" }
         slug: { type: [string, "null"], description: Unique within the type; singletons have none. }
         external_id: { type: [string, "null"], pattern: "^[\\x21-\\x7E]{1,255}$", description: "Your own id for the entry (an import's source id, an integration's key); unique on the Site. Re-running an import updates the entry that carries it." }
         title: { type: [string, "null"], description: "The value of the type's `title_field`." }
@@ -16934,7 +17196,7 @@ components:
       required: [code, path, message]
       properties:
         code: {type: string, enum: [KNOWLEDGE_PROFILE_INCOMPLETE]}
-        path: {type: string, description: What the warning is about, e.g. `knowledge_profile`.}
+        path: {type: string, description: "What the warning is about, e.g. `knowledge_profile`."}
         message: {type: string}
 
     KnowledgeProfileUpdate:
@@ -16974,7 +17236,7 @@ components:
         example_list_features: {type: string, maxLength: 600, description: The feature-list phrasing the writer should avoid.}
         example_definition_good: {type: string, maxLength: 600, description: A good definitional first sentence.}
         example_definition_bad: {type: string, maxLength: 600, description: A vague opener to avoid.}
-        example_specific_fact: {type: string, maxLength: 600, description: A specific, checkable fact.}
+        example_specific_fact: {type: string, maxLength: 600, description: "A specific, checkable fact."}
         example_vague_fact: {type: string, maxLength: 600, description: The same fact said vaguely.}
         example_citation_link_1: {type: string, maxLength: 600, description: A correctly formatted citation link in markdown.}
         example_citation_link_2: {type: string, maxLength: 600, description: A second correctly formatted citation link in markdown.}
@@ -17609,9 +17871,9 @@ components:
       description: Ready-to-paste reverse proxy snippets. The customer installs one of them.
       required: [cloudflare_worker, next_rewrite, nginx]
       properties:
-        cloudflare_worker: {type: string, description: A Cloudflare Worker script.}
-        next_rewrite: {type: string, description: A `next.config.js` rewrite.}
-        nginx: {type: string, description: An Nginx `location` block.}
+        cloudflare_worker: {type: string, description: "A Cloudflare Worker script. Sends `X-Writavo-Proxy-Key` and `X-Writavo-Reader-IP`, so comment limits apply per reader."}
+        next_rewrite: {type: string, description: "A `next.config.js` rewrite. Cannot forward the reader's address, so comment limits apply per Site."}
+        nginx: {type: string, description: "An Nginx `location` block. Sends `X-Writavo-Proxy-Key` and `X-Writavo-Reader-IP`, so comment limits apply per reader."}
 
     ProxySetup:
       type: object
@@ -18122,7 +18384,7 @@ components:
       properties:
         domain: {type: string, maxLength: 300, description: "A public hostname; a pasted URL is reduced to it (https://www.rival.com/blog is rival.com). A non-ASCII name in its xn-- form."}
         name: {type: [string, "null"], maxLength: 120}
-        blog_url: {type: [string, "null"], maxLength: 2048, description: The competitor's blog listing page (http or https, public hostname, no port). Null clears it.}
+        blog_url: {type: [string, "null"], maxLength: 2048, description: "The competitor's blog listing page (http or https, public hostname, no port). Null clears it."}
 
     SeoImportPosition:
       type: object
@@ -18152,7 +18414,7 @@ components:
           required: [keywords_created, keywords_updated, competitors_created, competitors_updated, positions]
           properties:
             keywords_created: {type: integer}
-            keywords_updated: {type: integer, description: Keywords a sent field changed. An identical row is not rewritten, so a repeat reports 0.}
+            keywords_updated: {type: integer, description: "Keywords a sent field changed. An identical row is not rewritten, so a repeat reports 0."}
             competitors_created: {type: integer}
             competitors_updated: {type: integer, description: Competitors a sent field changed.}
             positions: {type: integer, description: Days of history set (one per valid positions row; a repeat sets them again).}
@@ -18182,7 +18444,7 @@ components:
             required: [section, index, error]
             properties:
               section: {type: string, enum: [keywords, competitors, positions]}
-              index: {type: integer, description: The row's position in its array, from 0.}
+              index: {type: integer, description: "The row's position in its array, from 0."}
               error: {type: string}
 
     KeywordPosition:
@@ -18341,7 +18603,7 @@ components:
                      last_checked_at]
           properties:
             published_articles: {type: integer}
-            internal_links: {type: integer, description: Links from one published article to another, self-links excluded.}
+            internal_links: {type: integer, description: "Links from one published article to another, self-links excluded."}
             external_links: {type: integer}
             avg_inbound: {type: number}
             orphans: {type: integer}
@@ -18391,7 +18653,7 @@ components:
             type: object
             required: [anchor_text, uses, targets, generic, ambiguous]
             properties:
-              anchor_text: {type: string, description: Normalised (lower case, collapsed whitespace, outer punctuation trimmed).}
+              anchor_text: {type: string, description: "Normalised (lower case, collapsed whitespace, outer punctuation trimmed)."}
               uses: {type: integer}
               targets: {type: integer, description: Distinct articles this anchor links to.}
               generic: {type: boolean, description: A phrase like "click here" or "read more".}
@@ -18766,7 +19028,7 @@ components:
           description: True when you gave a link and are not getting a followed one back.
         note: {type: [string, "null"]}
         kind: {type: string, enum: [swap, guest_post, paid, other], description: What was agreed. For the record; it does not change how the links are checked.}
-        contact: {type: [string, "null"], description: Who offered it, as the person wrote it.}
+        contact: {type: [string, "null"], description: "Who offered it, as the person wrote it."}
         agreed_at: {type: [string, "null"], format: date-time, description: When the status first became `agreed`. Set by Writavo.}
         history:
           type: [array, "null"]
@@ -18810,7 +19072,7 @@ components:
               properties:
                 http_status: {type: [integer, "null"]}
                 title: {type: [string, "null"]}
-                noindex: {type: [boolean, "null"], description: True when the page is hidden from search engines, so its link counts for nothing.}
+                noindex: {type: [boolean, "null"], description: "True when the page is hidden from search engines, so its link counts for nothing."}
                 outbound_domains: {type: [integer, "null"], description: Distinct other sites the page links to.}
         our_link:
           type: object
@@ -18856,7 +19118,7 @@ components:
           type: string
           enum: [follow, nofollow]
           description: What a link of yours to another site gets unless the link says otherwise (`external_link_rel` in the Site settings).
-        attention: {type: integer, description: How many exchanges need attention, before any filter.}
+        attention: {type: integer, description: "How many exchanges need attention, before any filter."}
         items:
           type: array
           items: { $ref: "#/components/schemas/LinkExchange" }
@@ -18880,7 +19142,7 @@ components:
         our_article_id: {type: [string, "null"], format: uuid, description: The article expected to carry your link.}
         status: {type: string, enum: [proposed, agreed, declined, ended], default: proposed}
         kind: {type: string, enum: [swap, guest_post, paid, other], default: swap}
-        contact: {type: [string, "null"], maxLength: 200, description: Who offered it (a name, an address, a handle).}
+        contact: {type: [string, "null"], maxLength: 200, description: "Who offered it (a name, an address, a handle)."}
         note: {type: [string, "null"], maxLength: 2000}
 
     LinkExchangeUpdate:
@@ -18903,7 +19165,7 @@ components:
       required: [url]
       additionalProperties: false
       properties:
-        url: {type: string, format: uri, maxLength: 2000, description: The page they offered, as a full URL.}
+        url: {type: string, format: uri, maxLength: 2000, description: "The page they offered, as a full URL."}
 
     LinkProspectReport:
       type: object
@@ -18964,7 +19226,7 @@ components:
             external: {type: integer}
             broken: {type: integer}
             unchecked: {type: integer}
-            nofollow: {type: integer, description: Links that are not followed (nofollow, sponsored or ugc).}
+            nofollow: {type: integer, description: "Links that are not followed (nofollow, sponsored or ugc)."}
             internal_nofollow: {type: integer, description: Links between the Site's own pages that somebody set to not followed.}
         links:
           type: array
@@ -19003,7 +19265,7 @@ components:
       required: [backlink_data, total_domains, total_links, domains]
       properties:
         own_domain: {type: [string, "null"]}
-        backlink_data: {type: boolean, description: False when the Site has no backlink data, so `links_back` cannot be answered.}
+        backlink_data: {type: boolean, description: "False when the Site has no backlink data, so `links_back` cannot be answered."}
         total_domains: {type: integer}
         total_links: {type: integer}
         reciprocal_domains: {type: [integer, "null"]}
@@ -19555,9 +19817,9 @@ components:
           enum: [card, balance, writavo, automatic, null]
           description: How it was paid, when that applies.
         label: {type: string, description: A short description a person can read.}
-        quantity: {type: [number, "null"], description: Units of the action, for credit usage.}
-        customer_note: {type: [string, "null"], description: A note Writavo left for the customer, if any.}
-        website_id: {type: [string, "null"], format: uuid, description: The Site the movement belongs to, when it belongs to one.}
+        quantity: {type: [number, "null"], description: "Units of the action, for credit usage."}
+        customer_note: {type: [string, "null"], description: "A note Writavo left for the customer, if any."}
+        website_id: {type: [string, "null"], format: uuid, description: "The Site the movement belongs to, when it belongs to one."}
         linked_id:
           type: [integer, "null"]
           description: For a pack bought with the balance, the `id` of the other half (the USD row for the credit row, and back).
@@ -19904,6 +20166,10 @@ components:
         | upload | `POST /media/upload-url` and `POST /seo/backlinks/import` | 60 per minute |
         | pipeline | `POST /pipeline/runs`, `POST /pipeline/articles/{id}/requeue`, `POST /delivery/cms/push` and the seven paid SEO scans | 10 per minute |
         | auth | `POST /auth/device` and `POST /auth/device/token`, per IP address | 60 per minute |
+
+        `POST /comments` has three limits of its own on top of its class, and its 429 names the one
+        it hit in `error.limit`: `reader` (5 comments per reader in 10 minutes, by `reader_ip`),
+        `site` (300 comments per Site per hour) and `queue` (2,000 comments waiting for review).
 
         Every response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`,
         so you can slow down before you are refused rather than after.

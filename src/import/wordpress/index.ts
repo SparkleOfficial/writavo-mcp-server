@@ -6,14 +6,14 @@ import { mapWordPressExport, type WordPressConversion } from "./map.js";
 import { looksLikeWxr, readWxr } from "./wxr.js";
 
 export { looksLikeWxr, readWxr, WxrReader, collect, type WxrRecord } from "./wxr.js";
-export { mapWordPressExport, type ConversionReport, type WordPressConversion } from "./map.js";
-export { wordpressHtmlToMarkdown, htmlToPlainText } from "./html.js";
+export { mapWordPressExport, convertComments, commentExternalId, type ConversionReport, type WordPressConversion } from "./map.js";
+export { wordpressHtmlToMarkdown, htmlToPlainText, commentHtmlToText } from "./html.js";
 export { wpautop } from "./autop.js";
 export { readImportBody, MAX_WXR_BYTES, type ReadImportBody } from "./stream.js";
 export { probeSite, pullStep, restBase, setSiteName, PullError, type WordPressSite, type PullState, type Fetcher } from "./rest.js";
 export { stagedOptions } from "./staged.js";
 export { stageWxr, convertStaged, assembleStaged, clearStaged, readStageState, sniffBody, type StageStore, type StageState, type StageOutcome } from "./staged.js";
-export type { WpExport, WpItem } from "./model.js";
+export type { WpComment, WpExport, WpItem } from "./model.js";
 
 export type WxrConversion = WordPressConversion | { error: string };
 

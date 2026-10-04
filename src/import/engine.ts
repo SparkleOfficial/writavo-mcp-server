@@ -4,7 +4,7 @@ import { MediaError, fetchImage, uploadImage } from "../api/media.js";
 import { newApiStats, type ApiStats, type ToolContext } from "../core/context.js";
 import { formatApiError, text, toolError, type ToolResult } from "../errors.js";
 import { SCOPE_SCREEN } from "../generated/scopes.js";
-import { howtoSteps, type CostEntry, type ImportArticle, type ImportAuthor, type ImportEntry, type ImportEnvelope, type ImportTerm } from "./format.js";
+import { howtoSteps, type CostEntry, type ImportArticle, type ImportComment, type ImportAuthor, type ImportEntry, type ImportEnvelope, type ImportTerm } from "./format.js";
 import { articleImages, htmlImageCount, isHttps, rewriteMarkdownImages } from "./images.js";
 import { newProgress, type ImportProgress, type ProgressItem, type ProgressStore } from "./progress.js";
 import {
@@ -23,7 +23,7 @@ import {
   type SiteInfo,
   type SiteTerm,
 } from "./site.js";
-import { checkDocument, itemLabel, seoKeywordKey, type ContentTypesCheck, type EngagementCheck, type EntriesCheck, type ItemCheck, type ProfileCheck, type RedirectsCheck, type SeoCheck } from "./validate.js";
+import { checkDocument, itemLabel, seoKeywordKey, type CommentsCheck, type ContentTypesCheck, type EngagementCheck, type EntriesCheck, type ItemCheck, type ProfileCheck, type RedirectsCheck, type SeoCheck } from "./validate.js";
 
 /**
  * The importer. One tool call is either a dry run (reads only, writes nothing, not even the
@@ -182,6 +182,8 @@ interface Loaded {
   envelopeErrors: string[];
   /** The engagement section's valid rows and skipped-row problems (validate.ts). */
   engagement: EngagementCheck;
+  /** The comments section's valid rows, in sending order, and skipped-row problems (validate.ts). */
+  comments: CommentsCheck;
   /** The SEO section's valid rows and skipped-row problems (validate.ts). */
   seo: SeoCheck;
   /** The redirects section's valid rows and skipped-row problems (validate.ts). */
@@ -463,6 +465,7 @@ async function load(api: ToolContext, source: ImportSource): Promise<Loaded | To
     envelope,
     envelopeErrors: checked.envelopeErrors,
     engagement: checked.engagement,
+    comments: checked.comments,
     seo: checked.seo,
     redirects: checked.redirects,
     contentTypes: checked.contentTypes,
@@ -676,6 +679,7 @@ async function dryRun(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
   if (withCustomFields) lines.push("", `Articles' custom fields: ${withCustomFields} articles carry them; set after every entry exists, with their references and media resolved.`);
   lines.push(...redirectsDryRun(ctx));
   lines.push(...engagementDryRun(ctx, byExternalId, bySlug));
+  lines.push(...commentsDryRun(ctx, byExternalId, bySlug));
   lines.push(...(await seoDryRun(ctx)));
   lines.push(...(await profileDryRun(ctx)));
 
@@ -683,6 +687,7 @@ async function dryRun(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
   const otherWork: string[] = [];
   if (counts.costOnLive) otherWork.push(`cost history on ${plural(counts.costOnLive, "live article")}`);
   if (engagementPending(ctx)) otherWork.push("the engagement history");
+  if (commentsPending(ctx)) otherWork.push("the reader comments");
   if (seoPending(ctx)) otherWork.push("the SEO data");
   if (redirectsPending(ctx)) otherWork.push("redirects");
   if (contentTypesPending(ctx)) otherWork.push("content types");
@@ -696,11 +701,17 @@ async function dryRun(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
   if (authorsToCreate.length + authorsToFill.length > 0) needs.set("authors:write", "creating and filling in authors");
   if (opts.rehostImages && toCopy.size > 0) needs.set("media:write", "copying images into the media library");
   if (engagementPending(ctx)) needs.set("engagement:write", "the engagement history");
+  if (commentsPending(ctx)) needs.set("comments:write", "the reader comments");
   if (seoPending(ctx)) needs.set("seo:write", "the SEO data: keywords, competitors and ranking history");
   if (contentTypesPending(ctx)) needs.set("content_types:write", "content types");
   if (entriesPending(ctx)) needs.set("entries:write", "entries");
   if (profilePending(ctx)) needs.set("site:write", "the AI writing profile");
   const missingScopes = await scopeReport(ctx, needs, lines);
+  // "Migrate a blog" deliberately leaves Reader comments off (the queue carries commenters' email
+  // addresses), so the general advice above does not cover it: say exactly what does.
+  if (missingScopes.includes("comments:write")) {
+    lines.push(`Reader comments are not part of "Migrate a blog" (that row is opt-in). ${COMMENTS_SCOPE_ADVICE}. Applied without it, everything else is imported and the comments are reported as skipped.`);
+  }
 
   const topLevel = ctx.envelopeErrors;
   if (topLevel.length > 0) {
@@ -771,6 +782,8 @@ async function dryRun(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
  * SEO (keywords, competitors, ranking history). The dashboard's "Migrate a blog" permission
  * shortcut grants exactly these (apps/dashboard/lib/agents.ts MIGRATION_WRITE_AREAS). Asked for
  * up front, so a migration is never stopped halfway by a permission it could have asked for.
+ * comments:write is deliberately not one of them: Reader comments is an opt-in row (the queue
+ * carries commenters' email addresses), so an import without it reports how to turn it on.
  */
 export const MIGRATION_SCOPES: readonly string[] = [
   "articles:write", "engagement:write", "entries:write", "content_types:write", "taxonomy:write",
@@ -1493,6 +1506,186 @@ function engagementReport(ctx: Loaded): string[] {
 }
 
 // ---------------------------------------------------------------------------
+// Reader comments (the document's optional comments section, POST /comments/import, 0160)
+// ---------------------------------------------------------------------------
+/** The API's caps on one POST /comments/import: 2,000 rows, a body of about 8 MB. A chunk stops
+ *  at either, with room to spare under the body limit. */
+export const COMMENTS_CHUNK = { rows: 2_000, bytes: 6 * 1024 * 1024 } as const;
+
+/** What to do when the connection lacks comments:write: the opt-in row, on the same connection. */
+export const COMMENTS_SCOPE_ADVICE =
+  "Turn on Reader comments for this connection in Writavo > Settings > AI agents (for an import started from the dashboard's Import page, the person running it needs the Moderate comments permission), then run the import again; articles already imported are not duplicated";
+const COMMENTS_SCOPE_MISSING = `this connection lacks comments:write (${SCOPE_SCREEN["comments:write"]?.replace(/ \(.*$/, "") ?? "Reader comments, Read and moderate"})`;
+
+interface CommentsImportReply {
+  dry_run?: boolean;
+  written?: { created?: number; updated?: number };
+  problems?: { index: number; external_id?: string; problem: string }[];
+}
+
+/** v1: rows in sending order (validate.ts orderComments), so a changed order is a changed section. */
+function commentsHash(c: CommentsCheck): string {
+  return sha256(JSON.stringify({ v: 1, rows: c.rows }));
+}
+
+/** The section has rows that have not all been delivered, as the document now has them. */
+function commentsPending(ctx: Loaded): boolean {
+  if (ctx.comments.rows.length === 0) return false;
+  const p = ctx.progress.comments;
+  return !(p && p.hash === commentsHash(ctx.comments) && p.done);
+}
+
+/** A row as the API takes it: what the document left null is left out. */
+function commentWire(c: ImportComment): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(c).filter(([, v]) => v !== null && v !== undefined));
+}
+
+const utf8 = new TextEncoder();
+
+/**
+ * The next chunk of `rows` from `from`: at most COMMENTS_CHUNK.rows rows and COMMENTS_CHUNK.bytes of
+ * JSON, and always at least one row. Rows go in order, so a reply is never in an earlier chunk than
+ * its parent (orderComments put every parent first).
+ */
+export function nextCommentChunk(rows: ImportComment[], from: number, limits: { rows: number; bytes: number } = COMMENTS_CHUNK): Record<string, unknown>[] {
+  const out: Record<string, unknown>[] = [];
+  let bytes = 64;
+  for (let i = from; i < rows.length && out.length < limits.rows; i += 1) {
+    const wire = commentWire(rows[i]!);
+    const size = utf8.encode(JSON.stringify(wire)).length + 1;
+    if (out.length > 0 && bytes + size > limits.bytes) break;
+    out.push(wire);
+    bytes += size;
+  }
+  return out;
+}
+
+/**
+ * Send what is left of the section, a chunk per request. Comments are SET on their external_id, so
+ * a chunk sent twice changes nothing. A reason to stop (time, requests, a busy API), or null when
+ * this call finished (delivered, or refused for a reason recorded in progress.comments.error, which
+ * the next apply retries). A missing comments:write is recorded, not fatal: the articles do not
+ * need it, and the opt-in Reader comments row is not part of "Migrate a blog".
+ */
+async function sendComments(state: ApplyState): Promise<string | null> {
+  const { ctx } = state;
+  const rows = ctx.comments.rows;
+  const hash = commentsHash(ctx.comments);
+  if (!ctx.progress.comments || ctx.progress.comments.hash !== hash) {
+    ctx.progress.comments = { hash, started: new Date().toISOString(), sent: 0, done: false, written: { created: 0, updated: 0 }, problems: [], problem_count: 0 };
+  }
+  const p = ctx.progress.comments;
+  delete p.error;
+  while (p.sent < rows.length) {
+    if (Date.now() > state.deadline) return "the time for this call ran out while sending the reader comments";
+    const max = state.opts.budget?.maxRequests;
+    if (max !== undefined && requestsUsed(state) + 1 > max) return REQUEST_BUDGET_SPENT;
+    const chunk = nextCommentChunk(rows, p.sent);
+    try {
+      const res = await call<CommentsImportReply>(
+        ctx.api,
+        {
+          method: "POST",
+          path: "/comments/import",
+          body: { dry_run: false, comments: chunk },
+          // The delivery's start is in the key: a resumed chunk replays safely, while a delivery
+          // started again (a changed section, retry_failed, a refusal now fixed) is new work.
+          headers: { "Idempotency-Key": `import-comments-${sha256(`${p.started}|${hash}|${JSON.stringify(chunk)}`)}` },
+        },
+        state.hardDeadline,
+      );
+      p.written.created += res.data?.written?.created ?? 0;
+      p.written.updated += res.data?.written?.updated ?? 0;
+      for (const prob of res.data?.problems ?? []) {
+        p.problem_count += 1;
+        const id = prob.external_id || String(chunk[prob.index]?.external_id ?? `#${p.sent + prob.index}`);
+        if (p.problems.length < 40) p.problems.push(`comment ${id}: ${prob.problem}`);
+      }
+      p.sent += chunk.length;
+      await save(state, true);
+    } catch (err) {
+      if (isFatal(err) && err.code !== "INSUFFICIENT_SCOPE") throw err;
+      if (isTransient(err)) return `the API was busy (${apiProblem(err)}) while sending the reader comments`;
+      p.error =
+        err instanceof WritavoApiError && err.code === "INSUFFICIENT_SCOPE"
+          ? `${COMMENTS_SCOPE_MISSING}. ${COMMENTS_SCOPE_ADVICE}`
+          : err instanceof WritavoApiError && err.status === 404
+            ? "this Site's API does not accept comments yet"
+            : apiProblem(err);
+      // Fresh keys for the next attempt, so a refusal is never replayed once its cause is fixed.
+      p.started = new Date().toISOString();
+      await save(state, true);
+      return null;
+    }
+  }
+  p.done = true;
+  await save(state, true);
+  return null;
+}
+
+/**
+ * The dry run's view of the comments section: what it carries, and which rows point at no post
+ * (not in the document and not on the Site). Nothing is sent in a dry run: the posts may not exist
+ * yet, and a parent in this document is only on the Site once the apply sends it.
+ */
+function commentsDryRun(ctx: Loaded, byExternalId: Map<string, SiteArticle>, bySlug: Map<string, SiteArticle>): string[] {
+  const c = ctx.comments;
+  if (c.rows.length === 0 && c.problems.length === 0) return [];
+  const docIds = new Set(ctx.valid.map((v) => v.article.external_id));
+  const docSlugs = new Set(ctx.valid.map((v) => v.article.slug).filter((x): x is string => Boolean(x)));
+  const known = (row: ImportComment) =>
+    row.post_external_id != null ? docIds.has(row.post_external_id) || byExternalId.has(row.post_external_id) : docSlugs.has(row.post_slug!) || bySlug.has(row.post_slug!);
+  const status = (s: string) => c.rows.filter((r) => (r.status ?? "approved") === s).length;
+  const ids = new Set(c.rows.map((r) => r.external_id));
+  const replies = c.rows.filter((r) => r.parent_external_id != null).length;
+  const outside = c.rows.filter((r) => r.parent_external_id != null && !ids.has(r.parent_external_id)).length;
+  const orphans = c.rows.filter((r) => !known(r)).length;
+  const posts = new Set(c.rows.map((r) => r.post_external_id ?? `slug:${r.post_slug}`)).size;
+  const lines = [
+    "",
+    `Reader comments: ${c.rows.length} (${status("approved")} approved, ${status("pending")} pending, ${status("spam")} spam) on ${plural(posts, "post")}, ${replies} of them replies. Sent after every article, up to ${COMMENTS_CHUNK.rows} a call, every parent before its replies; matched on external_id, so re-running updates them and never duplicates. Imported comments notify nobody.`,
+  ];
+  if (c.rows.length > 0 && !commentsPending(ctx)) lines.push("Reader comments: already delivered by an earlier run.");
+  if (orphans) lines.push(`${plural(orphans, "comment")} ${orphans === 1 ? "names" : "name"} a post that is neither in this document nor on the Site; ${orphans === 1 ? "it" : "they"} will be skipped.`);
+  if (outside) {
+    lines.push(
+      `${outside === 1 ? "1 reply names" : `${outside} replies name`} a parent comment that is not in this document; it must already be on the Site from an earlier import, or ${outside === 1 ? "the reply is" : "they are"} skipped.`,
+    );
+  }
+  if (c.problems.length) lines.push(`Comments with problems, skipped (${c.problems.length}):`, ...listed(c.problems.map((x) => `- ${x}`), 20));
+  return lines;
+}
+
+/** The comments section's lines for an apply reply. */
+function commentsReport(ctx: Loaded): string[] {
+  const c = ctx.comments;
+  const p = ctx.progress.comments;
+  if (c.rows.length === 0 && c.problems.length === 0) return [];
+  const lines = [""];
+  const skippedCount = c.problems.length + (p?.problem_count ?? 0);
+  if (c.rows.length === 0) {
+    lines.push("Reader comments: none to send.");
+  } else if (p?.done && p.hash === commentsHash(c)) {
+    lines.push(`Reader comments: delivered. Created ${p.written.created}, updated ${p.written.updated}, skipped ${skippedCount}.`);
+  } else if (p?.error) {
+    lines.push(
+      p.error.startsWith(COMMENTS_SCOPE_MISSING)
+        ? `Reader comments: NOT imported, because ${p.error}.`
+        : `Reader comments: NOT imported, because ${p.error}. The articles are not affected; run the import again later to send them.`,
+    );
+  } else {
+    lines.push(`Reader comments: ${p?.sent ?? 0} of ${c.rows.length} sent so far (created ${p?.written.created ?? 0}, updated ${p?.written.updated ?? 0}).`);
+  }
+  const skipped = [...c.problems, ...(p?.problems ?? [])];
+  if (skipped.length) {
+    const unlisted = (p?.problem_count ?? 0) - (p?.problems.length ?? 0);
+    lines.push(`Comments skipped (${skippedCount}):`, ...listed(skipped.map((x) => `- ${x}`), 20), ...(unlisted > 0 ? [`- and ${unlisted} more the Site skipped`] : []));
+    if (p?.done && p.problem_count) lines.push("To send the comments again once that is fixed (a missing article imported, say), run the import again with retry_failed: true.");
+  }
+  return lines;
+}
+
+// ---------------------------------------------------------------------------
 // SEO data (the document's optional seo section, POST /seo/import, 0143)
 // ---------------------------------------------------------------------------
 /** Rows per call to POST /seo/import: within the API's caps (100 / 2,000 / 10,000), with room
@@ -2191,6 +2384,23 @@ async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
     const why = await sendEngagement(state);
     if (why) stopped = why;
   }
+  // Reader comments after the engagement (they need their articles to exist), parents first. A
+  // missing comments:write is recorded and reported, never a reason to stop the import.
+  // retry_failed sends a delivered section again when the Site skipped rows.
+  if (remaining === 0 && !stopped && opts.retryFailed && ctx.progress.comments?.done && ctx.progress.comments.problem_count > 0) {
+    delete ctx.progress.comments;
+  }
+  if (remaining === 0 && !stopped && commentsPending(ctx)) {
+    try {
+      const why = await sendComments(state);
+      if (why) stopped = why;
+    } catch (err) {
+      await save(state, true);
+      if (err instanceof OutOfRequests) stopped = REQUEST_BUDGET_SPENT;
+      else if (isFatal(err)) return tagged("stopped", stopReport(state, err));
+      else throw err;
+    }
+  }
   // The SEO data last (keyed on keywords and domains, not on the posts). retry_failed sends a
   // delivered section again when the Site skipped rows, e.g. after the plan's keyword limit rose.
   if (remaining === 0 && !stopped && opts.retryFailed && ctx.progress.seo?.done && ctx.progress.seo.problems.length > 0) {
@@ -2221,11 +2431,12 @@ async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
   const costUnfinished = costHistoryTargets(ctx).length > 0 && !ctx.progress.cost_history_error;
   const redirectsUnfinished = redirectsPending(ctx) && !ctx.progress.redirects?.error;
   const engagementUnfinished = engagementPending(ctx) && !ctx.progress.engagement?.error;
+  const commentsUnfinished = commentsPending(ctx) && !ctx.progress.comments?.error;
   const seoUnfinished = seoPending(ctx) && !ctx.progress.seo?.error;
   const sectionsUnfinished =
     (contentTypesPending(ctx) && !ctx.progress.content_types?.error) || entriesPending(ctx) || customFieldsPending(ctx);
   const profileUnfinished = profilePending(ctx) && !profileRefused(ctx);
-  const allDone = remaining === 0 && !engagementUnfinished && !seoUnfinished && !redirectsUnfinished && !costUnfinished && !sectionsUnfinished && !profileUnfinished;
+  const allDone = remaining === 0 && !engagementUnfinished && !commentsUnfinished && !seoUnfinished && !redirectsUnfinished && !costUnfinished && !sectionsUnfinished && !profileUnfinished;
   const c = state.counts;
   const lines: string[] = [];
   const thisCall = `This call: created ${c.created}, updated ${c.updated}, published ${c.published}${c.scheduled ? `, scheduled ${c.scheduled}` : ""}${c.unchanged ? `, already up to date ${c.unchanged}` : ""}, left unchanged ${c.deferred}, skipped ${c.skipped}, failed ${c.failed}. Images copied ${c.imagesCopied}${c.imagesFailed ? `, not copied ${c.imagesFailed}` : ""}.`;
@@ -2252,6 +2463,7 @@ async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
     lines.push(...costHistoryReport(ctx));
     lines.push(...redirectsReport(ctx));
     lines.push(...engagementReport(ctx));
+    lines.push(...commentsReport(ctx));
     lines.push(...seoReport(ctx));
     lines.push(...(await profileReport(ctx, true)));
     lines.push(
@@ -2267,7 +2479,7 @@ async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
       remaining === 0
         ? sectionsUnfinished
           ? `Every article is imported into the Site "${ctx.site.name}"; the content types, entries or custom fields are still being written.`
-          : `Every article is imported into the Site "${ctx.site.name}"; ${[costUnfinished && "the cost history", redirectsUnfinished && "the redirects", engagementUnfinished && "the engagement history", seoUnfinished && "the SEO data"].filter(Boolean).join(" and ")} ${[costUnfinished, redirectsUnfinished, engagementUnfinished, seoUnfinished].filter(Boolean).length > 1 ? "are" : "is"} still being sent.`
+          : `Every article is imported into the Site "${ctx.site.name}"; ${[costUnfinished && "the cost history", redirectsUnfinished && "the redirects", engagementUnfinished && "the engagement history", commentsUnfinished && "the reader comments", seoUnfinished && "the SEO data"].filter(Boolean).join(" and ")} ${[costUnfinished, redirectsUnfinished, engagementUnfinished, seoUnfinished].filter(Boolean).length + (commentsUnfinished ? 2 : 0) > 1 ? "are" : "is"} still being sent.`
         : `Imported a batch into the Site "${ctx.site.name}". ${ctx.valid.length - remaining} of ${ctx.valid.length} articles are done and ${remaining} remain.`,
       "",
       thisCall,
@@ -2280,6 +2492,7 @@ async function apply(opts: ImportOptions, ctx: Loaded): Promise<ToolResult> {
     lines.push(...costHistoryReport(ctx));
     lines.push(...redirectsReport(ctx));
     lines.push(...engagementReport(ctx));
+    lines.push(...commentsReport(ctx));
     lines.push(...seoReport(ctx));
     lines.push(...(await profileReport(ctx, false)));
     if (ctx.source.store) {
@@ -2356,6 +2569,7 @@ export interface ImportProgressSummary {
   work_units: number;
   /** What the sections after the articles delivered, for status replies (absent: nothing to say). */
   engagement?: { daily: number; share_rows: number; picks: number; done: boolean; error: string | null };
+  comments?: { created: number; updated: number; problems: number; done: boolean; error: string | null };
   seo?: { keywords_created: number; keywords_updated: number; competitors_created: number; competitors_updated: number; positions: number; done: boolean; error: string | null };
   cost_history?: { written: number; refused: number; error: string | null };
   redirects?: { created: number; updated: number; unchanged: number; done: boolean; error: string | null };
@@ -2377,6 +2591,9 @@ export function summariseProgress(progress: ImportProgress | null, articlesTotal
     work_units: sectionWorkUnits(progress),
     ...(progress?.engagement
       ? { engagement: { ...progress.engagement.written, done: progress.engagement.done, error: progress.engagement.error ?? null } }
+      : {}),
+    ...(progress?.comments
+      ? { comments: { ...progress.comments.written, problems: progress.comments.problem_count, done: progress.comments.done, error: progress.comments.error ?? null } }
       : {}),
     ...(progress?.seo ? { seo: { ...progress.seo.written, done: progress.seo.done, error: progress.seo.error ?? null } } : {}),
     ...(progress?.cost_history || progress?.cost_history_error
@@ -3008,7 +3225,7 @@ async function profileReport(ctx: Loaded, final: boolean): Promise<string[]> {
 }
 
 /** Everything done since the last batch that the article counters do not show (the job runner's
- *  "did this batch move?"): content types, entries, custom fields, redirects and engagement sent. */
+ *  "did this batch move?"): content types, entries, custom fields, redirects, engagement and comments sent. */
 function sectionWorkUnits(progress: ImportProgress | null): number {
   if (!progress) return 0;
   const entries = Object.values(progress.entries ?? {});
@@ -3020,6 +3237,7 @@ function sectionWorkUnits(progress: ImportProgress | null): number {
     Object.values(progress.cost_history ?? {}).filter((c) => c.done).length +
     (progress.redirects?.sent ?? 0) +
     (progress.engagement ? progress.engagement.daily_sent + progress.engagement.reactions_sent : 0) +
+    (progress.comments?.sent ?? 0) +
     (progress.seo ? progress.seo.competitors_sent + progress.seo.keywords_sent + progress.seo.positions_sent : 0) +
     (progress.profile?.done ? 1 : 0)
   );

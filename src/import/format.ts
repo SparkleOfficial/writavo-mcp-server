@@ -323,6 +323,53 @@ export type EngagementDaily = z.infer<typeof EngagementDailySchema>;
 export type EngagementReaction = z.infer<typeof EngagementReactionSchema>;
 
 // ---------------------------------------------------------------------------
+// Reader comments (optional): the old blog's conversations, POST /comments/import (0160)
+// ---------------------------------------------------------------------------
+
+/** POST /comments/import's per-row limits (0160 comment_import_row_error), with its wording. */
+export const COMMENT_LIMITS = { authorName: 80, authorEmail: 254, body: 20_000, postSlug: 200 } as const;
+export const COMMENT_STATUSES = ["approved", "pending", "spam"] as const;
+/** Comments in one document; the import sends them 2,000 to a call. */
+export const MAX_COMMENTS = 200_000;
+
+/** Characters as Postgres counts them (code points), after the API's own clean-up. */
+const pgLength = (s: string) => [...s].length;
+const commentId = (what: string) => z.string().regex(EXTERNAL_ID_PATTERN, `${what} must be 1 to 255 printable ASCII characters with no spaces`);
+
+export const CommentSchema = z
+  .strictObject({
+    external_id: commentId("external_id").describe("The source system's comment id. Re-running an import updates the comment with this id, never duplicates it."),
+    post_external_id: commentId("post_external_id").nullable().optional().describe("The article it is on, by external_id (in articles[] or already on the Site)."),
+    post_slug: z.string().min(1).max(COMMENT_LIMITS.postSlug, "post_slug must be a string of 1 to 200 characters").nullable().optional().describe("Or the article's slug on the Site."),
+    parent_external_id: commentId("parent_external_id")
+      .nullable()
+      .optional()
+      .describe("The comment it replies to, imported earlier (in this document or a previous import). A reply to a reply joins the top-level thread."),
+    status: z.enum(COMMENT_STATUSES, { error: "status must be approved, pending or spam" }).optional().describe("approved (the default), pending or spam."),
+    author_name: z
+      .string()
+      .refine((s) => pgLength(s.replace(/\s+/g, " ").trim()) >= 1 && pgLength(s.replace(/\s+/g, " ").trim()) <= COMMENT_LIMITS.authorName, "author_name is required, 1 to 80 characters")
+      .describe("The commenter's name as shown, 1 to 80 characters."),
+    author_email: z
+      .string()
+      .max(COMMENT_LIMITS.authorEmail, "author_email must be a valid email address")
+      .regex(/^\s*[^@\s]+@[^@\s]+\.[^@\s]+\s*$/, "author_email must be a valid email address")
+      .nullable()
+      .optional()
+      .describe("Kept private: only moderators see it."),
+    author_kind: z.enum(["reader", "staff"], { error: "author_kind must be reader or staff" }).optional().describe("reader (the default) or staff (a reply from the blog's team)."),
+    body: z
+      .string()
+      .refine((s) => pgLength(s.trim()) >= 1 && pgLength(s.trim()) <= COMMENT_LIMITS.body, "body is required, 1 to 20,000 characters")
+      .describe("Plain text; a blank line separates paragraphs. No HTML or markdown is rendered."),
+    created_at: dateTime.describe("When it was written, from 1990 to now."),
+  })
+  .refine((c) => (c.post_external_id == null) !== (c.post_slug == null), { message: "give exactly one of post_external_id or post_slug", path: ["post_external_id"] })
+  .describe("One reader comment.");
+
+export type ImportComment = z.infer<typeof CommentSchema>;
+
+// ---------------------------------------------------------------------------
 // SEO data (optional): the keywords a Site tracks, its competitors and its ranking history
 // ---------------------------------------------------------------------------
 
@@ -512,6 +559,13 @@ const documentFields = {
   categories: z.array(CategorySchema).optional(),
   tags: z.array(TagSchema).optional(),
   engagement: EngagementSchema.optional(),
+  comments: z
+    .array(CommentSchema)
+    .max(MAX_COMMENTS)
+    .optional()
+    .describe(
+      "Optional reader comments, sent after every article. Matched on external_id, so re-running updates rather than duplicates. A reply names its parent by parent_external_id; Writavo sends parents before their replies.",
+    ),
   seo: SeoSchema.optional(),
   profile: ProfileSchema.optional(),
   redirects: z
@@ -550,6 +604,7 @@ export const ImportEnvelopeSchema = z.strictObject({
   // Rows are checked one by one (validate.ts), so one bad row is reported and skipped rather than
   // failing the document or the articles.
   engagement: EngagementEnvelopeSchema.optional(),
+  comments: z.array(z.unknown()).max(MAX_COMMENTS).optional(),
   seo: SeoEnvelopeSchema.optional(),
   redirects: z.array(z.unknown()).max(50_000).optional(),
   content_types: z.array(z.unknown()).max(100).optional(),
@@ -709,6 +764,23 @@ in this document or already on the Site) or slug:
 It is sent after every article is imported; a bad row is reported and skipped, never a reason to
 refuse the articles.
 
+Reader comments (optional, top level): the old blog's comments, so a migrated blog keeps its
+conversations. [{ external_id, post_external_id | post_slug, parent_external_id?, status?,
+author_name, author_email?, author_kind?, body, created_at }]:
+- external_id: the source system's comment id (1 to 255 printable ASCII characters, no spaces).
+  Comments are matched on it, so re-running updates them and never duplicates.
+- post_external_id (an article in this document or already on the Site) or post_slug: exactly one.
+- parent_external_id: the comment it replies to, in this document or imported before. Writavo sends
+  parents before their replies; a reply to a reply joins the top-level thread.
+- status: approved (default), pending or spam. author_kind: reader (default) or staff.
+- author_name (1 to 80 characters), author_email (optional, only moderators see it), body (plain
+  text, 1 to 20,000 characters; a blank line separates paragraphs), created_at (ISO 8601, from 1990
+  to now).
+It is sent after every article, up to 2,000 comments a call, and needs the comments:write permission
+(the opt-in "Reader comments" row on the sign-in screen). Without it the comments are reported and
+skipped, never a reason to refuse the articles. A bad row is reported and skipped. No webhook fires
+and nobody is notified for an imported comment.
+
 SEO data (optional, top level): what the old SEO tool tracked, so a moved Site keeps its ranking
 history. { keywords: [...], competitors: [...], positions: [...] }:
 - keywords: [{ keyword, target_url? (https), is_priority?, location_code?, language_code? }]. Matched
@@ -766,8 +838,8 @@ Articles may carry custom_fields: the values of the Site's custom article fields
 
 A Writavo export (GET /export) is this format, in volumes of at most about 8 MB: import them in
 order, and run a volume again if its report lists references it could not resolve yet. articles may
-be empty when a document carries entries, content types, redirects, engagement, SEO data or a
-profile.
+be empty when a document carries entries, content types, redirects, engagement, comments, SEO data
+or a profile.
 
 Images: inline markdown images ![alt](https://...), featured images, how-to step images and
 author avatars are copied into the Site's media library and the URLs rewritten, unless
@@ -812,6 +884,7 @@ export const IMPORT_FORMAT_SECTIONS = [
   "articles",
   "cost_history",
   "engagement",
+  "comments",
   "seo",
   "redirects",
   "content_types",
@@ -829,6 +902,7 @@ function guideParagraph(heading: string): string | null {
 
 const GUIDE_PARAGRAPH: Partial<Record<ImportFormatSection, string>> = {
   engagement: "Engagement (optional, top level)",
+  comments: "Reader comments (optional, top level)",
   seo: "SEO data (optional, top level)",
   redirects: "Redirects (optional, top level)",
   content_types: "Content types (optional, top level)",

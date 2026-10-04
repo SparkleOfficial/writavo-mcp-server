@@ -83,7 +83,11 @@ only, copy text verbatim, keep every slug and original publish date and never gu
 before importing. Use `import_content`, or over REST set `external_id` to the old system's id on every article and
 look it up with `GET /articles?external_id=` before writing, so a second run updates instead of
 duplicating. Keep the old `slug` so URLs do not change, and pass the original `published_at` on
-the first publish so feed order and sitemap dates survive. Guide: https://writavo.com/docs/migrate
+the first publish so feed order and sitemap dates survive. Comments move too (a WordPress import
+brings them; any other source goes in the document's `comments` array or `POST /comments/import`),
+but only when the connection has the Reader comments permission (`comments:write`); without it the
+articles import, the comments are skipped, and a re-run after the person adds it brings them without
+duplicating. Guide: https://writavo.com/docs/migrate
 
 ## Settings, delivery, SEO, team and billing
 
@@ -159,7 +163,8 @@ agents; if it is missing, say so and let them add it.
   `"true"`, so your own test visit never counts. Checklist: https://writavo.com/docs/analytics.md
 - **Comments are off until a person turns them on** (`PATCH /comments/settings`): it changes the
   live blog, so ask first. Moderate only on instruction, never repeat a commenter's email address in
-  public, and remember a delete cannot be undone. Guide: https://writavo.com/docs/comments.md
+  public, and remember a delete cannot be undone. A repeated staff reply (the same text to the same
+  comment within 10 minutes) returns the first reply, so retrying a reply is safe. Guide: https://writavo.com/docs/comments.md
 
 ## The AI pipeline: costs money
 

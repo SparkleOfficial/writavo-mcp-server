@@ -1,6 +1,6 @@
 import { addToContext, emptyContext, type WpContext } from "./map.js";
-import type { WpItem, WpTerm } from "./model.js";
-import { CTX, inKey, PAGE_POSTS_STAGED, STATE, type StageState, type StageStore } from "./staged.js";
+import type { WpComment, WpItem, WpTerm } from "./model.js";
+import { commentsKey, CTX, inKey, PAGE_POSTS_STAGED, STATE, type StageState, type StageStore } from "./staged.js";
 
 /**
  * A live WordPress site read over its REST API (CMS-PARITY.md M3, the second source after a WXR
@@ -12,6 +12,10 @@ import { CTX, inKey, PAGE_POSTS_STAGED, STATE, type StageState, type StageStore 
  *
  * The pull is RESUMABLE: each step makes at most `maxRequests` requests (a free-plan Worker
  * invocation may make about 50) and records its cursor, and the host calls again until done.
+ *
+ * Comments (0160) are read last, site-wide (/wp/v2/comments): the public API gives approved
+ * comments only, without email addresses. A site that does not share them (401, 403, 404, or
+ * anything else) gets a note in the report; the posts are imported either way.
  */
 
 export interface WordPressSite {
@@ -23,7 +27,7 @@ export interface WordPressSite {
 export type Fetcher = (url: string, init: { headers: Record<string, string> }) => Promise<Response>;
 
 export interface PullCursor {
-  phase: "categories" | "tags" | "posts" | "pages" | "done";
+  phase: "categories" | "tags" | "posts" | "pages" | "comments" | "done";
   page: number;
   totalPages: number | null;
   /** Posts staged so far, and the page of staged posts being filled. */
@@ -87,6 +91,28 @@ const str = (v: unknown): string | null => (typeof v === "string" && v.trim() ? 
 
 /** "2021-03-04T09:30:00" (REST, GMT, no suffix) -> the WXR form the mapping reads. */
 const restDate = (v: unknown): string | null => (typeof v === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(v) ? v.slice(0, 19).replace("T", " ") : null);
+
+/** The REST API's comment status -> wp:comment_approved, the form the mapping reads. */
+const REST_COMMENT_STATUS: Record<string, string> = { approved: "1", approve: "1", hold: "0", unapproved: "0", spam: "spam", trash: "trash" };
+
+/** A REST comment -> the shape the mapping reads. Its post is named by id (comments are read site-wide). */
+export function restCommentToComment(row: Record<string, unknown>): WpComment {
+  const status = typeof row.status === "string" ? row.status : "approved";
+  const type = typeof row.type === "string" ? row.type : "comment";
+  return {
+    id: row.id != null ? String(row.id) : "",
+    postId: row.post != null ? String(row.post) : "",
+    parentId: typeof row.parent === "number" && row.parent > 0 ? String(row.parent) : null,
+    author: typeof row.author_name === "string" ? row.author_name : "",
+    // The public API never gives it; with edit access it may.
+    authorEmail: str(row.author_email),
+    dateGmt: restDate(row.date_gmt),
+    date: restDate(row.date),
+    content: text(row.content),
+    approved: REST_COMMENT_STATUS[status] ?? status,
+    type: type === "comment" ? "" : type,
+  };
+}
 
 /** A REST post (with _embed) -> the shape the mapping reads. Yoast's computed head fills the SEO meta. */
 export function restPostToItem(post: Record<string, unknown>, terms: Map<number, WpTerm>, ctx: WpContext): WpItem {
@@ -261,8 +287,47 @@ export async function pullStep(
         stage.bytes += item.content.length;
       }
       await flush(false);
-      if (res.totalPages === null || c.page >= res.totalPages || rows.length === 0) c.phase = "done";
-      else c.page += 1;
+      if (res.totalPages === null || c.page >= res.totalPages || rows.length === 0) {
+        c.phase = "comments";
+        c.page = 1;
+      } else {
+        c.page += 1;
+      }
+    } else if (c.phase === "comments") {
+      // Never a reason to fail the pull: a site that does not share its comments gets a note.
+      const url = `${state.base}/wp-json/wp/v2/comments?per_page=${PER_PAGE}&page=${c.page}&orderby=id&order=asc`;
+      made += 1;
+      let rows: Array<Record<string, unknown>> | null = null;
+      let totalPages: number | null = null;
+      const notRead = (why: string) =>
+        `${(stage.commentPages ?? 0) > 0 ? "Not every comment was read" : "Comments were not read"}: ${why}. Everything else is imported; to bring the comments too, import an export file (Tools > Export) instead.`;
+      try {
+        const res = await fetcher(url, { headers: headers(site) });
+        const json = (res.headers.get("content-type") ?? "").includes("json");
+        if (res.status === 401 || res.status === 403 || res.status === 404) {
+          stage.commentsNote = notRead(`this site's REST API does not share them (WordPress answered ${res.status})`);
+        } else if (!res.ok || !json) {
+          stage.commentsNote = notRead(`WordPress answered ${res.ok ? "with a web page, not JSON" : res.status} for its comments`);
+        } else {
+          const data = (await res.json()) as unknown;
+          rows = Array.isArray(data) ? (data as Array<Record<string, unknown>>) : [];
+          const tp = Number(res.headers.get("x-wp-totalpages"));
+          totalPages = Number.isFinite(tp) && tp > 0 ? tp : null;
+        }
+      } catch (err) {
+        stage.commentsNote = notRead(`the site did not answer (${err instanceof Error ? err.message : String(err)})`);
+      }
+      if (rows === null) {
+        c.phase = "done";
+      } else {
+        if (rows.length) {
+          const n = stage.commentPages ?? 0;
+          await store.put(commentsKey(n), JSON.stringify(rows.map(restCommentToComment)));
+          stage.commentPages = n + 1;
+        }
+        if (totalPages === null || c.page >= totalPages || rows.length === 0) c.phase = "done";
+        else c.page += 1;
+      }
     }
   }
   state.requests += made;

@@ -193,6 +193,34 @@ export const ERROR_CATALOG: ErrorEntry[] = [
     "links": []
   },
   {
+    "code": "COMMENTS_DISABLED",
+    "http": "404",
+    "meaning": "The Site has reader comments turned off. Turn them on with PATCH /comments/settings ({\"enabled\": true}) or in the dashboard, Settings > Site > Reader comments.",
+    "action": "The Site has reader comments turned off, so nothing about the key, the slug or the request is wrong. Turn them on with `PATCH /comments/settings` and `{\"enabled\": true}` (needs comments:write, the opt-in Reader comments row for an AI agent), or ask a person to turn them on in Settings > Site > Reader comments, then retry. A site showing comments should hide its comment form while `GET /comments/posts/{slug}` says `enabled: false`.",
+    "links": [
+      {
+        "label": "Turn on reader comments",
+        "url": "https://app.writavo.com/settings/site#comments"
+      },
+      {
+        "label": "Comments",
+        "url": "https://writavo.com/docs/comments"
+      }
+    ]
+  },
+  {
+    "code": "PARENT_NOT_FOUND",
+    "http": "404",
+    "meaning": "The comment in parent_id does not exist, is not approved, or is on another article. Reply to an approved comment on the same article.",
+    "action": "The comment in `parent_id` is not an approved comment on this article: it never existed, was deleted, is still waiting for review, or is on another article. Reply to an approved comment from `GET /comments/posts/{slug}`, or send the comment without `parent_id`.",
+    "links": [
+      {
+        "label": "Comments",
+        "url": "https://writavo.com/docs/comments"
+      }
+    ]
+  },
+  {
     "code": "SLUG_CONFLICT",
     "http": "409",
     "meaning": "Another object on this Site already uses that slug.",
@@ -264,10 +292,22 @@ export const ERROR_CATALOG: ErrorEntry[] = [
     ]
   },
   {
+    "code": "COMMENTS_CLOSED",
+    "http": "422",
+    "meaning": "Comments have closed on this article: it was published longer ago than the Site's close_after_days. Raise or clear that setting to reopen them.",
+    "action": "Comments have closed on this article because it was published longer ago than the Site's `close_after_days`. Tell the reader comments are closed (hide the form when `GET /comments/posts/{slug}` says `open: false`). To reopen, raise or clear `close_after_days` with `PATCH /comments/settings`.",
+    "links": [
+      {
+        "label": "Comment settings",
+        "url": "https://app.writavo.com/settings/site#comments"
+      }
+    ]
+  },
+  {
     "code": "RATE_LIMIT_EXCEEDED",
     "http": "429",
     "meaning": "Too many requests. Back off and honour Retry-After.",
-    "action": "Back off and honour `Retry-After`. Watch `RateLimit-Remaining` on successful responses so you can slow down before you are refused rather than after.",
+    "action": "Back off and honour `Retry-After`. Watch `RateLimit-Remaining` on successful responses so you can slow down before you are refused rather than after. On `POST /comments`, `error.limit` names the comment limit hit: `reader` (that reader, 5 per 10 minutes: tell them to wait), `site` (300 per Site per hour) or `queue` (2,000 waiting for review: moderate the queue).",
     "links": [
       {
         "label": "The rate limit classes",

@@ -2,8 +2,10 @@ import type { z } from "zod/v4";
 import {
   AuthorSchema,
   CategorySchema,
+  CommentSchema,
   ContentTypeDefSchema,
   type ContentTypeDef,
+  type ImportComment,
   EngagementDailySchema,
   EngagementReactionSchema,
   type EngagementDaily,
@@ -53,6 +55,13 @@ export interface EngagementCheck {
   problems: string[];
 }
 
+export interface CommentsCheck {
+  /** The rows to send, in the order they must be sent: every parent before its replies. */
+  rows: ImportComment[];
+  /** One line per skipped row, "comments[3]: ...". Never blocks the articles. */
+  problems: string[];
+}
+
 export interface SeoCheck {
   keywords: SeoKeyword[];
   competitors: SeoCompetitor[];
@@ -91,6 +100,7 @@ export interface DocumentCheck {
   envelopeErrors: string[];
   items: ItemCheck[];
   engagement: EngagementCheck;
+  comments: CommentsCheck;
   seo: SeoCheck;
   redirects: RedirectsCheck;
   contentTypes: ContentTypesCheck;
@@ -99,6 +109,7 @@ export interface DocumentCheck {
 }
 
 const NO_ENGAGEMENT: EngagementCheck = { daily: [], reactions: [], problems: [] };
+const NO_COMMENTS: CommentsCheck = { rows: [], problems: [] };
 const NO_SEO: SeoCheck = { keywords: [], competitors: [], positions: [], problems: [] };
 const NO_REDIRECTS: RedirectsCheck = { rows: [], problems: [] };
 const NO_TYPES: ContentTypesCheck = { types: [], problems: [] };
@@ -221,6 +232,76 @@ export function checkEngagement(raw: { daily?: unknown[]; reactions?: unknown[] 
   return out;
 }
 
+/** The API refuses a comment dated before this or after now (0160 comment_import_row_error). */
+const EARLIEST_COMMENT = Date.UTC(1990, 0, 1);
+
+/**
+ * The optional comments section, row by row: a bad row is reported and skipped, never a reason to
+ * refuse the document. The rows that pass come back in SENDING order (orderComments). Whether the
+ * post is on the Site is the API's to answer, after the articles are written.
+ */
+export function checkComments(raw: unknown[] | undefined, now = Date.now()): CommentsCheck {
+  if (!raw) return NO_COMMENTS;
+  const out: CommentsCheck = { rows: [], problems: [] };
+  const seen = new Set<string>();
+  const kept: ImportComment[] = [];
+  raw.forEach((row, i) => {
+    const parsed = CommentSchema.safeParse(row);
+    if (!parsed.success) {
+      out.problems.push(`comments[${i}]: ${parsed.error.issues.map((x) => describeIssue(x, true)).join("; ")}`);
+      return;
+    }
+    const c = parsed.data;
+    const at = Date.parse(c.created_at);
+    if (at < EARLIEST_COMMENT || at > now + 5 * 60_000) return void out.problems.push(`comments[${i}]: created_at must be between 1990 and now`);
+    if (c.parent_external_id != null && c.parent_external_id === c.external_id) return void out.problems.push(`comments[${i}]: a comment cannot be its own parent`);
+    if (seen.has(c.external_id)) return void out.problems.push(`comments[${i}]: external_id "${c.external_id}" appears more than once`);
+    seen.add(c.external_id);
+    kept.push(c);
+  });
+  const ordered = orderComments(kept);
+  out.rows = ordered.rows;
+  for (const c of ordered.looped) out.problems.push(`comment ${c.external_id}: its replies loop back to it (a parent chain that never reaches a top-level comment)`);
+  return out;
+}
+
+/**
+ * The order comments are sent in: the API takes a reply only once its parent exists, so parents go
+ * first. Top-level comments (no parent, or a parent outside this document, which must then already
+ * be on the Site) by created_at, then their replies by created_at, then replies to those, and so
+ * on. Sending in this order, a chunk at a time, never puts a reply in an earlier chunk than its
+ * parent. A chain that loops never reaches a top-level comment; those rows are returned apart.
+ */
+export function orderComments(rows: ImportComment[]): { rows: ImportComment[]; looped: ImportComment[] } {
+  const ids = new Set(rows.map((c) => c.external_id));
+  const children = new Map<string, ImportComment[]>();
+  let level: ImportComment[] = [];
+  for (const c of rows) {
+    const parent = c.parent_external_id ?? null;
+    if (parent === null || !ids.has(parent)) level.push(c);
+    else {
+      const list = children.get(parent);
+      if (list) list.push(c);
+      else children.set(parent, [c]);
+    }
+  }
+  // Stable: rows written at the same moment keep their document order.
+  const byDate = (list: ImportComment[]) =>
+    list
+      .map((c, i) => ({ c, i, at: Date.parse(c.created_at) }))
+      .sort((a, b) => a.at - b.at || a.i - b.i)
+      .map((x) => x.c);
+  const out: ImportComment[] = [];
+  const placed = new Set<string>();
+  while (level.length) {
+    const sorted = byDate(level);
+    out.push(...sorted);
+    for (const c of sorted) placed.add(c.external_id);
+    level = sorted.flatMap((c) => children.get(c.external_id) ?? []);
+  }
+  return { rows: out, looped: rows.filter((c) => !placed.has(c.external_id)) };
+}
+
 /** A keyword as POST /seo/keywords stores it (trimmed, inner whitespace collapsed), for matching. */
 export function seoKeywordKey(keyword: string): string {
   return keyword.trim().replace(/\s+/g, " ").toLowerCase();
@@ -296,9 +377,14 @@ function pathLabel(path: readonly PropertyKey[]): string {
   return out;
 }
 
-export function describeIssue(issue: z.core.$ZodIssue): string {
+/**
+ * One zod issue as a line. `selfNamed`: the schema's messages already name their field, in the
+ * API's own wording ("author_name is required, 1 to 80 characters"), so the path is not repeated.
+ */
+export function describeIssue(issue: z.core.$ZodIssue, selfNamed = false): string {
   const where = pathLabel(issue.path);
   const message = /received undefined$/.test(issue.message) ? "is required" : issue.message;
+  if (selfNamed && where && message.includes(where)) return message;
   return where ? `${where}: ${message}` : message;
 }
 
@@ -332,6 +418,7 @@ function salvageEnvelope(value: unknown): ImportEnvelope | null {
     ...(raw.engagement && typeof raw.engagement === "object" && !Array.isArray(raw.engagement)
       ? { engagement: raw.engagement as { daily?: unknown[]; reactions?: unknown[] } }
       : {}),
+    ...(Array.isArray(raw.comments) ? { comments: raw.comments as unknown[] } : {}),
     ...(raw.seo && typeof raw.seo === "object" && !Array.isArray(raw.seo)
       ? { seo: raw.seo as { keywords?: unknown[]; competitors?: unknown[]; positions?: unknown[] } }
       : {}),
@@ -358,6 +445,7 @@ export function checkDocument(value: unknown, now = Date.now()): DocumentCheck {
       envelopeErrors: envelopeErrors.length > 0 ? envelopeErrors : ["The file is not a Writavo import document."],
       items: [],
       engagement: NO_ENGAGEMENT,
+      comments: NO_COMMENTS,
       seo: NO_SEO,
       redirects: NO_REDIRECTS,
       contentTypes: NO_TYPES,
@@ -368,9 +456,10 @@ export function checkDocument(value: unknown, now = Date.now()): DocumentCheck {
   const hasSomething =
     envelope.articles.length > 0 || (envelope.entries?.length ?? 0) > 0 || (envelope.content_types?.length ?? 0) > 0 ||
     (envelope.redirects?.length ?? 0) > 0 || (envelope.engagement?.daily?.length ?? 0) + (envelope.engagement?.reactions?.length ?? 0) > 0 ||
+    (envelope.comments?.length ?? 0) > 0 ||
     (envelope.seo?.keywords?.length ?? 0) + (envelope.seo?.competitors?.length ?? 0) + (envelope.seo?.positions?.length ?? 0) > 0 ||
     envelope.profile !== undefined;
-  if (!hasSomething) envelopeErrors.push("The document has nothing to import: no articles, entries, content types, redirects, engagement, SEO data or profile.");
+  if (!hasSomething) envelopeErrors.push("The document has nothing to import: no articles, entries, content types, redirects, engagement, comments, SEO data or profile.");
 
   const duplicates = (values: string[], what: string) => {
     const seen = new Set<string>();
@@ -471,6 +560,7 @@ export function checkDocument(value: unknown, now = Date.now()): DocumentCheck {
     envelopeErrors,
     items,
     engagement: checkEngagement(envelope.engagement, now),
+    comments: checkComments(envelope.comments, now),
     seo: checkSeo(envelope.seo, now),
     redirects: checkRedirects(envelope.redirects),
     contentTypes,

@@ -1,6 +1,6 @@
-import { IMPORT_FORMAT_NAME, IMPORT_FORMAT_VERSION, LIMITS, SLUG_PATTERN } from "../format.js";
-import { htmlToPlainText, wordpressHtmlToMarkdown } from "./html.js";
-import type { WpAuthor, WpExport, WpItem, WpSite, WpTerm } from "./model.js";
+import { COMMENT_LIMITS, IMPORT_FORMAT_NAME, IMPORT_FORMAT_VERSION, LIMITS, SLUG_PATTERN } from "../format.js";
+import { commentHtmlToText, htmlToPlainText, wordpressHtmlToMarkdown } from "./html.js";
+import type { WpAuthor, WpComment, WpExport, WpItem, WpSite, WpTerm } from "./model.js";
 import type { Attachment } from "./shortcodes.js";
 
 /**
@@ -17,6 +17,8 @@ import type { Attachment } from "./shortcodes.js";
  *   the others are reported. Pages are left out and listed until M5.
  *   Each post's permalink and its ?p=<id> link become old_urls; category and tag archives become
  *   top-level redirects, so every URL the old blog answered keeps working.
+ *   Comments (0160) on an imported post or page come too: approved, pending and spam as they were,
+ *   the trash, pingbacks and trackbacks left out (counted in the report), each as plain text.
  */
 
 export interface ConversionReport {
@@ -34,6 +36,9 @@ export interface ConversionReport {
     drafts: number;
     wordsChanged: number;
     skipped: Record<string, number>;
+    /** Comments to import, and the ones left out by reason ("pingbacks and trackbacks": 3). */
+    comments: number;
+    commentsSkipped: Record<string, number>;
   };
 }
 
@@ -115,6 +120,110 @@ export function resolveTemplateText(
 const rankMathNoindex = (value: string | undefined) => Boolean(value && /"noindex"/.test(value));
 
 const sameUrl = (a: string, b: string) => a.replace(/\/+$/, "").toLowerCase() === b.replace(/\/+$/, "").toLowerCase();
+
+// ---- comments (0160) ---------------------------------------------------------------------------
+
+/** A WordPress comment's Writavo external_id, beside its post's "wp:<id>"; the two never collide. */
+export const commentExternalId = (id: string) => `wp:comment:${id}`;
+
+/** One comment row of the import document (POST /comments/import's CommentImportRow). */
+export type CommentRow = Record<string, unknown> & { external_id: string };
+
+export interface CommentsConverted {
+  rows: CommentRow[];
+  /** Left out, by reason: "pingbacks and trackbacks", "in the trash", "with no text"... */
+  skipped: Record<string, number>;
+  /** Notes for the post's line in the report (a comment too long to import, replies re-threaded). */
+  notes: string[];
+}
+
+const EMAIL = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+const chars = (s: string) => [...s].length;
+const EARLIEST_COMMENT = Date.UTC(1990, 0, 1);
+
+/** wp:comment_approved -> the API's status, or null when the comment is left out. */
+function commentStatus(approved: string): "approved" | "pending" | "spam" | null {
+  if (approved === "1" || approved === "approve" || approved === "approved") return "approved";
+  if (approved === "0" || approved === "hold") return "pending";
+  if (approved === "spam") return "spam";
+  return null;
+}
+
+const TOO_LONG = "longer than 20,000 characters";
+const PINGBACKS = "pingbacks and trackbacks";
+
+/** One comment's row, or why it is left out (the report's wording: "3 in the trash"). */
+function commentRow(c: WpComment, postExternalId: string, raw: boolean, now: number): CommentRow | string {
+  if (!/^[\x21-\x7E]{1,200}$/.test(c.id)) return "with no id";
+  if (c.type === "pingback" || c.type === "trackback") return PINGBACKS;
+  if (c.type !== "" && c.type !== "comment") return `of type ${c.type.slice(0, 40)}`;
+  const status = commentStatus(c.approved.trim());
+  if (!status) return c.approved === "trash" || c.approved === "post-trashed" ? "in the trash" : `with status ${c.approved.slice(0, 40) || "unknown"}`;
+  const createdAt = wpDate(c.dateGmt) ?? wpDate(c.date);
+  if (!createdAt) return "with no date";
+  if (Date.parse(createdAt) < EARLIEST_COMMENT) return "dated before 1990";
+  if (Date.parse(createdAt) > now + 5 * 60_000) return "dated in the future";
+  const body = commentHtmlToText(c.content, raw);
+  if (!body) return "with no text";
+  if (chars(body) > COMMENT_LIMITS.body) return TOO_LONG;
+  // The name as shown: entities decoded, spaces collapsed, cut to 80 characters (never dropped).
+  const name = [...(htmlToPlainText(c.author) || "Anonymous")].slice(0, COMMENT_LIMITS.authorName).join("").trim() || "Anonymous";
+  const email = (c.authorEmail ?? "").trim();
+  return {
+    external_id: commentExternalId(c.id),
+    post_external_id: postExternalId,
+    status,
+    author_name: name,
+    ...(email && email.length <= COMMENT_LIMITS.authorEmail && EMAIL.test(email) ? { author_email: email } : {}),
+    body,
+    created_at: createdAt,
+  };
+}
+
+/**
+ * One post's comments -> import rows. Every comment of a post is converted together, because a
+ * reply to a comment that is left out (in the trash, a pingback) must still find a thread: it
+ * replies to the nearest comment above it that is kept, or starts its own thread.
+ */
+export function convertComments(comments: WpComment[], postExternalId: string, raw: boolean, now: number): CommentsConverted {
+  const out: CommentsConverted = { rows: [], skipped: {}, notes: [] };
+  const skip = (why: string) => void (out.skipped[why] = (out.skipped[why] ?? 0) + 1);
+  const parents = new Map<string, string | null>();
+  for (const c of comments) if (c.id) parents.set(c.id, c.parentId && c.parentId !== "0" ? c.parentId : null);
+  const kept: Array<{ c: WpComment; row: CommentRow }> = [];
+  const seen = new Set<string>();
+  for (const c of comments) {
+    const id = c.id.trim();
+    if (id && seen.has(id)) continue;
+    seen.add(id);
+    const row = commentRow({ ...c, id }, postExternalId, raw, now);
+    if (typeof row === "string") {
+      skip(row);
+      if (row === TOO_LONG) out.notes.push(`comment ${commentExternalId(id)} is longer than 20,000 characters, so it is left out`);
+      continue;
+    }
+    kept.push({ c: { ...c, id }, row });
+  }
+  const keptIds = new Set(kept.map((k) => k.c.id));
+  let rethreaded = 0;
+  for (const { c, row } of kept) {
+    const direct = parents.get(c.id) ?? null;
+    let parent = direct;
+    for (let depth = 0; parent !== null && !keptIds.has(parent) && depth < 100; depth += 1) parent = parents.get(parent) ?? null;
+    if (parent !== null && (!keptIds.has(parent) || parent === c.id)) parent = null;
+    if (parent !== null) row.parent_external_id = commentExternalId(parent);
+    if (direct !== null && parent !== direct) rethreaded += 1;
+    out.rows.push(row);
+  }
+  if (rethreaded) out.notes.push(`${rethreaded === 1 ? "1 reply" : `${rethreaded} replies`} to a comment that is left out ${rethreaded === 1 ? "replies" : "reply"} to the nearest comment above it that is kept, or ${rethreaded === 1 ? "starts its" : "start their"} own thread`);
+  return out;
+}
+
+function addCounts(into: Record<string, number>, from: Record<string, number> | undefined): void {
+  for (const [why, n] of Object.entries(from ?? {})) into[why] = (into[why] ?? 0) + n;
+}
+
+const NOT_IMPORTED_POST = "on posts that are not imported";
 
 // ---- the mapping, in three stages ------------------------------------------------------------
 //
@@ -215,6 +324,9 @@ export interface PostResult {
   categories: string[];
   tags: string[];
   author: string | null;
+  /** Its comments as import rows (a WXR post; the REST API's are converted in assemble). */
+  comments?: CommentRow[];
+  commentsSkipped?: Record<string, number>;
 }
 
 const LIVE_STATUSES = ["publish", "future", "draft", "pending", "private"];
@@ -222,7 +334,8 @@ const LIVE_STATUSES = ["publish", "future", "draft", "pending", "private"];
 export function convertPost(ctx: WpContext, item: WpItem, opts: MapOptions): PostResult {
   const p = prepare(ctx);
   const now = opts.now ?? Date.now();
-  const none = { notes: [], wordsChanged: false, categories: [], tags: [], author: null };
+  const lost = item.comments?.length ? { commentsSkipped: { [NOT_IMPORTED_POST]: item.comments.length } } : {};
+  const none = { notes: [], wordsChanged: false, categories: [], tags: [], author: null, ...lost };
   // 0130: pages come across as Writavo pages, through the same conversion as posts.
   if (item.type !== "post" && item.type !== "page") return { ...none, kind: "skipped", skipReason: item.type || "unknown type" };
   const isPage = item.type === "page";
@@ -340,10 +453,15 @@ export function convertPost(ctx: WpContext, item: WpItem, opts: MapOptions): Pos
   if (shortLink) oldUrls.add(shortLink);
   if (oldUrls.size) article.old_urls = [...oldUrls].slice(0, 20);
 
+  // Its readers' comments (WXR: stored raw, as typed).
+  const comments = item.comments?.length ? convertComments(item.comments, externalId, opts.rawContent, now) : null;
+  if (comments) notes.push(...comments.notes);
+
   return {
     kind: "article",
     externalId,
     article,
+    ...(comments ? { comments: comments.rows, commentsSkipped: comments.skipped } : {}),
     notes,
     wordsChanged: converted.wordsChanged,
     categories: primary && !isPage ? [primary.slug, ...cats.filter((c) => c.slug !== primary.slug).map((c) => c.slug)] : [],
@@ -353,8 +471,18 @@ export function convertPost(ctx: WpContext, item: WpItem, opts: MapOptions): Pos
 }
 
 /** The document and its report, from every post's result, in export order. */
-export function assemble(ctx: WpContext, results: PostResult[], opts: MapOptions): WordPressConversion {
+export interface AssembleExtra {
+  /** Comments read on their own (the REST API's, site-wide), each naming its post (postId). */
+  comments?: WpComment[];
+  /** Why the comments could not be read, when they could not (the REST endpoint was closed). */
+  commentsNote?: string | null;
+}
+
+export function assemble(ctx: WpContext, results: PostResult[], opts: MapOptions, extra: AssembleExtra = {}): WordPressConversion {
   const p = prepare(ctx);
+  const now = opts.now ?? Date.now();
+  const comments: CommentRow[] = [];
+  const commentsSkipped: Record<string, number> = {};
   const items: Record<string, string[]> = {};
   const skipped: Record<string, number> = { ...ctx.skipped };
   const usedCategories = new Set<string>();
@@ -369,11 +497,13 @@ export function assemble(ctx: WpContext, results: PostResult[], opts: MapOptions
   let wordsChanged = 0;
 
   for (const r of results) {
+    addCounts(commentsSkipped, r.commentsSkipped);
     if (r.kind === "skipped" || !r.article || !r.externalId) {
       const why = r.skipReason ?? "unknown";
       skipped[why] = (skipped[why] ?? 0) + 1;
       continue;
     }
+    if (r.comments) comments.push(...r.comments);
     const article = r.article;
     const notes = [...r.notes];
     let slug = String(article.slug);
@@ -395,6 +525,28 @@ export function assemble(ctx: WpContext, results: PostResult[], opts: MapOptions
     else drafts += 1;
     articles.push(article);
     if (notes.length) items[r.externalId] = notes;
+  }
+
+  // Comments read on their own (REST), by post: only those on a post or page that is imported.
+  if (extra.comments?.length) {
+    const imported = new Set(articles.map((a) => String(a.external_id)));
+    const byPost = new Map<string, WpComment[]>();
+    for (const c of extra.comments) {
+      const post = `wp:${c.postId ?? ""}`;
+      const list = byPost.get(post);
+      if (list) list.push(c);
+      else byPost.set(post, [c]);
+    }
+    for (const [post, list] of byPost) {
+      if (!imported.has(post)) {
+        addCounts(commentsSkipped, { [NOT_IMPORTED_POST]: list.length });
+        continue;
+      }
+      const converted = convertComments(list, post, false, now);
+      comments.push(...converted.rows);
+      addCounts(commentsSkipped, converted.skipped);
+      if (converted.notes.length) items[post] = [...(items[post] ?? []), ...converted.notes];
+    }
   }
 
   // Authors used by the imported posts. Name: the display name, else first + last, else the login.
@@ -460,6 +612,7 @@ export function assemble(ctx: WpContext, results: PostResult[], opts: MapOptions
     ...(skippedLines.length ? [`Also left out: ${skippedLines.join(", ")}.`] : []),
     ...(redirects.length ? [`Archive redirects: ${redirects.length} category and tag archives at WordPress's default /category/ and /tag/ addresses. If the site changed those bases in Settings > Permalinks, add the real addresses as redirects after the import.`] : []),
     ...(wordsChanged ? [`${wordsChanged} post(s) may have changed text in conversion and are flagged below; check them before publishing.`] : []),
+    ...commentLines(comments, commentsSkipped, opts, extra.commentsNote ?? null),
   ];
 
   const document: Record<string, unknown> = {
@@ -470,6 +623,7 @@ export function assemble(ctx: WpContext, results: PostResult[], opts: MapOptions
     ...(docCategories.length ? { categories: docCategories } : {}),
     ...(docTags.length ? { tags: docTags } : {}),
     articles,
+    ...(comments.length ? { comments } : {}),
     ...(redirects.length ? { redirects } : {}),
     // The report travels inside the document, so the dry run shows it wherever the document is kept.
     conversion: {
@@ -486,9 +640,27 @@ export function assemble(ctx: WpContext, results: PostResult[], opts: MapOptions
       site: p.site,
       lines,
       items,
-      counts: { posts: articles.length - pagesImported, pages: pagesImported, published, scheduled, drafts, wordsChanged, skipped },
+      counts: { posts: articles.length - pagesImported, pages: pagesImported, published, scheduled, drafts, wordsChanged, skipped, comments: comments.length, commentsSkipped },
     },
   };
+}
+
+/** The report's lines about comments: how many come, by status, and what is left out and why. */
+function commentLines(rows: CommentRow[], skipped: Record<string, number>, opts: MapOptions, note: string | null): string[] {
+  const lines: string[] = [];
+  const left = Object.entries(skipped).map(([why, n]) => `${n} ${n === 1 && why === PINGBACKS ? "pingback or trackback" : why}`);
+  if (rows.length || left.length) {
+    const by = (s: string) => rows.filter((r) => r.status === s).length;
+    const replies = rows.filter((r) => r.parent_external_id !== undefined).length;
+    lines.push(
+      `Comments: ${count(rows.length, "comment")} to import (${by("approved")} approved, ${by("pending")} pending, ${by("spam")} spam; ${replies} of them replies), as plain text, after the posts.${left.length ? ` Left out: ${left.join(", ")}.` : ""}`,
+    );
+  }
+  if (note) lines.push(note);
+  else if (opts.source === "wordpress-rest" && rows.length) {
+    lines.push("Over the REST API WordPress shares only approved comments, without commenters' email addresses. To bring pending and spam comments and the addresses too, import an export file (Tools > Export) instead.");
+  }
+  return lines;
 }
 
 /** The whole export in one go (tests, small files). The same result as converting it in batches. */

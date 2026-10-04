@@ -1,5 +1,5 @@
 import { SaxesParser, type SaxesTagPlain } from "saxes";
-import { emptyExport, KEPT_META, type WpAuthor, type WpExport, type WpItem, type WpSite, type WpTerm } from "./model.js";
+import { emptyExport, KEPT_META, type WpAuthor, type WpComment, type WpExport, type WpItem, type WpSite, type WpTerm } from "./model.js";
 
 /**
  * A streaming reader for WXR, the file WordPress writes at Tools > Export (WXR 1.1 and 1.2).
@@ -7,7 +7,8 @@ import { emptyExport, KEPT_META, type WpAuthor, type WpExport, type WpItem, type
  * STREAMING, because the file can be far larger than what the importer keeps: it is fed in chunks
  * (write) and hands back one record per author, term and item as each one closes, so the raw XML is
  * never held whole. What is read is the minimum the mapping uses; an author's email address,
- * comments, menus and every post meta key outside KEPT_META are skipped as they stream past.
+ * comment meta, menus and every post meta key outside KEPT_META are skipped as they stream past.
+ * A post's comments are read into the item (wp:comment), for the comments import (0160).
  *
  * Pure JavaScript (saxes), no DOM: the same code runs in the hosted Durable Object, Node and tests.
  */
@@ -61,7 +62,9 @@ export class WxrReader {
   private term: WpTerm | null = null;
   private meta: { key: string; value: string } | null = null;
   private category: { domain: string; nicename: string } | null = null;
-  /** Inside a <wp:comment>: nothing in it is read. */
+  /** The <wp:comment> being read, inside an item. */
+  private comment: WpComment | null = null;
+  /** Inside something that is never read (a comment's meta, a comment outside an item). */
   private commentDepth = 0;
   /** A WXR marker was seen (the wp:wxr_version element). */
   sawWxr = false;
@@ -106,8 +109,20 @@ export class WxrReader {
     const parent = this.stack[this.stack.length - 1];
     this.stack.push(name);
     this.text = "";
-    if (this.commentDepth > 0 || name === "wp:comment") {
+    if (this.commentDepth > 0) {
       this.commentDepth += 1;
+      return;
+    }
+    if (name === "wp:comment") {
+      if (parent === "item" && this.item) {
+        this.comment = { id: "", parentId: null, author: "", authorEmail: null, dateGmt: null, date: null, content: "", approved: "", type: "" };
+      } else {
+        this.commentDepth = 1;
+      }
+      return;
+    }
+    if (this.comment && parent === "wp:comment" && name === "wp:commentmeta") {
+      this.commentDepth = 1;
       return;
     }
     if (name === "rss") this.sawRss = true;
@@ -139,6 +154,26 @@ export class WxrReader {
     this.text = "";
     if (this.commentDepth > 0) {
       this.commentDepth -= 1;
+      return;
+    }
+
+    if (this.comment) {
+      if (name === "wp:comment" && parent === "item") {
+        if (this.item) (this.item.comments ??= []).push(this.comment);
+        this.comment = null;
+      } else if (parent === "wp:comment") {
+        const c = this.comment;
+        if (name === "wp:comment_id") c.id = text.trim();
+        else if (name === "wp:comment_author") c.author = text;
+        else if (name === "wp:comment_author_email") c.authorEmail = orNull(text);
+        else if (name === "wp:comment_date_gmt") c.dateGmt = orNull(text);
+        else if (name === "wp:comment_date") c.date = orNull(text);
+        else if (name === "wp:comment_content") c.content = text;
+        else if (name === "wp:comment_approved") c.approved = text.trim();
+        else if (name === "wp:comment_type") c.type = text.trim();
+        else if (name === "wp:comment_parent") c.parentId = orNull(text) === "0" ? null : orNull(text);
+        // wp:comment_user_id is not read: a WordPress account does not make a commenter staff.
+      }
       return;
     }
 

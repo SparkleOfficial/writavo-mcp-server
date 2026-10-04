@@ -1,5 +1,5 @@
 import { addToContext, assemble, CONVERTED_TYPES, convertPost, emptyContext, type MapOptions, type PostResult, type WordPressConversion, type WpContext } from "./map.js";
-import type { WpItem } from "./model.js";
+import type { WpComment, WpItem } from "./model.js";
 import { looksLikeWxr, WxrReader } from "./wxr.js";
 
 /**
@@ -34,6 +34,10 @@ export interface StageState {
   bytes: number;
   xmlProblems: number;
   firstXmlProblem: string | null;
+  /** REST only: pages of comments read site-wide (a WXR file's sit inside their posts). */
+  commentPages?: number;
+  /** REST only: why the comments could not be read, for the report. */
+  commentsNote?: string | null;
 }
 
 /** A page of staged posts: small enough to convert well inside a batch. */
@@ -44,6 +48,8 @@ export const CTX = "wxr:ctx";
 export const STATE = "wxr:state";
 export const inKey = (n: number) => `wxr:in:${n}`;
 const outKey = (n: number) => `wxr:out:${n}`;
+/** A page of comments read over the REST API (one response, at most 100). */
+export const commentsKey = (n: number) => `wxr:cm:${n}`;
 export const PAGE_POSTS_STAGED = 50;
 
 /** The options a staged export is converted with. */
@@ -96,6 +102,7 @@ export async function stageWxr(
         page.push(record.item);
         state.posts += 1;
         pageChars += record.item.content.length + record.item.excerpt.length + 1000;
+        for (const c of record.item.comments ?? []) pageChars += c.content.length + 300;
         if (page.length >= PAGE_POSTS || pageChars >= PAGE_CHARS) flush();
     }
   });
@@ -156,7 +163,9 @@ export async function assembleStaged(store: StageStore, opts: MapOptions): Promi
   const ctx = JSON.parse((await store.get(CTX)) ?? "null") as WpContext;
   const results: PostResult[] = [];
   for (let n = 0; n < state.pages; n++) results.push(...(JSON.parse((await store.get(outKey(n))) ?? "[]") as PostResult[]));
-  const conversion = assemble(ctx, results, opts);
+  const comments: WpComment[] = [];
+  for (let n = 0; n < (state.commentPages ?? 0); n++) comments.push(...(JSON.parse((await store.get(commentsKey(n))) ?? "[]") as WpComment[]));
+  const conversion = assemble(ctx, results, opts, { comments, commentsNote: state.commentsNote ?? null });
   if (state.xmlProblems > 0) {
     conversion.report.lines.push(
       `The file had ${state.xmlProblems} XML problem(s) (first: ${state.firstXmlProblem}). Reading carried on past them; compare the counts above with the WordPress dashboard.`,
@@ -170,6 +179,7 @@ export async function clearStaged(store: StageStore): Promise<void> {
   const state = await readStageState(store);
   const names = [CTX, STATE];
   for (let n = 0; n < (state?.pages ?? 0); n++) names.push(inKey(n), outKey(n));
+  for (let n = 0; n < (state?.commentPages ?? 0); n++) names.push(commentsKey(n));
   await store.remove(names);
 }
 

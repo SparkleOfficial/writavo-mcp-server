@@ -1,7 +1,9 @@
 /**
  * The WordPress export as the converter sees it: one shape, whichever way it was read (a WXR file
  * today, the REST API next). Only what the mapping uses is kept; everything else in an export
- * (comments, menus, the email addresses of authors) is dropped while reading, never held.
+ * (menus, comment meta, the email addresses of authors) is dropped while reading, never held.
+ * Readers' comments are kept (0160): a migrated blog keeps its conversations, and a commenter's
+ * email address goes to the Site's moderators only, as it was on the old blog.
  */
 
 export interface WpSite {
@@ -57,6 +59,27 @@ export const KEPT_META = new Set([
   "rank_math_primary_category",
 ]);
 
+/** A reader comment (wp:comment in a WXR item, or a REST /comments row). */
+export interface WpComment {
+  /** wp:comment_id */
+  id: string;
+  /** REST only: the post it is on. A WXR comment sits inside its post. */
+  postId?: string;
+  /** wp:comment_parent; null (or "0") for a top-level comment. */
+  parentId: string | null;
+  author: string;
+  authorEmail: string | null;
+  /** "YYYY-MM-DD HH:MM:SS" in UTC, or null; `date` (site-local) when the GMT date is missing. */
+  dateGmt: string | null;
+  date: string | null;
+  /** The comment as WordPress stored it (raw, light HTML) or rendered it (REST). */
+  content: string;
+  /** wp:comment_approved: "1", "0", "spam", "trash", "post-trashed"... (REST: always "1"). */
+  approved: string;
+  /** wp:comment_type: "" or "comment" for a comment; "pingback", "trackback" and others are not. */
+  type: string;
+}
+
 export interface WpItem {
   id: string;
   /** post, page, attachment, nav_menu_item, a custom post type... */
@@ -94,6 +117,8 @@ export interface WpItem {
   contentIsRaw?: boolean;
   /** The SEO meta is final text (the REST API's computed head), not Yoast / Rank Math templates. */
   seoResolved?: boolean;
+  /** Its readers' comments (WXR; the REST API's come site-wide, staged on their own). */
+  comments?: WpComment[];
 }
 
 export interface WpExport {

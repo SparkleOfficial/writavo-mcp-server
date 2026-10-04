@@ -390,4 +390,69 @@ export function htmlToPlainText(html: string): string {
   return textOf(fromHtml(html, { fragment: true }) as HastRoot).replace(/\s+/g, " ").trim();
 }
 
+/** Elements that start and end a paragraph of a comment's text. */
+const COMMENT_BLOCKS = new Set([
+  "p", "div", "blockquote", "pre", "ul", "ol", "dl", "dd", "dt", "table", "tr", "figure", "figcaption",
+  "section", "article", "header", "footer", "aside", "h1", "h2", "h3", "h4", "h5", "h6", "hr", "address",
+]);
+
+/**
+ * A WordPress comment (light HTML) -> the plain text Writavo stores for a comment: paragraphs as
+ * blank lines, <br> as a line break, a link as "label (https://...)" (its address kept as text, so
+ * nothing the reader wrote is lost), entities decoded, every other tag dropped. A WXR comment is
+ * stored raw, the way a person typed it (blank lines between paragraphs), so `raw` runs wpautop
+ * first, as WordPress does before showing it; the REST API's is rendered already.
+ */
+export function commentHtmlToText(input: string, raw: boolean): string {
+  if (!input.trim()) return "";
+  const html = raw ? wpautop(input) : input;
+  const out: string[] = [];
+  const emit = (node: HastNodes, pre: boolean): void => {
+    if (node.type === "text") {
+      out.push(pre ? node.value : node.value.replace(/[ \t\r\n\f]+/g, " "));
+      return;
+    }
+    if (node.type === "root") {
+      for (const child of node.children) emit(child as HastNodes, pre);
+      return;
+    }
+    if (node.type !== "element") return;
+    const tag = node.tagName;
+    if (DROPPED.has(tag)) return;
+    if (tag === "br") return void out.push("\n");
+    if (tag === "img") {
+      const alt = prop(node, "alt");
+      if (alt) out.push(alt);
+      return;
+    }
+    if (tag === "a") {
+      const start = out.length;
+      for (const child of node.children) emit(child as HastNodes, pre);
+      const label = out.splice(start).join("");
+      const href = prop(node, "href");
+      const shown = label.replace(/\s+/g, " ").trim();
+      if (href && /^https?:\/\//i.test(href) && !shown.includes(href) && shown !== href.replace(/^https?:\/\//i, "").replace(/\/$/, "")) {
+        out.push(shown ? `${label.trimEnd()} (${href})` : href);
+      } else {
+        out.push(label);
+      }
+      return;
+    }
+    const block = COMMENT_BLOCKS.has(tag);
+    if (tag === "li") out.push("\n- ");
+    else if (block) out.push("\n\n");
+    for (const child of node.children) emit(child as HastNodes, pre || tag === "pre");
+    if (block) out.push("\n\n");
+  };
+  emit(fromHtml(html, { fragment: true }) as HastRoot, false);
+  return out
+    .join("")
+    .replace(/ /g, " ")
+    .split("\n")
+    .map((line) => line.replace(/[ \t]+/g, " ").trim())
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 export type { ElementContent, RootContent };

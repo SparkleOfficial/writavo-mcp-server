@@ -205,8 +205,8 @@ function mergeOn(base: unknown, part: unknown, key: string | ((entry: Json) => s
 }
 
 /**
- * A part added to a stored document. authors merge on ref, categories and tags on slug, articles
- * and entries on external_id, content types on api_id, redirects on their old URL; an entry with the same key replaces the stored one, so a corrected entry is
+ * A part added to a stored document. authors merge on ref, categories and tags on slug, articles,
+ * entries and comments on external_id, content types on api_id, redirects on their old URL; an entry with the same key replaces the stored one, so a corrected entry is
  * simply sent again. The part's format, version and source win when it has them. Nothing here
  * validates: the dry run checks the merged whole.
  */
@@ -215,8 +215,8 @@ export function mergeImportDocuments(stored: unknown, part: unknown): Json | str
   if (!isObject(stored)) return part;
   const merged: Json = { ...stored };
   for (const field of ["format", "version", "source"] as const) if (field in part) merged[field] = part[field];
-  // 0136: content types merge on api_id, entries on external_id; redirects on their old URL.
-  for (const [field, key] of [["authors", "ref"], ["categories", "slug"], ["tags", "slug"], ["articles", "external_id"], ["content_types", "api_id"], ["entries", "external_id"], ["redirects", "from"]] as const) {
+  // 0136: content types merge on api_id, entries (and 0160 comments) on external_id; redirects on their old URL.
+  for (const [field, key] of [["authors", "ref"], ["categories", "slug"], ["tags", "slug"], ["articles", "external_id"], ["content_types", "api_id"], ["entries", "external_id"], ["comments", "external_id"], ["redirects", "from"]] as const) {
     const value = mergeOn(stored[field], part[field], key);
     if (value !== undefined) merged[field] = value;
   }

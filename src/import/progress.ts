@@ -62,6 +62,8 @@ export interface ImportProgress {
   items: Record<string, ProgressItem>;
   /** The engagement section's delivery, when the document has one (sent after every article). */
   engagement?: EngagementProgress;
+  /** The comments section's delivery (POST /comments/import), after the engagement. */
+  comments?: CommentsProgress;
   /** The SEO section's delivery (keywords, competitors, ranking history), after the engagement. */
   seo?: SeoProgress;
   /** The redirects (articles' old_urls + the redirects section), sent after every article. */
@@ -140,6 +142,22 @@ export interface EngagementProgress {
   written: { daily: number; share_rows: number; picks: number };
   /** What the API skipped, first ones only. */
   problems: string[];
+  /** Why the last attempt could not deliver it (the next apply tries again). */
+  error?: string;
+}
+
+export interface CommentsProgress {
+  /** Hash of the section as sent (versioned): a changed section is sent again from the start. */
+  hash: string;
+  /** When this delivery started. In every Idempotency-Key, like SeoProgress.started. */
+  started: string;
+  /** Rows sent so far, in sending order (parents before replies). */
+  sent: number;
+  done: boolean;
+  written: { created: number; updated: number };
+  /** What the API skipped, first ones only; problem_count counts them all. */
+  problems: string[];
+  problem_count: number;
   /** Why the last attempt could not deliver it (the next apply tries again). */
   error?: string;
 }

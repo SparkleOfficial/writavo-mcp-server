@@ -530,8 +530,13 @@ async function main(): Promise<void> {
     // Its variable names are the fake's own: the importer learns them from the Site, never a copy.
     profile: { product_knowledge: null as string | null, niche_keywords: [] as string[], prompt_vars: {} as Record<string, string> },
     profilePatches: 0,
+    // POST /comments/import (0160): SET on external_id; a reply needs its parent imported first,
+    // and the call needs comments:write. Each applied call's external_ids, in order.
+    comments: new Map<string, Row>(),
+    commentCalls: [] as string[][],
   };
   const PROFILE_VARS = ["brand_category", "brand_topic", "named_competitors"];
+  const ALL_SCOPES = ["articles:read", "articles:write", "taxonomy:write", "authors:write", "media:write", "engagement:write", "content_types:write", "entries:write", "seo:write", "comments:write", "meta:read"];
   const profileBody = () => {
     const p = site.profile;
     const vars = PROFILE_VARS.filter((k) => !p.prompt_vars[k]);
@@ -550,8 +555,7 @@ async function main(): Promise<void> {
 
     if (req.method === "GET" && path === "/site") return ok({ id: "00000000-0000-4000-8000-0000000051e1", name: "Smoke Site" });
     if (req.method === "GET" && path === "/ping") {
-      const all = ["articles:read", "articles:write", "taxonomy:write", "authors:write", "media:write", "engagement:write", "content_types:write", "entries:write", "seo:write", "meta:read"];
-      return ok({ pong: true, key_kind: "secret", scopes: site.scopes ?? all });
+      return ok({ pong: true, key_kind: "secret", scopes: site.scopes ?? ALL_SCOPES });
     }
     if (req.method === "GET" && path === "/usage") {
       return ok({ plan: { key: "free", name: "Free" }, limits: [{ key: "documents", limit: 10000, used: 5 }], credits: { balance: 0 } });
@@ -717,6 +721,33 @@ async function main(): Promise<void> {
       });
       const response = ok({ dry_run: dry, written, plan, tracked_keywords: { limit: site.seoLimit, active: site.seoKeywords.size }, problems });
       if (!dry) site.replays.set(req.idempotencyKey ?? "", response);
+      return response;
+    }
+    if (path === "/comments/import" && req.method === "POST") {
+      if (!(site.scopes ?? ALL_SCOPES).includes("comments:write")) return fail(403, "INSUFFICIENT_SCOPE", "This key does not carry the scope this operation needs (comments:write).");
+      if (!req.idempotencyKey) return fail(400, "VALIDATION_FAILED", "Idempotency-Key is required.");
+      const dry = body.dry_run !== false;
+      const replay = dry ? undefined : site.replays.get(req.idempotencyKey);
+      if (replay) return replay;
+      const rows = (body.comments ?? []) as Row[];
+      if (rows.length > 2000) return fail(422, "VALIDATION_FAILED", "At most 2,000 comments per call.");
+      if (!dry) site.commentCalls.push(rows.map((r) => String(r.external_id)));
+      const problems: Row[] = [];
+      let created = 0;
+      let updated = 0;
+      rows.forEach((r, index) => {
+        const id = String(r.external_id);
+        const post = site.articles.find((a) => (r.post_external_id != null ? a.external_id === r.post_external_id : a.slug === r.post_slug));
+        if (!post) return void problems.push({ index, external_id: id, problem: "no article on this Site with that post_external_id" });
+        if (r.parent_external_id != null && !site.comments.has(String(r.parent_external_id))) {
+          return void problems.push({ index, external_id: id, problem: "parent_external_id is not a comment imported earlier (send parents before their replies)" });
+        }
+        if (site.comments.has(id)) updated += 1;
+        else created += 1;
+        if (!dry) site.comments.set(id, r);
+      });
+      const response = ok({ dry_run: dry, written: { created, updated }, problems });
+      if (!dry) site.replays.set(req.idempotencyKey, response);
       return response;
     }
     if (path === "/redirects/bulk" && req.method === "POST") {
@@ -1462,6 +1493,142 @@ async function main(): Promise<void> {
     site.engagementOff = false;
   }
 
+  // -- 14f-comments. Reader comments (0160) -----------------------------------------------
+  console.log("\n[ 14f-comments. Reader comments travel with the import, parents before replies ]");
+  {
+    currentKey = SECRET_KEY;
+    const { orderComments, checkComments } = await import("../src/import/validate.js");
+    const { nextCommentChunk, COMMENTS_SCOPE_ADVICE } = await import("../src/import/engine.js");
+    const { mergeImportDocuments } = await import("../src/import/jobs.js");
+
+    // Ordering and chunking, on their own: replies listed (and even dated) before their parents.
+    const at = (m: number) => new Date(Date.UTC(2023, 0, 1, 0, m)).toISOString();
+    const rows = [
+      { external_id: "r3", post_external_id: "p", parent_external_id: "r2", author_name: "C", body: "reply to a reply", created_at: at(1) },
+      { external_id: "r2", post_external_id: "p", parent_external_id: "c1", author_name: "B", body: "reply", created_at: at(2) },
+      { external_id: "c2", post_external_id: "p", author_name: "D", body: "later top", created_at: at(9) },
+      { external_id: "c1", post_external_id: "p", author_name: "A", body: "top", created_at: at(5) },
+      { external_id: "r9", post_external_id: "p", parent_external_id: "elsewhere", author_name: "E", body: "parent on the Site", created_at: at(0) },
+      { external_id: "x1", post_external_id: "p", parent_external_id: "x2", author_name: "F", body: "loop", created_at: at(3) },
+      { external_id: "x2", post_external_id: "p", parent_external_id: "x1", author_name: "G", body: "loop", created_at: at(4) },
+    ];
+    const checked = checkComments(rows, Date.UTC(2024, 0, 1));
+    const order = checked.rows.map((r) => r.external_id);
+    check(
+      "comments are ordered parents first: top level by date (a parent outside the document counts as top level), then replies, then replies to replies; a loop is reported",
+      order.join(",") === "r9,c1,c2,r2,r3" && checked.problems.length === 2 && checked.problems.every((p) => p.includes("loop back")),
+      `${order.join(",")} ${JSON.stringify(checked.problems)}`,
+    );
+    const chunks: string[][] = [];
+    for (let from = 0; from < checked.rows.length; ) {
+      const chunk = nextCommentChunk(checked.rows, from, { rows: 2, bytes: 1_000_000 });
+      chunks.push(chunk.map((c) => String(c.external_id)));
+      from += chunk.length;
+    }
+    const chunkOf = (id: string) => chunks.findIndex((c) => c.includes(id));
+    check(
+      "chunked two at a time, no reply lands in an earlier chunk than its parent",
+      chunks.length === 3 && checked.rows.every((r) => !r.parent_external_id || chunkOf(r.parent_external_id) === -1 || chunkOf(r.parent_external_id) <= chunkOf(r.external_id)),
+      JSON.stringify(chunks),
+    );
+    const big = Array.from({ length: 5 }, (_, i) => ({ external_id: `b${i}`, post_external_id: "p", author_name: "A", body: "x".repeat(400), created_at: at(i) }));
+    const bigChunks: number[] = [];
+    for (let from = 0; from < big.length; ) {
+      const n = nextCommentChunk(orderComments(big).rows, from, { rows: 2000, bytes: 1_200 }).length;
+      bigChunks.push(n);
+      from += n;
+    }
+    check("a chunk also stops at its byte budget, and always carries at least one row", bigChunks.join(",") === "2,2,1", bigChunks.join(","));
+    const bad = checkComments([
+      { external_id: "has space", post_external_id: "p", author_name: "A", body: "b", created_at: at(0) },
+      { external_id: "ok1", post_external_id: "p", post_slug: "p", author_name: "A", body: "b", created_at: at(0) },
+      { external_id: "ok2", post_external_id: "p", author_name: " ", body: "b", created_at: at(0) },
+      { external_id: "ok3", post_external_id: "p", author_name: "A", body: "b", status: "trash", created_at: at(0) },
+      { external_id: "ok4", post_external_id: "p", author_name: "A", body: "b", created_at: "1980-01-01T00:00:00Z" },
+    ]);
+    check(
+      "a bad row is reported in the API's own words and skipped",
+      bad.rows.length === 0 && bad.problems[0]!.includes("external_id must be 1 to 255 printable ASCII characters with no spaces") &&
+        bad.problems[1]!.includes("give exactly one of post_external_id or post_slug") && bad.problems[2]!.includes("author_name is required, 1 to 80 characters") &&
+        bad.problems[3]!.includes("status must be approved, pending or spam") && bad.problems[4]!.includes("created_at must be between 1990 and now"),
+      JSON.stringify(bad.problems),
+    );
+    const mergedParts = mergeImportDocuments({ comments: [{ external_id: "a", body: "old" }] }, { comments: [{ external_id: "a", body: "new" }, { external_id: "b", body: "b" }] }) as { comments: Row[] };
+    const sectionText = bodyOf(await handleImportContent(CTX, { section: "comments" }));
+    check("section: comments returns its guide text and its JSON Schema", sectionText.includes("Reader comments (optional, top level)") && sectionText.includes("JSON Schema of the section") && sectionText.includes("parent_external_id"), sectionText.slice(0, 300));
+    check("a document in parts merges comments on external_id", mergedParts.comments.length === 2 && mergedParts.comments[0]!.body === "new");
+
+    // Through import_content: an Import Format document with comments.
+    const doc = {
+      format: "writavo-import",
+      version: 1,
+      articles: [{ external_id: "talk:1", status: "draft", title: "Talk one", slug: "talk-one", content: "x" }],
+      comments: [
+        { external_id: "tc:2", post_external_id: "talk:1", parent_external_id: "tc:1", author_name: "Bo", body: "Agreed.", created_at: "2024-02-01T10:00:00Z" },
+        { external_id: "tc:3", post_slug: "talk-one", parent_external_id: "tc:2", status: "pending", author_name: "Cy", author_email: "cy@readers.example", body: "Me too.", created_at: "2024-02-01T11:00:00Z" },
+        { external_id: "tc:1", post_external_id: "talk:1", author_name: "Ann", body: "First!", created_at: "2024-02-01T09:00:00Z", author_kind: "reader", parent_external_id: null },
+        { external_id: "tc:4", post_external_id: "talk:missing", author_name: "Dee", body: "Lost.", created_at: "2024-02-02T09:00:00Z" },
+        { external_id: "tc:5", post_external_id: "talk:1", body: "No name.", created_at: "2024-02-02T09:00:00Z" },
+      ],
+    };
+    const store = memStore("g:key-comments");
+    stub.reset();
+    const dry = bodyOf(await handleImportContent(CTX, { data: doc }, store));
+    const cmId = /imp_[A-Za-z0-9_-]{22}/.exec(dry)?.[0] ?? "";
+    check(
+      "the dry run summarises the comments, flags the one on no post and the bad row, needs comments:write, and sends nothing",
+      dry.includes("Reader comments: 4 (3 approved, 1 pending, 0 spam) on 3 posts, 2 of them replies") &&
+        dry.includes("1 comment names a post that is neither in this document nor on the Site") && dry.includes("comments[4]: author_name") &&
+        dry.includes("comments:write (the reader comments)") && dry.includes("This connection has all of them") && site.commentCalls.length === 0,
+      dry.slice(dry.indexOf("Reader comments"), dry.indexOf("Reader comments") + 900),
+    );
+    stub.reset();
+    const applied = bodyOf(await handleImportContent(CTX, { import_id: cmId, dry_run: false, background: false }, store));
+    check(
+      "an apply writes the article, then the comments in one call, parents before replies; the one on no post is skipped and reported",
+      applied.includes("Import complete") && applied.includes("Reader comments: delivered. Created 3, updated 0, skipped 2.") &&
+        applied.includes("comment tc:4: no article on this Site") && site.commentCalls.length === 1 && site.commentCalls[0]!.join(",") === "tc:1,tc:4,tc:2,tc:3" &&
+        site.comments.get("tc:3")?.author_email === "cy@readers.example" && !("parent_external_id" in (site.comments.get("tc:1") ?? {})),
+      `${JSON.stringify(site.commentCalls)} ${applied.slice(applied.indexOf("Reader comments"), applied.indexOf("Reader comments") + 500)}`,
+    );
+    const callsBefore = site.commentCalls.length;
+    const again = bodyOf(await handleImportContent(CTX, { import_id: cmId, dry_run: false, background: false }, store));
+    check("running it again sends no comment twice (the section is already delivered)", again.includes("Import complete") && site.commentCalls.length === callsBefore, again.slice(0, 300));
+
+    // Without comments:write: the import completes, the comments are reported with what to do.
+    site.scopes = ALL_SCOPES.filter((s) => s !== "comments:write");
+    const doc2 = {
+      ...doc,
+      articles: [{ external_id: "talk:2", status: "draft", title: "Talk two", slug: "talk-two", content: "y" }],
+      comments: [{ external_id: "tc:20", post_external_id: "talk:2", author_name: "Eve", body: "Hello.", created_at: "2024-03-01T09:00:00Z" }],
+    };
+    const noScopeStore = memStore("g:key-comments-scope");
+    stub.reset();
+    const dry2 = bodyOf(await handleImportContent(CTX, { data: doc2 }, noScopeStore));
+    const id2 = /imp_[A-Za-z0-9_-]{22}/.exec(dry2)?.[0] ?? "";
+    check(
+      "a dry run on a connection without comments:write says it is missing, and exactly how to turn it on (not \"Migrate a blog\")",
+      dry2.includes("MISSING on this connection: comments:write") && dry2.includes(`Reader comments are not part of "Migrate a blog"`) && dry2.includes(COMMENTS_SCOPE_ADVICE),
+      dry2.slice(dry2.indexOf("Permissions"), dry2.indexOf("Permissions") + 1400),
+    );
+    stub.reset();
+    const applied2 = bodyOf(await handleImportContent(CTX, { import_id: id2, dry_run: false, background: false }, noScopeStore));
+    check(
+      "an apply without comments:write does not fail: the article is imported, and the report says what to do",
+      applied2.includes("Import complete") && Boolean(byExternal("talk:2").id) &&
+        applied2.includes("Reader comments: NOT imported, because this connection lacks comments:write (Reader comments, Read and moderate). Turn on Reader comments for this connection in Writavo > Settings > AI agents (for an import started from the dashboard's Import page, the person running it needs the Moderate comments permission), then run the import again; articles already imported are not duplicated.") &&
+        !site.comments.has("tc:20"),
+      applied2.slice(0, 1500),
+    );
+    site.scopes = null;
+    const applied3 = bodyOf(await handleImportContent(CTX, { import_id: id2, dry_run: false, background: false }, noScopeStore));
+    check(
+      "once Reader comments is turned on, running the import again sends the comments and does not duplicate the article",
+      applied3.includes("Reader comments: delivered. Created 1") && site.comments.has("tc:20") && site.articles.filter((a) => a.external_id === "talk:2").length === 1,
+      applied3.slice(0, 1200),
+    );
+  }
+
   // -- 14f-seo. SEO data: keywords, competitors and ranking history -----------------------
   console.log("\n[ 14f-seo. Keywords, competitors and ranking history travel with the import ]");
   {
@@ -1887,7 +2054,7 @@ async function main(): Promise<void> {
     );
     check("a non-ASCII slug becomes an ASCII one, and the old permalink redirects to it", byId("wp:102").slug === "cafe-culture");
     const whole = JSON.stringify(converted);
-    check("no author email, commenter email or post password is carried over", !whole.includes("private.example") && !whole.includes("hunter2"));
+    check("no author email or post password is carried over (the one comment there has no date or status, so it stays out with its email)", !whole.includes("private.example") && !whole.includes("hunter2"));
     const checked = checkDocument(doc);
     check(
       "the converted document passes the importer's own checks with no problems",
@@ -2023,6 +2190,133 @@ async function main(): Promise<void> {
         "a password-protected post comes in as a draft from its raw content, and the page comes across as a page",
         b.status === "draft" && String(b.content).includes("Secret line one.") && arts.some((x) => x.external_id === "wp:2" && x.kind === "page"),
         JSON.stringify(b).slice(0, 300),
+      );
+    }
+
+    // Comments (0160): a WXR post's comments, by status and type, nested, as plain text.
+    {
+      const { commentHtmlToText, stageWxr, convertStaged, assembleStaged, sniffBody } = await import("../src/import/wordpress/index.js");
+      check(
+        "comment HTML becomes plain text: paragraphs as blank lines, <br> as a line, a link's address kept, entities decoded, other tags dropped",
+        commentHtmlToText('<p>See <a href="https://ropes.example/x">this</a> &amp; <strong>that</strong>.</p><p>Line one<br />line two</p><script>x()</script>', false) ===
+          "See this (https://ropes.example/x) & that.\n\nLine one\nline two" &&
+          commentHtmlToText("First para\n\nSecond para\nwith a break, and a bare https://a.example link", true) === "First para\n\nSecond para\nwith a break, and a bare https://a.example link" &&
+          commentHtmlToText('<a href="https://same.example/">https://same.example/</a>', false) === "https://same.example/" &&
+          commentHtmlToText("<p> &nbsp; </p>", false) === "",
+        JSON.stringify(commentHtmlToText('<p>See <a href="https://ropes.example/x">this</a> &amp; <strong>that</strong>.</p><p>Line one<br />line two</p>', false)),
+      );
+      const cwxr = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "fixtures/wordpress/comments.wxr.xml"), "utf8").replace("LONG_BODY", "word ".repeat(4_100));
+      const cconv = convertWxr(cwxr, Date.UTC(2026, 0, 1));
+      const cdoc = "error" in cconv ? null : (cconv.document as { comments?: Row[]; conversion: { lines: string[]; items: Record<string, string[]> } });
+      const cm = (id: string) => cdoc?.comments?.find((c) => c.external_id === `wp:comment:${id}`);
+      check(
+        "WXR comments: approved, pending and spam come across; trash, a pingback, an empty one and one over 20,000 characters are left out",
+        cdoc?.comments?.map((c) => c.external_id).join(",") === "wp:comment:1,wp:comment:2,wp:comment:3,wp:comment:4,wp:comment:7,wp:comment:8" &&
+          cm("1")?.status === "approved" && cm("3")?.status === "pending" && cm("4")?.status === "spam",
+        JSON.stringify(cdoc?.comments?.map((c) => [c.external_id, c.status])),
+      );
+      check(
+        "each comment names its post's external_id exactly as the post has it, and a reply its parent (a reply to a reply too)",
+        cdoc?.comments?.every((c) => c.post_external_id === "wp:11") === true && cm("2")?.parent_external_id === "wp:comment:1" && cm("3")?.parent_external_id === "wp:comment:2" &&
+          cm("1")?.parent_external_id === undefined,
+      );
+      check(
+        "a reply to a comment that is left out (the trash) starts its own thread, and the post's notes say so",
+        cm("7")?.parent_external_id === undefined && (cdoc?.conversion.items["wp:11"] ?? []).some((n) => n.includes("1 reply to a comment that is left out")) &&
+          (cdoc?.conversion.items["wp:11"] ?? []).some((n) => n.includes("wp:comment:10 is longer than 20,000 characters")),
+        JSON.stringify(cdoc?.conversion.items),
+      );
+      check(
+        "body as plain text, author name decoded and cut to 80 characters, email kept for moderators, GMT date (or the local one read as UTC), never staff",
+        cm("1")?.body === "Great guide! See this video (https://ropes.example/bowline) & practise daily.\n\nSecond paragraph\nwith a line break." &&
+          cm("1")?.author_name === "Ann & Bo" && cm("1")?.author_email === "ann@readers.example" && cm("1")?.created_at === "2022-01-11T09:00:00Z" &&
+          cm("3")?.created_at === "2022-01-12T07:30:00Z" && [...String(cm("8")?.author_name)].length <= 80 && String(cm("8")?.author_name).startsWith("Dee Long-Name") &&
+          cm("2")?.author_kind === undefined && cdoc?.comments?.every((c) => !JSON.stringify(c).includes("203.0.113.9")) === true,
+        JSON.stringify([cm("1"), cm("8")?.author_name]),
+      );
+      check(
+        "the report counts the comments and every reason one is left out; comments on an attachment or a binned post are not imported",
+        (cdoc?.conversion.lines ?? []).some((l) =>
+          l.startsWith("Comments: 6 comments to import (4 approved, 1 pending, 1 spam; 2 of them replies)") && l.includes("1 in the trash") && l.includes("1 pingback or trackback") &&
+          l.includes("1 with no text") && l.includes("1 longer than 20,000 characters") && l.includes("1 on posts that are not imported")) &&
+          !cdoc?.comments?.some((c) => c.external_id === "wp:comment:30" || c.external_id === "wp:comment:31"),
+        JSON.stringify(cdoc?.conversion.lines),
+      );
+      const cchecked = checkDocument(cdoc);
+      check(
+        "the converted comments pass the importer's own checks, ordered parents first",
+        cchecked.comments.problems.length === 0 && cchecked.comments.rows.map((c) => c.external_id).join(",") === "wp:comment:1,wp:comment:4,wp:comment:7,wp:comment:8,wp:comment:2,wp:comment:3",
+        JSON.stringify([cchecked.comments.problems, cchecked.comments.rows.map((c) => c.external_id)]),
+      );
+      check("the sample export's comment (no date, no status) stays out, and its meta never reaches the post", !(doc as { comments?: unknown })?.comments && (byId("wp:101").featured_image as Row)?.url?.toString().endsWith("dawn.jpg") === true);
+      // Staged (the hosted way): the same comments as converting in one go.
+      const kv = new Map<string, string>();
+      const mem = { put: async (k: string, v: string) => void kv.set(k, v), get: async (k: string) => kv.get(k) ?? null, remove: async (ks: string[]) => void ks.forEach((k) => kv.delete(k)) };
+      const enc = new TextEncoder().encode(cwxr);
+      const body = await sniffBody(new ReadableStream<Uint8Array>({ start(c) { for (let i = 0; i < enc.length; i += 1000) c.enqueue(enc.slice(i, i + 1000)); c.close(); } }));
+      await stageWxr(body.head, body.rest, mem, 10 * 1024 * 1024, body.bytes);
+      await convertStaged(mem, Date.now() + 60_000, { source: "wordpress-wxr", rawContent: true, now: Date.UTC(2026, 0, 1) });
+      const stagedOut = await assembleStaged(mem, { source: "wordpress-wxr", rawContent: true, now: Date.UTC(2026, 0, 1) });
+      check("a staged export carries the same comments as converting it in one go", JSON.stringify(stagedOut.document.comments) === JSON.stringify(cdoc?.comments));
+    }
+
+    // Comments over the REST API: read site-wide, approved only; a closed endpoint is a note, not a failure.
+    {
+      const { probeSite, pullStep, convertStaged, assembleStaged, stagedOptions, readStageState, setSiteName } = await import("../src/import/wordpress/index.js");
+      const run = async (commentsAnswer: (page: string) => Response) => {
+        const kv = new Map<string, string>();
+        const mem = { put: async (k: string, v: string) => void kv.set(k, v), get: async (k: string) => kv.get(k) ?? null, remove: async (ks: string[]) => void ks.forEach((k) => kv.delete(k)) };
+        const asked: string[] = [];
+        const reply = (body: unknown, pages = 1) => new Response(JSON.stringify(body), { headers: { "content-type": "application/json", "x-wp-totalpages": String(pages) } });
+        const fetcher = async (url: string) => {
+          const u = new URL(url);
+          asked.push(u.pathname + u.search);
+          if (u.pathname === "/wp-json/") return reply({ name: "Talk" });
+          if (u.pathname.endsWith("/categories") || u.pathname.endsWith("/tags") || u.pathname.endsWith("/pages")) return reply([]);
+          if (u.pathname.endsWith("/posts")) {
+            return reply([{ id: 301, type: "post", status: "publish", slug: "knots", link: "https://wp.example.com/knots/", title: { rendered: "Knots" }, content: { rendered: "<p>Body.</p>" }, date_gmt: "2023-02-03T04:05:06", categories: [], tags: [] }]);
+          }
+          if (u.pathname.endsWith("/comments")) return commentsAnswer(u.searchParams.get("page") ?? "1");
+          return new Response("not found", { status: 404 });
+        };
+        const probe = await probeSite({ url: "https://wp.example.com" }, fetcher);
+        if (!probe.ok) throw new Error(probe.error);
+        await setSiteName(mem, probe.state.base, probe.name);
+        let state = probe.state;
+        for (let i = 0; i < 20; i += 1) {
+          const step = await pullStep({ url: "https://wp.example.com" }, state, mem, fetcher, 3);
+          state = step.state;
+          if (step.done) break;
+        }
+        const staged = await readStageState(mem);
+        await convertStaged(mem, Date.now() + 60_000, stagedOptions(staged!));
+        return { out: await assembleStaged(mem, stagedOptions(staged!)), asked };
+      };
+      const restRows = (page: string) =>
+        page === "1"
+          ? [
+              { id: 51, post: 301, parent: 0, author_name: "Ann", date_gmt: "2023-02-04T10:00:00", content: { rendered: "<p>Nice <a href=\"https://x.example\">link</a></p>\n" }, status: "approved", type: "comment" },
+              { id: 52, post: 999, parent: 0, author_name: "Elsewhere", date_gmt: "2023-02-04T10:00:00", content: { rendered: "<p>On a product</p>" }, status: "approved", type: "comment" },
+            ]
+          : [{ id: 53, post: 301, parent: 51, author_name: "Bo", date_gmt: "2023-02-05T10:00:00", content: { rendered: "<p>Agreed</p>" }, status: "approved", type: "comment" }];
+      const okRun = await run((page) => new Response(JSON.stringify(restRows(page)), { headers: { "content-type": "application/json", "x-wp-totalpages": "2" } }));
+      const restComments = (okRun.out.document.comments ?? []) as Row[];
+      check(
+        "a site's comments are read site-wide, page by page, and kept for the posts that are imported (approved, no email)",
+        okRun.asked.filter((a) => a.startsWith("/wp-json/wp/v2/comments?")).length === 2 &&
+          JSON.stringify(restComments.map((c) => [c.external_id, c.post_external_id, c.parent_external_id ?? null, c.status, c.body])) ===
+            JSON.stringify([["wp:comment:51", "wp:301", null, "approved", "Nice link (https://x.example)"], ["wp:comment:53", "wp:301", "wp:comment:51", "approved", "Agreed"]]) &&
+          restComments.every((c) => c.author_email === undefined) &&
+          (okRun.out.document.conversion as { lines: string[] }).lines.some((l) => l.includes("1 on posts that are not imported")) &&
+          (okRun.out.document.conversion as { lines: string[] }).lines.some((l) => l.includes("WordPress shares only approved comments")),
+        JSON.stringify([okRun.asked, restComments]),
+      );
+      const closed = await run(() => new Response("{}", { status: 401, headers: { "content-type": "application/json" } }));
+      check(
+        "a site whose comments endpoint is closed (401) still imports: no comments, and the report says why and what to do",
+        (closed.out.document.articles as Row[]).length === 1 && closed.out.document.comments === undefined &&
+          (closed.out.document.conversion as { lines: string[] }).lines.some((l) => l.includes("Comments were not read: this site's REST API does not share them (WordPress answered 401)") && l.includes("Tools > Export")),
+        JSON.stringify((closed.out.document.conversion as { lines: string[] }).lines),
       );
     }
 

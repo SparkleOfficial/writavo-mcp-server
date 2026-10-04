@@ -47,7 +47,7 @@ export const ERROR_GUIDANCE = {
   VALIDATION_FAILED:
     "Read `error.fields`. It maps each offending field to a message you can show next to the input. The three most common causes are publishing without a title, slug or content; scheduling in the past; and sending `status`, which is read only.",
   RATE_LIMIT_EXCEEDED:
-    "Back off and honour `Retry-After`. Watch `RateLimit-Remaining` on successful responses so you can slow down before you are refused rather than after.",
+    "Back off and honour `Retry-After`. Watch `RateLimit-Remaining` on successful responses so you can slow down before you are refused rather than after. On `POST /comments`, `error.limit` names the comment limit hit: `reader` (that reader, 5 per 10 minutes: tell them to wait), `site` (300 per Site per hour) or `queue` (2,000 waiting for review: moderate the queue).",
   MAINTENANCE:
     "Writes are paused. Reads usually keep working and your published blog is served from cache, so your site stays up. Retry after the window in `Retry-After`.",
   INTERNAL_ERROR:
@@ -66,6 +66,12 @@ export const ERROR_GUIDANCE = {
     "The approval id you sent is expired, already used, for a different request, unknown, or what the request would do has changed since it was approved (\"What this request would do has changed...\"). Approvals are single use and bound to the exact request and its effect. Retry without `Writavo-Approval` to ask for a new one, and tell the person what changed.",
   PREREQUISITE_MISSING:
     "Set up the thing the message names, with the operation it names (for example `PATCH /site/settings` for a primary domain, `POST /seo/competitors` for a competitor, `POST /delivery/proxy` for the reverse proxy), then retry. Nothing was done and nothing was charged. If the missing piece is one only a person can set up (a CMS or Bing connection), give them the link from `POST /delivery/cms` or `POST /seo/backlinks/bing`.",
+  COMMENTS_DISABLED:
+    "The Site has reader comments turned off, so nothing about the key, the slug or the request is wrong. Turn them on with `PATCH /comments/settings` and `{\"enabled\": true}` (needs comments:write, the opt-in Reader comments row for an AI agent), or ask a person to turn them on in Settings > Site > Reader comments, then retry. A site showing comments should hide its comment form while `GET /comments/posts/{slug}` says `enabled: false`.",
+  COMMENTS_CLOSED:
+    "Comments have closed on this article because it was published longer ago than the Site's `close_after_days`. Tell the reader comments are closed (hide the form when `GET /comments/posts/{slug}` says `open: false`). To reopen, raise or clear `close_after_days` with `PATCH /comments/settings`.",
+  PARENT_NOT_FOUND:
+    "The comment in `parent_id` is not an approved comment on this article: it never existed, was deleted, is still waiting for review, or is on another article. Reply to an approved comment from `GET /comments/posts/{slug}`, or send the comment without `parent_id`.",
   FEATURE_UNAVAILABLE:
     "Writavo has this capability switched off right now, and retrying will not help. When the message says \"Spending is paused\", the organisation's plan has no daily spend cap configured, so nothing that spends credits or money can run: report it to the person, who contacts https://writavo.com/support. Otherwise use the free alternative the message names: for backlinks, the Search Console CSV import (`POST /seo/backlinks/import`) or the Bing Webmaster Tools feed (`POST /seo/backlinks/bing`).",
 };
@@ -96,5 +102,11 @@ export const ERROR_LINKS = {
   FORBIDDEN: [{ label: "The team and roles", url: `${DASHBOARD}/team` }],
   PREREQUISITE_MISSING: [{ label: "Settings and administration", url: `${DOCS}/administration` }],
   FEATURE_UNAVAILABLE: [{ label: "Free backlink sources", url: `${DOCS}/administration#seo` }],
+  COMMENTS_DISABLED: [
+    { label: "Turn on reader comments", url: `${DASHBOARD}/settings/site#comments` },
+    { label: "Comments", url: `${DOCS}/comments` },
+  ],
+  COMMENTS_CLOSED: [{ label: "Comment settings", url: `${DASHBOARD}/settings/site#comments` }],
+  PARENT_NOT_FOUND: [{ label: "Comments", url: `${DOCS}/comments` }],
   APPROVAL_PENDING: [{ label: "AI agent settings", url: `${DASHBOARD}/settings/agents` }],
 };
