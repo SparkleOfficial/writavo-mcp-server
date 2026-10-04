@@ -391,8 +391,8 @@ export const SEARCH_WRITAVO_ACTIONS = {
   name: SEARCH,
   description:
     "Find the Writavo operation for anything beyond everyday content: Site settings and the knowledge profile, the organisation, " +
-    "article formats and AI prompts, the pipeline's configuration and content plan, delivery and domains, SEO, outreach, the team " +
-    "and roles, billing, and insights and logs. Returns the best matches, each with its operation_id, a summary, the scope it needs, " +
+    "article formats and AI prompts, the pipeline's configuration and content plan, delivery and domains, SEO, visitor analytics, " +
+    "reader comments, outreach, the team and roles, billing, and insights and logs. Returns the best matches, each with its operation_id, a summary, the scope it needs, " +
     "whether it asks the user first, needs a person's approval or costs money, its input schema, and its runner: read_writavo_action " +
     "for a read, run_writavo_action for a change. A request for something an AI assistant can never do (agent settings, payment " +
     "details, plan changes, deleting the Site, and so on) returns that instead, with the dashboard link to give the person. " +
@@ -468,7 +468,7 @@ export const READ_WRITAVO_ACTION = {
   name: READ,
   description:
     `Read something from the Writavo actions catalog: Site settings, the organisation, formats and prompts, the pipeline's ` +
-    `configuration and content plan, delivery, SEO, outreach, the team, billing, insights and logs. Find the operation first with ` +
+    `configuration and content plan, delivery, SEO, visitor analytics, comments, outreach, the team, billing, insights and logs. Find the operation first with ` +
     `${SEARCH} (its runner is ${READ}), then pass its operation_id and arguments. Read only: it runs GET operations and nothing else, ` +
     `and changes nothing. For anything that changes something, use ${RUN}.`,
   inputSchema: {

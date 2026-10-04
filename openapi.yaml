@@ -2,7 +2,7 @@ openapi: 3.1.0
 
 info:
   title: Writavo Content API
-  version: "1.6.0"
+  version: "1.7.0"
   summary: The CMS control plane for a Writavo Site.
   description: |
     The Writavo Content API is the programmable half of the CMS. It lets you create, edit,
@@ -287,6 +287,44 @@ tags:
       URL would otherwise be a 404, on the hosted site, a custom domain and the reverse proxy.
       Changing a published article's slug, or a category's or tag's, adds one automatically.
       Import a migrated blog's old URLs here, and export the ones your own server has to answer.
+  - name: Analytics
+    x-mcp-surface: action
+    description: |
+      Visitor analytics for the pages that show your articles, wherever they are served: the setup
+      (site id and snippet), turning it on or off, the domains that count, the visitor report, and a
+      check that the script is installed on a page. Cookieless: a visitor is counted once a day from a
+      hash under a salt that changes daily, and no cookie or browser storage id is set. Hosted Writavo
+      blogs carry the script automatically; anywhere else, paste the `snippet` from
+      `GET /analytics/setup` inside `<head>`. Guide: https://writavo.com/docs/analytics.
+
+      The script tag's attributes:
+
+      - `data-site` (required): the Site's public id, `wa_` followed by 24 hex characters.
+      - `data-include` (optional): a regular expression; only pages whose path matches it are counted,
+        for a blog inside a bigger app (`data-include="^/blog(/|$)"`). An invalid pattern is ignored
+        and every page counts.
+      - `data-api` (optional): the full URL to send events to instead of the collector's own
+        `/api/a/e`, for a setup that forwards them itself.
+
+      It counts one pageview on load and on every client-side navigation, and the time the page was
+      visible when the reader leaves. It stays silent on localhost, 127.x, 0.0.0.0 and file: pages, in
+      automated browsers (`navigator.webdriver`, Cypress, PhantomJS, Nightmare), and for a visitor who
+      sets `localStorage.writavo_ignore = "true"` (to exclude your own visits). A Content Security
+      Policy must allow the collector origin in both `script-src` and `connect-src`. The collector
+      answers 202 to every event, accepted or not, so it cannot tell you whether an install works: use
+      `POST /analytics/install-check`, or `install` in `GET /analytics/setup`, which shows the last
+      event that arrived and any hosts that were turned away.
+  - name: Comments
+    x-mcp-surface: action
+    description: |
+      Reader comments on articles. Off until someone turns them on (`PATCH /comments/settings`). The
+      hosted blog shows a comment form by itself; a site that renders its own pages reads
+      `GET /comments/posts/{slug}` (publishable key) and posts readers' comments with
+      `POST /comments` from its own server. Moderators approve, hold, mark as spam, reply and delete,
+      here or in the dashboard. Plain text only, one level of replies, the email address is never
+      shown publicly, and a reader's IP is kept only as a hash under a salt that changes daily, for
+      rate limits. `comments:read` and `comments:write` need the comments.moderate permission,
+      because the moderation queue carries email addresses.
   - name: Outreach
     x-mcp-surface: action
     description: |
@@ -8838,9 +8876,10 @@ paths:
         The response is the article's totals after the write. An unknown or unpublished slug is 404.
         A recorded view, reaction or share shows in the dashboard and in `GET /seo/engagement` at once.
 
-        This records article views. Visitors and pageviews on the dashboard come from the visitor
-        script instead (Visitors, Setup): one script tag on the pages that show your articles.
-        Until it is added, the dashboard shows them as not measured.
+        This records article views. Visitors and pageviews come from the visitor analytics script
+        instead: one script tag on the pages that show your articles. `GET /analytics/setup` returns
+        it ready to paste (guide: https://writavo.com/docs/analytics). Until it is added, visitors
+        are shown as not measured.
       x-scope: engagement:write
       x-permission: articles.write
       x-entitlement: none
@@ -9001,8 +9040,9 @@ paths:
       summary: Read an article's views, reactions and shares
       description: |
         The public counters for one published article: lifetime views, the six reaction totals, share
-        clicks per platform and, with `visitor_id`, that reader's current reaction. Safe for a
-        publishable key: these numbers are shown on the page anyway.
+        clicks per platform, approved comments and, with `visitor_id`, that reader's current reaction.
+        Safe for a publishable key: these numbers are shown on the page anyway. For several articles
+        at once, use `GET /engagement/posts?slugs=`.
       x-scope: articles:read
       x-permission: none
       x-entitlement: none
@@ -9035,6 +9075,725 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/InsufficientScope" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /engagement/posts:
+    get:
+      operationId: listPostsEngagement
+      tags: [SEO]
+      summary: Read views, reactions, shares and comment counts for several articles
+      description: |
+        The public counters of up to 50 published articles in one call, for an index or archive page:
+        the same numbers as `GET /engagement/posts/{slug}` for each. Slugs that are unknown or not
+        published are listed in `missing` rather than failing the request, so one unpublished post
+        never breaks a page. Safe for a publishable key.
+      x-scope: articles:read
+      x-permission: none
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: true
+      x-mcp-surface: action
+      parameters:
+        - name: slugs
+          in: query
+          required: true
+          schema: {type: string, maxLength: 10250}
+          description: |
+            Comma separated slugs, 1 to 50 after duplicates are removed, each up to 200 characters
+            (`slugs=first-post,second-post`). More than 50 is `422` on `slugs`.
+      responses:
+        "200":
+          description: The counters of every published article named, and the slugs that are not.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/PostEngagementBatch" }
+              examples:
+                two_posts:
+                  summary: One published post, one unpublished
+                  value:
+                    ok: true
+                    data:
+                      posts:
+                        - slug: how-to-choose-a-headless-cms
+                          views: 1204
+                          reactions: { useful: 12, mind_blown: 1, insightful: 7, skeptical: 0, loved: 3, hot_take: 0 }
+                          shares: { x: 4, linkedin: 9, facebook: 0, other: 2, total: 15 }
+                          user_reaction: null
+                          comments: 6
+                      missing: [draft-post]
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  # ==========================================================================
+  # ANALYTICS (0159)
+  # ==========================================================================
+  /analytics/setup:
+    get:
+      operationId: getAnalyticsSetup
+      tags: [Analytics]
+      summary: Read the analytics setup and install status
+      description: |
+        Everything needed to install visitor analytics and confirm it works: the Site's public
+        `site_id`, the ready-made `snippet` to paste inside `<head>` on every page that shows your
+        articles, whether collecting is on, the domains whose visits count (`allowed_domains`: the
+        primary domain and its subdomains, verified custom domains, reverse-proxy targets and your
+        `extra_domains`), and `install`: when the last event arrived and from which page, how many
+        arrived in the last 24 hours, and the hosts whose visits were turned away because they are
+        not on the list.
+
+        The snippet always points at the public collector (`collector_origin`,
+        `https://blog.writavo.com` in production), never at a development address. Hosted Writavo
+        blogs carry it automatically. To check a page, use `POST /analytics/install-check`.
+      x-scope: insights:read
+      x-permission: analytics.view
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: false
+      responses:
+        "200":
+          description: The setup.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/AnalyticsSetup" }
+              examples:
+                installed:
+                  summary: Installed and receiving visits
+                  value:
+                    ok: true
+                    data:
+                      site_id: wa_0123456789abcdef01234567
+                      enabled: true
+                      collector_origin: https://blog.writavo.com
+                      script_url: https://blog.writavo.com/api/a/s
+                      snippet: '<script defer src="https://blog.writavo.com/api/a/s" data-site="wa_0123456789abcdef01234567"></script>'
+                      extra_domains: [docs.example.com]
+                      allowed_domains:
+                        - { domain: example.com, source: primary_domain, subdomains: true }
+                        - { domain: docs.example.com, source: extra_domain, subdomains: true }
+                      install:
+                        last_event_at: "2026-10-04T09:12:44.512+00:00"
+                        last_event_host: example.com
+                        last_event_path: /blog/how-to-choose-a-headless-cms
+                        events_24h: 318
+                        rejected_hosts:
+                          - { hostname: staging.example.net, hits: 12, last_seen_at: "2026-10-04T08:55:02+00:00" }
+                      docs_url: https://writavo.com/docs/analytics
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /analytics/settings:
+    patch:
+      operationId: updateAnalyticsSettings
+      tags: [Analytics]
+      summary: Turn analytics on or off, or change the extra domains
+      description: |
+        Send `enabled`, `extra_domains`, or both. `extra_domains` replaces the whole list (up to 20)
+        and each one also counts its subdomains: add every domain the script runs on that is not
+        already the Site's primary domain, a verified custom domain or a reverse-proxy target (an app
+        on another domain, a staging host you want counted). A pasted URL is reduced to its host.
+        While `enabled` is false every visit is dropped. Returns the same shape as
+        `GET /analytics/setup`. Recorded in the audit log.
+      x-scope: site:write
+      x-permission: website.settings
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-agent-consequence: Changes whether the Site counts visits, and from which domains.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AnalyticsSettingsUpdate" }
+            examples:
+              add_domain:
+                summary: Count visits from a second domain too
+                value: { extra_domains: [docs.example.com] }
+      responses:
+        "200":
+          description: The setup after the change.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/AnalyticsSetup" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /analytics/visitors:
+    get:
+      operationId: getVisitorAnalytics
+      tags: [Analytics]
+      summary: Read the visitor report
+      description: |
+        Visitors, pageviews, bounces and engaged time for a range of UTC days, with the previous range
+        of the same length for comparison, one row per day (`daily`, every day of the range, zeros
+        included) and the top 50 values of each breakdown: pages, entry pages, sources, referrers, UTM
+        source, medium and campaign, country, region, city, device, browser and operating system.
+
+        Default range: the last 30 days (`to` today, `from` 29 days before). At most 400 days. Numbers
+        are rolled up from the raw events every 15 minutes, so a visit shows here up to 15 minutes
+        after it happens; `GET /analytics/setup` shows raw arrivals at once. A visitor is counted once
+        per day per Site from a daily-salted hash; no cookies are used.
+      x-scope: insights:read
+      x-permission: analytics.view
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: false
+      parameters:
+        - name: from
+          in: query
+          required: false
+          schema: {type: string, format: date}
+          description: First UTC day, YYYY-MM-DD. Default 29 days before `to`.
+        - name: to
+          in: query
+          required: false
+          schema: {type: string, format: date}
+          description: Last UTC day, YYYY-MM-DD. Default today.
+      responses:
+        "200":
+          description: The report.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/VisitorAnalytics" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /analytics/install-check:
+    post:
+      operationId: checkAnalyticsInstall
+      tags: [Analytics]
+      summary: Check that the analytics script is installed on a page
+      description: |
+        Fetch one page the way a search engine would (server HTML, no JavaScript) and check, in this
+        order: `page_reachable` (it answers 2xx with HTML), `tag_present` (a script whose src ends in
+        `/api/a/s`), `site_id_matches` (its `data-site` is this Site's id, not another Site's),
+        `collector_public` (it loads over https from the public collector, not localhost),
+        `include_matches` (when the tag has `data-include`, the pattern is valid and matches this
+        page's path), `collecting_enabled` (collecting is on, and the host the page ends on counts)
+        and `recent_events` (an event arrived in the last 24 hours). Each check has a sentence saying
+        what to fix.
+
+        `status` is `failed` when the page will not be counted (`page_reachable`, `tag_present`,
+        `site_id_matches` or `collecting_enabled` failed), `warning` when anything else failed, and
+        `ok` otherwise. No events yet is only a warning: the script stays silent on localhost, 127.x
+        and file: pages and in automated browsers, so a fresh install needs one real visit in an
+        ordinary browser. A script added only in the browser after the page loads (a tag manager, a
+        lazy `next/script`) is not in the server HTML, so `tag_present` fails even though visits may
+        still arrive; `recent_events` and `GET /analytics/setup` show whether they do.
+
+        `url` defaults to the Site's first verified custom domain, else its primary domain. Its host
+        must be one this Site counts visits from (`allowed_domains` in `GET /analytics/setup`),
+        otherwise `422` on `url`: add the domain with `PATCH /analytics/settings` first. Free; one page
+        fetch of at most 2 MB, following up to three redirects.
+      x-scope: insights:read
+      x-permission: analytics.view
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AnalyticsInstallCheckInput" }
+            examples:
+              one_page:
+                summary: Check one article page
+                value: { url: "https://example.com/blog/how-to-choose-a-headless-cms" }
+      responses:
+        "200":
+          description: The verdict, with every check.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/AnalyticsInstallCheck" }
+              examples:
+                installed_no_visits:
+                  summary: Installed, waiting for a first real visit
+                  value:
+                    ok: true
+                    data:
+                      url: https://example.com/blog/how-to-choose-a-headless-cms
+                      final_url: https://example.com/blog/how-to-choose-a-headless-cms
+                      status: warning
+                      checks:
+                        - { key: page_reachable, ok: true, message: The page answered HTTP 200 with HTML. }
+                        - { key: tag_present, ok: true, message: Found the analytics script tag in the page's HTML. }
+                        - { key: site_id_matches, ok: true, message: data-site is this Site's id (wa_0123456789abcdef01234567). }
+                        - { key: collector_public, ok: true, message: The script loads from the public collector (https://blog.writavo.com). }
+                        - { key: include_matches, ok: true, message: "no data-include: every page the script runs on is counted." }
+                        - { key: collecting_enabled, ok: true, message: Collecting is on for this Site. }
+                        - { key: recent_events, ok: false, message: No events have arrived in the last 24 hours. Open the page once in an ordinary browser and check again. }
+                      script:
+                        found: true
+                        src: https://blog.writavo.com/api/a/s
+                        site_id: wa_0123456789abcdef01234567
+                        data_include: null
+                        data_api: null
+                      install:
+                        last_event_at: null
+                        last_event_host: null
+                        last_event_path: null
+                        events_24h: 0
+                        rejected_hosts: []
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  # ==========================================================================
+  # COMMENTS (0159)
+  # ==========================================================================
+  /comments/posts/{slug}:
+    get:
+      operationId: getPostComments
+      tags: [Comments]
+      summary: Read an article's approved comments
+      description: |
+        The approved comments on one published article, oldest first, for a site that renders its own
+        pages: `parent_id` is null for a comment and the comment's id for a reply (one level of
+        replies). `enabled` says whether the Site has comments on, `open` whether this article still
+        takes new ones (a Site can close comments some days after publishing), and `require_email`
+        whether a new comment needs an email address. With comments off, `enabled` is false and the
+        list is empty even if comments were approved earlier. Email addresses are never included.
+        Safe for a publishable key. An unknown or unpublished slug is `404`.
+      x-scope: articles:read
+      x-permission: none
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: true
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema: {type: string, maxLength: 200}
+          description: The article's slug.
+      responses:
+        "200":
+          description: The article's comments.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/PostComments" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /comments:
+    get:
+      operationId: listComments
+      tags: [Comments]
+      summary: List comments for moderation
+      description: |
+        Every comment on the Site, newest first, including ones waiting for review (`pending`) and
+        ones marked as spam, with the commenter's email address. Filter by `status` and by article
+        `slug`. `counts` is the whole Site's number of comments in each status, whatever the filter.
+        Spam is deleted automatically 30 days after it was marked.
+      x-scope: comments:read
+      x-permission: comments.moderate
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: false
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - name: limit
+          in: query
+          required: false
+          description: Page size, 1 to 100. Default 50.
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+        - name: status
+          in: query
+          required: false
+          description: Only comments in this status.
+          schema: { type: string, enum: [pending, approved, spam] }
+        - name: slug
+          in: query
+          required: false
+          description: Only comments on the article with this slug.
+          schema: { type: string, maxLength: 200 }
+      responses:
+        "200":
+          description: A page of comments.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/CommentPage" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    post:
+      operationId: submitComment
+      tags: [Comments]
+      summary: Submit a reader's comment
+      description: |
+        For a site that renders its articles itself: post a reader's comment from your own server
+        (never from the browser: this needs a secret key). Send the reader's IP as `reader_ip` so the
+        per-reader limit applies to the reader and not to your server; it is stored only as a hash
+        under a salt that changes daily. Plain text only; one level of replies (a reply to a reply
+        joins the same thread).
+
+        Whether it is published at once depends on the Site's `moderation` setting (`status` in the
+        answer: `approved` or `pending`). The same comment sent twice within a day returns the first
+        one with `duplicate: true` instead of a second copy. Fires the `comment.created` webhook.
+
+        `404` when comments are off on the Site, the slug is not a published article, or `parent_id`
+        is not an approved comment on it; `422` on `slug` when comments have closed on that article;
+        `429` when the reader, or the whole Site, is sending too many.
+      x-scope: engagement:write
+      x-permission: articles.write
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-agent-consequence: Adds a comment to the article in the reader's name; it may appear on the live blog at once.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CommentSubmission" }
+            examples:
+              reader:
+                summary: A reader's comment
+                value:
+                  slug: how-to-choose-a-headless-cms
+                  body: Thanks, the comparison table saved me a week.
+                  author_name: Sam
+                  author_email: sam@example.org
+                  reader_ip: 203.0.113.7
+      responses:
+        "201":
+          description: Received. `status` says whether it is published or waiting for review.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/SubmittedComment" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /comments/settings:
+    get:
+      operationId: getCommentSettings
+      tags: [Comments]
+      summary: Read the comment settings
+      description: |
+        Whether readers can comment (`enabled`, off until someone turns it on), how new comments are
+        moderated, whether an email address is required, and after how many days from publishing an
+        article stops taking comments (`null`: never).
+      x-scope: comments:read
+      x-permission: comments.moderate
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: false
+      responses:
+        "200":
+          description: The settings.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/CommentSettings" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    patch:
+      operationId: updateCommentSettings
+      tags: [Comments]
+      summary: Change the comment settings
+      description: |
+        Send any of the four settings; the rest are left alone. `close_after_days: null` keeps
+        comments open for good. Turning comments off hides every comment on the live blog and in
+        `GET /comments/posts/{slug}` until they are turned on again; nothing is deleted. Recorded in
+        the audit log.
+      x-scope: comments:write
+      x-permission: comments.moderate
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-agent-consequence: Changes whether readers can comment on the live blog and how their comments are moderated.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CommentSettingsUpdate" }
+            examples:
+              turn_on:
+                summary: Turn comments on, holding any comment with a link
+                value: { enabled: true, moderation: hold_links }
+      responses:
+        "200":
+          description: The settings after the change.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/CommentSettings" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /comments/erase:
+    post:
+      operationId: eraseCommenter
+      tags: [Comments]
+      summary: Erase everything one commenter wrote
+      description: |
+        Delete every comment on this Site written under one email address, with the replies to them,
+        for a reader's erasure request (GDPR). The address is matched without regard to case. Returns
+        how many comments were deleted; the audit log records the count, never the address. Cannot be
+        undone.
+      x-scope: comments:write
+      x-permission: comments.moderate
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-agent-consequence: Permanently deletes every comment this person wrote on the Site, and the replies to them.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CommentEraseInput" }
+      responses:
+        "200":
+          description: How many comments were deleted.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/CommentEraseResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /comments/{id}:
+    parameters:
+      - $ref: "#/components/parameters/CommentId"
+    get:
+      operationId: getComment
+      tags: [Comments]
+      summary: Read one comment
+      x-scope: comments:read
+      x-permission: comments.moderate
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: false
+      x-cross-tenant: 404
+      responses:
+        "200":
+          description: The comment.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Comment" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    patch:
+      operationId: updateComment
+      tags: [Comments]
+      summary: Approve a comment, hold it or mark it as spam
+      description: |
+        Set `status` to `approved` (shown on the blog), `pending` (hidden, waiting for review) or
+        `spam` (hidden, deleted after 30 days). Recorded in the audit log.
+      x-scope: comments:write
+      x-permission: comments.moderate
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-cross-tenant: 404
+      x-agent-consequence: Shows the comment on the live blog, or hides it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CommentUpdate" }
+      responses:
+        "200":
+          description: The comment after the change.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Comment" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    delete:
+      operationId: deleteComment
+      tags: [Comments]
+      summary: Delete a comment
+      description: Deletes the comment and every reply to it. Recorded in the audit log.
+      x-scope: comments:write
+      x-permission: comments.moderate
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-cross-tenant: 404
+      x-agent-consequence: Permanently deletes the comment and its replies from the live blog.
+      responses:
+        "204":
+          description: Deleted. No body.
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /comments/{id}/replies:
+    parameters:
+      - $ref: "#/components/parameters/CommentId"
+    post:
+      operationId: replyToComment
+      tags: [Comments]
+      summary: Reply to a comment as the Site's team
+      description: |
+        Publish a reply at once, shown with a team badge (`author_kind: staff`). Replying to a comment
+        that is waiting for review approves it, as in WordPress. A reply to a reply joins the same
+        thread. `author_name` defaults to the key creator's name, else the Site's name.
+      x-scope: comments:write
+      x-permission: comments.moderate
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      x-cross-tenant: 404
+      x-agent-consequence: Publishes a reply on the live blog under the team's name, and approves the comment it answers.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CommentReplyInput" }
+      responses:
+        "201":
+          description: The reply.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/SuccessEnvelope" }
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Comment" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "503": { $ref: "#/components/responses/Maintenance" }
         "500": { $ref: "#/components/responses/InternalError" }
@@ -12951,6 +13710,113 @@ paths:
         "503": { $ref: "#/components/responses/Maintenance" }
         "500": { $ref: "#/components/responses/InternalError" }
 
+  /auth/key/sites:
+    get:
+      operationId: listConnectionSites
+      tags: [API keys]
+      summary: "Internal: the Sites an AI connection reaches"
+      description: |
+        **Internal. Only the Writavo MCP service can call this; anyone else gets `403`.** A hosted
+        MCP connection can reach several Sites: the one it was approved on (its default) and the
+        ones the person added on the consent screen or in Settings > AI agents, or every Site in
+        the organisation when they chose that. A key still belongs to one Site, so the connection
+        is a group of keys, one per Site. This lists the Sites of the connection the calling key
+        is the sign-in of, and the state of each: `default`, `connected` (its key exists), `ready`
+        (its key is registered on first use), `no_permission` or `agents_off`.
+
+        The calling key must be the key a hosted sign-in minted. Which Sites a connection reaches
+        is decided by a person in the dashboard, never through the API.
+      x-scope: none
+      x-permission: none
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: read
+      x-publishable: false
+      responses:
+        "200":
+          description: The connection's Sites.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [sites]
+                        properties:
+                          sites:
+                            type: array
+                            items:
+                              type: object
+                              required: [id, name, state]
+                              properties:
+                                id: { type: string, format: uuid }
+                                name: { type: string }
+                                primary_domain: { type: [string, "null"] }
+                                state:
+                                  type: string
+                                  enum: [default, connected, ready, no_permission, agents_off]
+                                key_prefix: { type: [string, "null"] }
+                                key_generation: { type: integer, minimum: 0 }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    post:
+      operationId: mintConnectionSiteKey
+      tags: [API keys]
+      summary: "Internal: register an AI connection's key for one of its Sites"
+      description: |
+        **Internal. Only the Writavo MCP service can call this; anyone else gets `403`.** Registers
+        the key a hosted MCP connection uses on one of its further Sites, the first time an
+        assistant works there. As with sign-in, the secret never travels: the service sends its
+        SHA-256 hash and display prefix. The key gets the connection's permissions, limited to
+        what the person who approved the connection may grant on that Site.
+
+        This cannot widen a connection. The Site must already be one the person put in it (`ready`
+        in `GET /auth/key/sites`); any other Site is `404`. Sending the same hash again answers
+        `200` with the existing key.
+      x-scope: none
+      x-permission: none
+      x-entitlement: none
+      x-spends-credits: false
+      x-rate-limit-class: write
+      x-publishable: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [website_id, key_hash, key_prefix]
+              properties:
+                website_id: { type: string, format: uuid }
+                key_hash: { type: string, pattern: "^[0-9a-f]{64}$" }
+                key_prefix: { type: string, pattern: "^wv_sk_[A-Za-z0-9_-]{6}$" }
+      responses:
+        "200":
+          description: The Site already had this key.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConnectionSiteKeyResponse" }
+        "201":
+          description: The key was registered.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConnectionSiteKeyResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
   /auth/key/revoke-oauth:
     post:
       operationId: revokeOauthKey
@@ -13218,6 +14084,11 @@ components:
       in: path
       required: true
       schema: {type: string, format: uuid}
+    CommentId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
     LinkExchangeId:
       name: id
       in: path
@@ -13268,6 +14139,21 @@ components:
 
   schemas:
     # ---- envelopes -------------------------------------------------------
+    ConnectionSiteKeyResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [key_id, key_prefix, created]
+              properties:
+                key_id: { type: string, format: uuid }
+                key_prefix: { type: string }
+                created:
+                  type: boolean
+                  description: False when the Site already had this key.
+
     SuccessEnvelope:
       type: object
       required: [ok, data]
@@ -13551,7 +14437,7 @@ components:
 
     PostEngagement:
       type: object
-      required: [slug, views, reactions, shares, user_reaction]
+      required: [slug, views, reactions, shares, user_reaction, comments]
       properties:
         slug: {type: string}
         views: {type: integer, description: Lifetime views.}
@@ -13576,6 +14462,370 @@ components:
         user_reaction:
           type: [string, "null"]
           description: The reader's current reaction when visitor_id was sent, else null.
+        comments:
+          type: integer
+          description: Approved reader comments on the article; 0 while the Site has comments off.
+
+    PostEngagementBatch:
+      type: object
+      required: [posts, missing]
+      properties:
+        posts:
+          type: array
+          description: One entry per published article named, ordered by slug.
+          items: { $ref: "#/components/schemas/PostEngagement" }
+        missing:
+          type: array
+          description: The slugs that are not a published article on this Site.
+          items: { type: string }
+
+    # ---- analytics (0159) ------------------------------------------------
+    AnalyticsInstallStatus:
+      type: object
+      description: |
+        What the collector has received. Raw arrivals, available at once (the visitor report is rolled
+        up every 15 minutes).
+      required: [last_event_at, last_event_host, last_event_path, events_24h, rejected_hosts]
+      properties:
+        last_event_at: { type: [string, "null"], format: date-time, description: The newest event in the last 90 days. }
+        last_event_host: { type: [string, "null"], description: The host of the page that sent it. }
+        last_event_path: { type: [string, "null"], description: The path of the page that sent it. }
+        events_24h: { type: integer, description: Pageviews and engagement events counted in the last 24 hours. }
+        rejected_hosts:
+          type: array
+          description: |
+            Hosts whose pageviews carried this Site's id but were dropped because the host is not on
+            the Site's domain list, today and yesterday (UTC), newest first, at most 20. Add the ones
+            that are yours with `PATCH /analytics/settings` (`extra_domains`).
+          items:
+            type: object
+            required: [hostname, hits, last_seen_at]
+            properties:
+              hostname: { type: string }
+              hits: { type: integer }
+              last_seen_at: { type: string, format: date-time }
+
+    AnalyticsSetup:
+      type: object
+      required: [site_id, enabled, collector_origin, script_url, snippet, extra_domains, allowed_domains, install, docs_url]
+      properties:
+        site_id:
+          type: string
+          pattern: "^wa_[0-9a-f]{24}$"
+          description: The Site's public analytics id, the script's `data-site`. Public by design; it is in every page.
+        enabled: { type: boolean, description: Whether visits are being counted. }
+        collector_origin:
+          type: string
+          description: Where the script and the collector live. Always a public https origin, `https://blog.writavo.com` in production.
+        script_url: { type: string, description: "`collector_origin` + `/api/a/s`." }
+        snippet: { type: string, description: The tag to paste inside `<head>` on every page that shows your articles. }
+        extra_domains:
+          type: array
+          items: { type: string }
+          description: Domains you added; each also counts its subdomains.
+        allowed_domains:
+          type: array
+          description: Every domain whose visits count, and why.
+          items:
+            type: object
+            required: [domain, source, subdomains]
+            properties:
+              domain: { type: string }
+              source:
+                type: string
+                enum: [primary_domain, custom_hostname, proxy, extra_domain]
+              subdomains: { type: boolean, description: Whether its subdomains count too. }
+        install: { $ref: "#/components/schemas/AnalyticsInstallStatus" }
+        docs_url: { type: string, description: The installation guide. }
+
+    AnalyticsSettingsUpdate:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        enabled: { type: boolean, description: Count visits (true) or drop them all (false). }
+        extra_domains:
+          type: array
+          maxItems: 20
+          items: { type: string, maxLength: 253 }
+          description: |
+            Replaces the whole list. Bare domains (`docs.example.com`); a pasted URL is reduced to its
+            host. Each counts its subdomains too. `[]` clears the list.
+
+    VisitorTotals:
+      type: object
+      required: [visitors, pageviews, bounces, engaged_ms, engaged_samples, avg_engaged_seconds]
+      properties:
+        visitors: { type: integer, description: Unique visitors per day, summed over the range. }
+        pageviews: { type: integer }
+        bounces: { type: integer, description: Visits of a single page. }
+        engaged_ms: { type: integer, description: Total time the pages were visible, in milliseconds. }
+        engaged_samples: { type: integer, description: How many engagement measurements `engaged_ms` sums. }
+        avg_engaged_seconds: { type: integer, description: "`engaged_ms / engaged_samples / 1000`, rounded; 0 with no samples." }
+
+    VisitorMetrics:
+      type: object
+      required: [visitors, pageviews, bounces, engaged_ms, engaged_samples]
+      properties:
+        visitors: { type: integer }
+        pageviews: { type: integer }
+        bounces: { type: integer }
+        engaged_ms: { type: integer }
+        engaged_samples: { type: integer }
+
+    VisitorBreakdownRow:
+      allOf:
+        - type: object
+          required: [value]
+          properties:
+            value: { type: string, description: "The page path, source, country code, device and so on." }
+        - { $ref: "#/components/schemas/VisitorMetrics" }
+
+    VisitorAnalytics:
+      type: object
+      required: [from, to, totals, previous, daily, breakdowns]
+      properties:
+        from: { type: string, format: date }
+        to: { type: string, format: date }
+        totals: { $ref: "#/components/schemas/VisitorTotals" }
+        previous:
+          allOf:
+            - { $ref: "#/components/schemas/VisitorTotals" }
+          description: The same numbers for the range of the same length just before `from`.
+        daily:
+          type: array
+          description: Every UTC day of the range, oldest first, zeros included.
+          items:
+            allOf:
+              - type: object
+                required: [day]
+                properties:
+                  day: { type: string, format: date }
+              - { $ref: "#/components/schemas/VisitorMetrics" }
+        breakdowns:
+          type: object
+          description: The top 50 values of each dimension over the range, most visitors first. Every key is present.
+          required: [page, entry_page, source, referrer, utm_source, utm_medium, utm_campaign, country, region, city, device, browser, os]
+          properties:
+            page: { type: array, items: { $ref: "#/components/schemas/VisitorBreakdownRow" } }
+            entry_page: { type: array, items: { $ref: "#/components/schemas/VisitorBreakdownRow" } }
+            source: { type: array, items: { $ref: "#/components/schemas/VisitorBreakdownRow" } }
+            referrer: { type: array, items: { $ref: "#/components/schemas/VisitorBreakdownRow" } }
+            utm_source: { type: array, items: { $ref: "#/components/schemas/VisitorBreakdownRow" } }
+            utm_medium: { type: array, items: { $ref: "#/components/schemas/VisitorBreakdownRow" } }
+            utm_campaign: { type: array, items: { $ref: "#/components/schemas/VisitorBreakdownRow" } }
+            country: { type: array, items: { $ref: "#/components/schemas/VisitorBreakdownRow" } }
+            region: { type: array, items: { $ref: "#/components/schemas/VisitorBreakdownRow" } }
+            city: { type: array, items: { $ref: "#/components/schemas/VisitorBreakdownRow" } }
+            device: { type: array, items: { $ref: "#/components/schemas/VisitorBreakdownRow" } }
+            browser: { type: array, items: { $ref: "#/components/schemas/VisitorBreakdownRow" } }
+            os: { type: array, items: { $ref: "#/components/schemas/VisitorBreakdownRow" } }
+
+    AnalyticsInstallCheckInput:
+      type: object
+      additionalProperties: false
+      properties:
+        url:
+          type: [string, "null"]
+          maxLength: 2000
+          description: |
+            The http(s) address of a page that should carry the script. Its host must be one this Site
+            counts visits from. Omitted: the Site's first verified custom domain, else its primary domain.
+
+    AnalyticsInstallCheck:
+      type: object
+      required: [url, final_url, status, checks, script, install]
+      properties:
+        url: { type: string, description: The page that was checked. }
+        final_url: { type: [string, "null"], description: Where it ended after redirects; null when it could not be fetched. }
+        status:
+          type: string
+          enum: [ok, warning, failed]
+          description: "`failed`: this page will not be counted. `warning`: it will, but something needs a look."
+        checks:
+          type: array
+          description: Always the seven checks, in this order.
+          items:
+            type: object
+            required: [key, ok, message]
+            properties:
+              key:
+                type: string
+                enum: [page_reachable, tag_present, site_id_matches, collector_public, include_matches, collecting_enabled, recent_events]
+              ok: { type: boolean }
+              message: { type: string, description: What was found, and what to fix when it is not ok. }
+        script:
+          description: The analytics tag found in the page (the one with this Site's id when there are several), or null.
+          oneOf:
+            - type: "null"
+            - type: object
+              required: [found, src, site_id, data_include, data_api]
+              properties:
+                found: { type: boolean, const: true }
+                src: { type: string }
+                site_id: { type: [string, "null"], description: Its `data-site`. }
+                data_include: { type: [string, "null"] }
+                data_api: { type: [string, "null"] }
+        install: { $ref: "#/components/schemas/AnalyticsInstallStatus" }
+
+    # ---- comments (0159) -------------------------------------------------
+    PublicComment:
+      type: object
+      description: A comment as readers see it. Never carries the email address.
+      required: [id, parent_id, author_name, author_kind, body, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        parent_id: { type: [string, "null"], format: uuid, description: The comment this replies to; null for a top-level comment. }
+        author_name: { type: string, maxLength: 80 }
+        author_kind:
+          type: string
+          enum: [reader, staff]
+          description: "`staff`: a reply from the Site's team, shown with a badge."
+        body: { type: string, maxLength: 5000, description: Plain text. Render it as text, never as HTML. }
+        created_at: { type: string, format: date-time }
+
+    Comment:
+      allOf:
+        - { $ref: "#/components/schemas/PublicComment" }
+        - type: object
+          required: [status, author_email, source, article_id, article_slug, updated_at, approved_at]
+          properties:
+            status: { type: string, enum: [pending, approved, spam] }
+            author_email: { type: [string, "null"], description: Never shown publicly. }
+            source:
+              type: string
+              enum: [hosted, api, dashboard]
+              description: "Where it came from: the hosted blog, `POST /comments`, or the dashboard."
+            article_id: { type: string, format: uuid }
+            article_slug: { type: [string, "null"] }
+            updated_at: { type: string, format: date-time }
+            approved_at: { type: [string, "null"], format: date-time }
+
+    CommentPage:
+      allOf:
+        - { $ref: "#/components/schemas/Page" }
+        - type: object
+          required: [counts]
+          properties:
+            items:
+              type: array
+              items: { $ref: "#/components/schemas/Comment" }
+            counts:
+              type: object
+              description: The whole Site's comments in each status, whatever the filter.
+              required: [pending, approved, spam]
+              properties:
+                pending: { type: integer }
+                approved: { type: integer }
+                spam: { type: integer }
+
+    PostComments:
+      type: object
+      required: [slug, enabled, open, require_email, count, comments]
+      properties:
+        slug: { type: string }
+        enabled: { type: boolean, description: Whether the Site has comments on. }
+        open: { type: boolean, description: Whether this article takes new comments now. }
+        require_email: { type: boolean, description: Whether a new comment needs `author_email`. }
+        count: { type: integer, description: Approved comments on the article. }
+        comments:
+          type: array
+          description: Approved comments, oldest first, at most 1,000. A reply whose parent is not approved is left out.
+          items: { $ref: "#/components/schemas/PublicComment" }
+
+    CommentSubmission:
+      type: object
+      additionalProperties: false
+      required: [slug, body, author_name]
+      properties:
+        slug: { type: string, minLength: 1, maxLength: 200, description: The published article's slug. }
+        body: { type: string, minLength: 1, maxLength: 5000, description: Plain text. Line breaks are kept. }
+        author_name: { type: string, minLength: 1, maxLength: 80 }
+        author_email:
+          type: [string, "null"]
+          maxLength: 254
+          description: Required when the Site's `require_email` is on. Never shown publicly.
+        parent_id:
+          type: [string, "null"]
+          format: uuid
+          description: Reply to this approved comment.
+        reader_ip:
+          type: [string, "null"]
+          maxLength: 45
+          description: |
+            The reader's IPv4 or IPv6 address as your server saw it. Used only, hashed under a daily
+            salt, for the per-reader limit (5 comments in 10 minutes) and duplicate detection.
+
+    SubmittedComment:
+      allOf:
+        - { $ref: "#/components/schemas/PublicComment" }
+        - type: object
+          required: [status, duplicate]
+          properties:
+            status:
+              type: string
+              enum: [pending, approved]
+              description: "`approved`: shown now. `pending`: waiting for review."
+            duplicate: { type: boolean, description: True when this is the same comment sent again; nothing new was stored. }
+
+    CommentUpdate:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status: { type: string, enum: [pending, approved, spam] }
+
+    CommentReplyInput:
+      type: object
+      additionalProperties: false
+      required: [body]
+      properties:
+        body: { type: string, minLength: 1, maxLength: 5000 }
+        author_name:
+          type: [string, "null"]
+          maxLength: 80
+          description: Defaults to the key creator's name, else the Site's name.
+
+    CommentSettings:
+      type: object
+      required: [enabled, moderation, require_email, close_after_days]
+      properties:
+        enabled: { type: boolean, description: Readers can comment. Off by default. }
+        moderation:
+          type: string
+          enum: [hold_all, hold_links, approve_all]
+          description: |
+            `hold_all`: every reader comment waits for review (the default). `hold_links`: only comments
+            carrying a link wait. `approve_all`: published at once.
+        require_email: { type: boolean }
+        close_after_days:
+          type: [integer, "null"]
+          minimum: 1
+          maximum: 3650
+          description: Articles published longer ago than this take no new comments. Null keeps them open.
+
+    CommentSettingsUpdate:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        enabled: { type: boolean }
+        moderation: { type: string, enum: [hold_all, hold_links, approve_all] }
+        require_email: { type: boolean }
+        close_after_days: { type: [integer, "null"], minimum: 1, maximum: 3650 }
+
+    CommentEraseInput:
+      type: object
+      additionalProperties: false
+      required: [author_email]
+      properties:
+        author_email: { type: string, maxLength: 254, description: The commenter's email address. }
+
+    CommentEraseResult:
+      type: object
+      required: [deleted]
+      properties:
+        deleted: { type: integer, description: How many comments written under the address were deleted. Replies to them go too and are not counted. }
 
     EngagementImportInput:
       type: object
@@ -13894,7 +15144,10 @@ components:
 
         An AI agent's key (from a device or OAuth sign-in) can carry every scope except
         `keys:read`, `keys:write`, `webhooks:read` and `webhooks:write`: credentials and event
-        delivery stay with people. `plan:write` and `prompts:write` let a key change what the AI
+        delivery stay with people. `comments:read` and `comments:write` need the comments.moderate
+        permission, because the moderation queue carries commenters' email addresses; a Site's
+        approved comments are read with `articles:read`, and a reader's comment is posted with
+        `engagement:write`. `plan:write` and `prompts:write` let a key change what the AI
         writes; `pipeline:config`, `seo:write`, `delivery:write` and `billing:write` include
         operations that spend money; `team:write` and `roles:write` change who can do what.
       enum:
@@ -13936,6 +15189,8 @@ components:
         - entries:read
         - entries:write
         - content_types:write
+        - comments:read
+        - comments:write
 
     WebhookEvent:
       type: string
@@ -13976,6 +15231,7 @@ components:
         - entry.deleted
         - entry.published
         - entry.unpublished
+        - comment.created
 
     WebhookPayload:
       type: object

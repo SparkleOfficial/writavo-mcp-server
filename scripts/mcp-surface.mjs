@@ -260,13 +260,13 @@ export const LOCAL_TOOLS = [
   {
     name: "search_writavo_actions",
     scope: "none",
-    summary: "Find the operation for a settings, delivery, SEO, team, billing or insights task, with its input schema and whether it needs approval or costs money.",
+    summary: "Find the operation for a settings, delivery, SEO, analytics, comments, team, billing or insights task, with its input schema and whether it needs approval or costs money.",
     confirm: false,
   },
   {
     name: "read_writavo_action",
     scope: "per action",
-    summary: "Run one READ operation found with search_writavo_actions (settings, SEO, team, billing, insights). Changes nothing.",
+    summary: "Run one READ operation found with search_writavo_actions (settings, SEO, analytics, comments, team, billing, insights). Changes nothing.",
     confirm: false,
   },
   {
@@ -426,8 +426,10 @@ export const SCOPE_SCREEN = {
   "org:write": 'Team and organisation, Read and write (only if you may edit the organisation)',
   "billing:read": 'Billing, Read',
   "billing:write": 'Billing, Read and write (spends money)',
-  "insights:read": 'Reports and logs, Read',
+  "insights:read": 'Reports and logs, Read (includes visitor analytics and the install check)',
   "logs:read": 'Reports and logs, Read',
+  "comments:read": 'Reader comments, Read (off unless you choose it; the queue carries commenters\' email addresses, and needs your own comments.moderate permission)',
+  "comments:write": 'Reader comments, Read and moderate (off unless you choose it; needs your own comments.moderate permission)',
   "meta:read": 'always included: the Site name and settings',
   "keys:read": 'not available to an AI agent: a person creates API keys in Settings > API keys',
   "keys:write": 'not available to an AI agent: a person creates API keys in Settings > API keys',
@@ -822,7 +824,7 @@ export function buildMcpSurface(spec) {
       "## Actions (search_writavo_actions, then run_writavo_action)",
       "",
       actions.length > 0
-        ? "Settings, delivery, SEO, the team, billing and insights are not separate tools. Find the operation with search_writavo_actions (a few words, optionally an area), then call read_writavo_action (for a GET, which changes nothing) or run_writavo_action (for everything else) with its operation_id and arguments. Confirmation and approval work exactly as they do for every other tool."
+        ? "Settings, delivery, SEO, visitor analytics, comments, the team, billing and insights are not separate tools. Find the operation with search_writavo_actions (a few words, optionally an area), then call read_writavo_action (for a GET, which changes nothing) or run_writavo_action (for everything else) with its operation_id and arguments. Confirmation and approval work exactly as they do for every other tool."
         : "This version of the specification has no actions yet.",
       "",
       ...actions.map((a) => {

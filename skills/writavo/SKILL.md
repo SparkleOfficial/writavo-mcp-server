@@ -136,6 +136,25 @@ partner's page.
   paid link should be `sponsored` or `nofollow` under Google's rules; say so, and let the person
   decide.
 
+## Visitor analytics and reader comments
+
+Both are part of the CMS, free on every plan, and reached through `search_writavo_actions`
+("analytics setup", "comment settings").
+
+- **Add analytics to a site the person renders themselves.** Read `GET /analytics/setup` and paste
+  its `snippet` unchanged into the server-rendered `<head>` (the `src` is always
+  `https://blog.writavo.com/api/a/s`, never a local address). Make sure the page's domain is in
+  `allowed_domains` (else add it to `extra_domains` with `PATCH /analytics/settings`, sending
+  the whole list). Deploy, run `POST /analytics/install-check` with a live page's `url`, then ask
+  the person to open the page once in an ordinary browser and confirm `install.last_event_at`.
+  Blogs Writavo hosts already carry the tag.
+- **Do not trust a 202 from the collector:** it answers 202 to everything. The script is silent on
+  localhost and in automated browsers (yours included) and when `localStorage.writavo_ignore` is
+  `"true"`, so your own test visit never counts. Checklist: https://writavo.com/docs/analytics.md
+- **Comments are off until a person turns them on** (`PATCH /comments/settings`): it changes the
+  live blog, so ask first. Moderate only on instruction, never repeat a commenter's email address in
+  public, and remember a delete cannot be undone. Guide: https://writavo.com/docs/comments.md
+
 ## The AI pipeline: costs money
 
 `trigger_pipeline_run` (`POST /pipeline/runs`) spends credits, as do turning the pipeline up,
@@ -175,4 +194,6 @@ Every code and its fix: https://writavo.com/docs/errors
 - https://writavo.com/openapi.json: every operation, typed
 - https://writavo.com/docs/mcp.md: setting up the MCP server in any client, and troubleshooting
 - https://writavo.com/docs/migrate.md: moving an existing blog in
+- https://writavo.com/docs/analytics.md: installing and verifying visitor analytics
+- https://writavo.com/docs/comments.md: reader comments and moderation
 - https://writavo.com/mcp/docs: documentation over MCP (Streamable HTTP, no key)
